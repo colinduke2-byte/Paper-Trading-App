@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from ..core.models import BUY, Fill, from_plain, to_plain
 from ..core.money import ZERO, D, cents
+from ..options.symbology import describe
 from .ledger import CAPITAL, CASH, FEES, REALIZED, Ledger, position_account
 
 
@@ -93,7 +94,7 @@ class Account:
         pos = position_account(fill.symbol)
         postings = [(CASH, -sign * notional - fill.fee), (FEES, fill.fee),
                     (pos, sign * open_notional), (pos, sign * closed_cost), (REALIZED, -pnl)]
-        memo = f"{fill.kind}: {fill.side} {fill.qty} {fill.symbol} @ {fill.price}"
+        memo = f"{fill.kind.capitalize()}: {fill.side} {fill.qty.normalize():f} {describe(fill.symbol)} at {fill.price.normalize():f}"
         self.ledger.post(fill.ts, fill.kind, memo, postings, ref=fill.id)
         self.fills.append(fill)
         return pnl

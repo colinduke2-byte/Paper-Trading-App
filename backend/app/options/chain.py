@@ -75,7 +75,7 @@ def surface_vol(base_vol: float, S: float, K: float, T: float) -> float:
     """Base volatility with a skew (puts richer) and a smile that flattens with time."""
     m = math.log(K / S)
     term = 1 + 0.15 * math.exp(-T * 8)
-    v = base_vol * term * (1 - 0.35 * m + 1.2 * m * m / max(math.sqrt(T * 4), 0.25))
+    v = base_vol * term * (1 - 0.35 * m + 0.6 * m * m / max(math.sqrt(T * 4), 0.35))
     return min(max(v, 0.05), 3.0)
 
 

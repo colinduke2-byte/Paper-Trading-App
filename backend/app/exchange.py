@@ -610,15 +610,24 @@ class Exchange:
                 "accounts": [a.to_plain() for a in self.accounts.values()],
                 "orders": [to_plain(o) for o in self.engine.orders.values()],
                 "watchlists": self.watchlists, "alerts": self.alerts,
-                "seq": {"order": next(self._order_seq), "account": next(self._acct_seq),
-                        "alert": next(self._alert_seq), "fill": next(self.engine._fill_seq),
-                        "expiry": next(self._expiry_seq)}})
+                "seq": self._peek_sequences()})
         now = self.now()
         if force or now - self._last_market_save >= 60:
             self._last_market_save = now
             snap = self.feed.snapshot()
             if snap:
                 self._write(self._path("market.json"), snap)
+
+    def _peek_sequences(self) -> dict:
+        """Read the next id of each counter without using it up."""
+        out = {}
+        for key, owner, attr in (("order", self, "_order_seq"), ("account", self, "_acct_seq"),
+                                 ("alert", self, "_alert_seq"), ("fill", self.engine, "_fill_seq"),
+                                 ("expiry", self, "_expiry_seq")):
+            n = next(getattr(owner, attr))
+            setattr(owner, attr, count(n))
+            out[key] = n
+        return out
 
     def load(self) -> bool:
         if not self.data_dir:
