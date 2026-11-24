@@ -235,3 +235,4 @@ owner's go.
 - Several cloud sessions had `git commit` refused by the automatic permission check at first and it
   worked on a later attempt (alerts, simulated research, discovery). If a session reports being
   blocked on commit, it is that; it has resolved itself each time so far.
+- PR 16 (simulated research, with earnings alerts through the notification centre) MERGED to main; bundled UI rebuilt. All 8 checks were green on the combination with alerts.
