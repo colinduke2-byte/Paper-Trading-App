@@ -19,6 +19,7 @@ from ..marketdata.feed import TIMEFRAMES
 from ..marketdata.synthetic import SyntheticFeed
 from ..options import chain as optchain
 from ..options.symbology import describe, parse as parse_option
+from . import ui_build
 
 
 def plain(obj: Any) -> Any:
@@ -121,6 +122,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     clients: dict[WebSocket, dict] = {}
     ctx = AppContext(ex or default_exchange(), clients)
     del ex  # every route looks the active exchange up through ctx.ex
+    dist = os.environ.get("PAPERDESK_UI", os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "dist"))
+    ui_stale = os.path.isdir(dist) and ui_build.check(dist)  # silent without the sources (ZIP, Docker)
 
     def status() -> dict:
         ex = ctx.ex
@@ -129,7 +132,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
                 "paper": True, **plain(ex.feed.status_info()),
-                "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None, "ui_stale": ui_stale}
 
     async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()
@@ -499,7 +502,6 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         importlib.import_module(f"app.api.{mod}").register(app, ctx)
 
     # ---- static UI -----------------------------------------------------------------
-    dist = os.environ.get("PAPERDESK_UI", os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "dist"))
     if os.path.isdir(dist):
         app.mount("/assets", StaticFiles(directory=os.path.join(dist, "assets")), name="assets")
 
