@@ -239,12 +239,58 @@ def test_crypto_is_fully_paid_in_a_margin_account():
     assert ex.summary(m.id)["initial_requirement"] == D("5000.00")
 
 
-def test_a_resting_crypto_purchase_keeps_open_stock_purchases_within_cash():
-    ex, feed, clock, m, c = make(t=datetime(2026, 11, 30, 15, 0, tzinfo=timezone.utc).timestamp(), cash=D("10000"))
-    ex.submit(m.id, {"symbol": COIN, "side": "buy", "qty": "0.1", "type": "limit", "limit_price": "30000", "tif": "gtc"})
+MONDAY = datetime(2026, 11, 30, 15, 0, tzinfo=timezone.utc).timestamp()  # US market open
+
+
+@pytest.mark.parametrize("crypto_first", [False, True])
+def test_a_crypto_purchase_does_not_change_what_a_stock_order_may_do(crypto_first):
+    """Both orderings: a resting crypto buy, or the same buy filled, leave the same stock buying power."""
+    ex, feed, clock, m, c = make(t=MONDAY, cash=D("100000"))
+    req = {"symbol": COIN, "side": "buy", "qty": "1.4625", "type": "limit", "limit_price": "40000.00" if crypto_first else "30000.00",
+           "tif": "gtc"}
+    ex.submit(m.id, req)
+    assert (m.position(COIN) > 0) == crypto_first
+    s = ex.summary(m.id)
+    bp = s["buying_power"]
+    stock_qty = (bp / D("100.00")).quantize(D(1), "ROUND_FLOOR")
+    assert stock_qty >= 750  # the stock buying power the summary shows is accepted ...
+    ex.submit(m.id, {"symbol": "ABC", "side": "buy", "qty": str(stock_qty), "type": "limit", "limit_price": "100.00",
+                     "tif": "gtc"})
+    with pytest.raises(OrderRejected, match="insufficient buying power"):  # ... and no more
+        ex.submit(m.id, {"symbol": "ABC", "side": "buy", "qty": "10", "type": "limit", "limit_price": "100.00", "tif": "gtc"})
+
+
+def test_crypto_buying_power_is_what_a_crypto_purchase_may_spend():
+    ex, feed, clock, m, c = make(t=MONDAY, cash=D("100000"))
+    ex.submit(m.id, {"symbol": "ABC", "side": "buy", "qty": "800", "type": "limit", "limit_price": "99.00", "tif": "gtc"})
+    s = ex.summary(m.id)
+    assert s["crypto_buying_power"] == ((D("100000") - D("79200.00")) / D("1.0025")).quantize(D("0.01"), "ROUND_FLOOR")
+    qty = assets.floor_to(s["crypto_buying_power"] / D("40000.00"), D("0.0001"))
+    ex.submit(m.id, {"symbol": COIN, "side": "buy", "qty": str(qty), "type": "limit", "limit_price": "40000.00", "tif": "gtc"})
     with pytest.raises(OrderRejected, match="crypto is not bought on margin"):
-        ex.submit(m.id, {"symbol": "ABC", "side": "buy", "qty": "80", "type": "limit", "limit_price": "99", "tif": "gtc"})
-    ex.submit(m.id, {"symbol": "ABC", "side": "buy", "qty": "60", "type": "limit", "limit_price": "99", "tif": "gtc"})
+        ex.submit(m.id, {"symbol": COIN, "side": "buy", "qty": "0.01", "type": "limit", "limit_price": "30000.00", "tif": "gtc"})
+    assert ex.summary(m.id)["crypto_buying_power"] < D("400")
+
+
+def test_raising_the_crypto_fee_is_refused_while_open_crypto_buys_could_not_pay_it():
+    ex, feed, clock, m, c = make()
+    for acct in (m, c):
+        ex.update_settings(acct.id, {"crypto_fee_rate": "0"})
+        [o] = ex.submit(acct.id, {"symbol": COIN, "side": "buy", "type": "limit", "qty": "2.5", "limit_price": "39999.00",
+                                  "tif": "gtc"})
+        with pytest.raises(ValueError, match=f"cannot be raised to 5%.*{o.id} \\(buy 2.5 SIMCOIN/USD\\)"):
+            ex.update_settings(acct.id, {"crypto_fee_rate": "5"})
+        assert ex.crypto_fee_rate(acct) == 0
+        ex.update_settings(acct.id, {"crypto_fee_rate": "0.001"})  # a rise the cash still covers is fine
+        ex.cancel(acct.id, o.id)
+        ex.update_settings(acct.id, {"crypto_fee_rate": "5"})
+    cl = TestClient(create_app(ex, run_loop=False))
+    ex.update_settings(c.id, {"crypto_fee_rate": "0"})
+    ex.submit(c.id, {"symbol": COIN, "side": "buy", "type": "limit", "qty": "2.5", "limit_price": "39999.00", "tif": "gtc"})
+    r = cl.put(f"/api/accounts/{c.id}/settings", json={"crypto_fee_rate": "5"})
+    assert r.status_code == 400 and "Cancel or reduce them first" in r.json()["detail"]
+    r = cl.post(f"/api/accounts/{c.id}/settings/reset")
+    assert r.status_code == 400  # the default fee (0.25%) is a rise these open buys cannot pay
 
 
 def test_cash_account_needs_the_cash_and_the_fee():

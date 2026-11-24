@@ -116,6 +116,27 @@ class Exchange:
     def crypto_spec(self, symbol: str) -> assets.CryptoSpec:
         return assets.spec_from_info(symbol, self.feed.symbols().get(symbol))
 
+    def update_settings(self, account_id: str, changes: dict) -> Account:
+        """Apply a settings change. A higher crypto fee is refused while open crypto purchases could then
+        cost more than the cash (the fill-time cap would cut them; better to say so now)."""
+        a = self.account(account_id)
+        old = a.settings
+        new = life_settings.update(old, changes)
+        buys = [o for o in self.engine.orders.values() if o.account_id == a.id and o.active and o.side == m.BUY
+                and is_crypto(o.symbol)]
+        if buys and life_settings.number(new, "crypto_fee_rate") > life_settings.number(old, "crypto_fee_rate"):
+            a.settings = new
+            ok = self._worst_case(a, [], crypto_check=True).ok
+            a.settings = old
+            if not ok:
+                names = ", ".join(f"{o.id} ({o.side} {o.remaining.normalize():f} {o.symbol})" for o in buys)
+                raise ValueError(f"the crypto fee cannot be raised to {life_settings.number(new, 'crypto_fee_rate').normalize():f}% "
+                                 f"while your open crypto purchases would then cost more than your cash: {names}. "
+                                 f"Cancel or reduce them first.")
+        a.settings = new
+        self.dirty = True
+        return a
+
     @staticmethod
     def crypto_fee_rate(account: Optional[Account]) -> Decimal:
         """Percent of the trade value charged on each crypto fill (an account setting)."""
@@ -223,7 +244,8 @@ class Exchange:
                 "margin_call": a.margin_call}
         self.lifecycle.extend_summary(a, out)
         # Crypto is fully paid: the cash on hand (never a loan), net of the fee on the purchase.
-        cash_bp = out["buying_power"] if a.type == "cash" else min(out["option_buying_power"], max(a.cash, ZERO))
+        # (margin: what a new crypto purchase may spend once the open purchases have filled, within the excess)
+        cash_bp = out["buying_power"] if a.type == "cash" else max(min(max(worst.excess, ZERO), worst.buy_cash), ZERO)
         out["crypto_buying_power"] = (cash_bp / (1 + self.crypto_fee_rate(a) / 100)).quantize(CENT, "ROUND_FLOOR")
         return out
 
@@ -597,7 +619,7 @@ class Exchange:
         def __init__(self, ok, reason, excess, requirement, cash_after):
             self.ok, self.reason, self.excess, self.requirement, self.cash_after = ok, reason, excess, requirement, cash_after
 
-    def _worst_case(self, account: Account, new_orders: list) -> "_Worst":
+    def _worst_case(self, account: Account, new_orders: list, crypto_check: bool = False) -> "_Worst":
         """Check the account under every scenario: all open buys fill, all open sells fill, neither.
 
         One-cancels-other groups count once per symbol. Held bracket and exit children are
@@ -611,7 +633,15 @@ class Exchange:
         but the money from the sells has not arrived. That stops a resting purchase from
         spending the cash that secures a resting short put. (A sale that must fill before
         the order it triggers is the exception: its money is there by then.)
+
+        Crypto is never bought with borrowed money: when the request being checked is a crypto
+        purchase (or `crypto_check` is set), a margin account must also keep cash at or above zero
+        once all its open purchases have filled. Other requests are not held to that, so a resting
+        crypto purchase does not change what a stock order may do (the fill-time cap in _handle
+        keeps crypto fills within cash whatever fills first). `buy_cash` on the result is the cash
+        left when every open purchase fills: what a new crypto purchase may spend.
         """
+        crypto_check = crypto_check or any(is_crypto(o.symbol) and o.side == m.BUY and not o.legs for o in new_orders)
         live = [o for o in self.engine.orders.values() if o.account_id == account.id
                 and (o.status in (m.WORKING, m.PARTIAL) or (o.status == m.HELD and o.role == m.TRIGGERED))]
         live += [o for o in new_orders if o.id not in self.engine.orders]
@@ -621,14 +651,13 @@ class Exchange:
         triggering = {o.parent_id for o in singles if o.status == m.HELD}
         combo_sets = [[]] + ([combos] if combos else []) + ([[c] for c in combos] if len(combos) > 1 else [])
         base = account.positions()
-        result = None
+        result, buy_cash = None, None
         for side in (None, m.BUY, m.SELL) + (("both",) if account.type == "cash" else ()):
             for combo_set in combo_sets:
                 pos, cash, seen, applied = dict(base), account.cash, {}, set()
-                crypto_buy = False
 
                 def apply(o):
-                    nonlocal cash, crypto_buy
+                    nonlocal cash
                     applied.add(o.id)
                     qty = o.remaining
                     if o.oco_group:  # only the largest order of a group can fill
@@ -639,7 +668,6 @@ class Exchange:
                     sign = 1 if o.side == m.BUY else -1
                     pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * qty
                     crypto = is_crypto(o.symbol)
-                    crypto_buy = crypto_buy or (crypto and sign > 0)
                     px = self._estimate_price(o) if crypto else None
                     cash -= self._fee(o.symbol, qty, px, account)
                     if sign > 0 or side != "both" or o.id in triggering:
@@ -660,7 +688,9 @@ class Exchange:
                 pos = {s: q for s, q in pos.items() if q != 0}
                 ev = margin.evaluate(account.type, cash, pos, self._marks(pos))
                 w = Exchange._Worst(ev.ok, ev.reason, ev.excess, ev.requirement, cash)
-                if crypto_buy and cash < 0 and account.type == "margin":  # never bought with borrowed money
+                if side == m.BUY and not combo_set:
+                    buy_cash = cash if buy_cash is None else min(buy_cash, cash)
+                if crypto_check and side in (m.BUY, "both") and cash < 0 and account.type == "margin":
                     w = Exchange._Worst(False, f"crypto is not bought on margin: this order and your open purchases "
                                                f"need {_amt(account.cash - cash)} but cash is {_amt(account.cash)}",
                                         ev.excess, ev.requirement, cash)
@@ -668,6 +698,7 @@ class Exchange:
                         w.excess < result.excess if account.type == "margin"
                         else w.cash_after - w.requirement < result.cash_after - result.requirement)):
                     result = w
+        result.buy_cash = account.cash if buy_cash is None else buy_cash
         return result
 
     def _not_riskier(self, account: Account, deltas: dict, cash_delta: Decimal) -> bool:
