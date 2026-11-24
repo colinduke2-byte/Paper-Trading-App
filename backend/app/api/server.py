@@ -377,6 +377,18 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         except (WebSocketDisconnect, Exception):
             clients.pop(ws, None)
 
+    # ---- extension routes ----------------------------------------------------------
+    # Every module named app/api/routes_*.py that defines register(app, ctx) is loaded here,
+    # so new features add routes without editing this file. ctx.ex is the active exchange.
+    import importlib
+    import pkgutil
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(ex=ex, plain=plain, clients=clients)
+    app.state.ctx = ctx
+    pkg = importlib.import_module("app.api")
+    for mod in sorted(m.name for m in pkgutil.iter_modules(pkg.__path__) if m.name.startswith("routes_")):
+        importlib.import_module(f"app.api.{mod}").register(app, ctx)
+
     # ---- static UI -----------------------------------------------------------------
     dist = os.environ.get("PAPERDESK_UI", os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "dist"))
     if os.path.isdir(dist):
