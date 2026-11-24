@@ -7,7 +7,7 @@ import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
-import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
+import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd } from "./util";
 import { useSignOutAction } from "./Login";
 
 type Toast = { id: number; text: string; bad?: boolean };
@@ -291,11 +291,11 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
   const submit = async () => {
     try {
       if (mode === "new") {
-        const a = await api("/accounts", { method: "POST", body: { name, type, starting_cash: cash } });
+        const a = await api("/accounts", { method: "POST", body: { name, type, starting_cash: numText(cash) } });
         onDone(a.id, `Account "${a.name}" created`);
       } else {
-        await api(`/accounts/${account.id}/reset`, { method: "POST", body: { starting_cash: cash } });
-        onDone(account.id, `Account "${account.name}" reset to ${usd(Number(cash))}`);
+        await api(`/accounts/${account.id}/reset`, { method: "POST", body: { starting_cash: numText(cash) } });
+        onDone(account.id, `Account "${account.name}" reset to ${usd(Number(numText(cash)))}`);
       }
     } catch (e: any) { setError(e.message); }
   };

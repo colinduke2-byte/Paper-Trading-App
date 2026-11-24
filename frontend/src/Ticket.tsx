@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, isOption, money, ORDER_TYPES, qty as fmtQty, TIFS, usd } from "./util";
+import { api, isOption, money, numText, ORDER_TYPES, qty as fmtQty, TIFS, usd } from "./util";
 
 export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; nonce?: number };
 
@@ -38,14 +38,14 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
   const immediateOk = type === "market" || type === "limit";
 
   const body = () => ({
-    symbol: seed.symbol, side, qty, type, tif,
-    limit_price: hasLimit ? limit : null,
-    stop_price: hasStop ? stop : null,
-    trail_amount: type === "trailing_stop" && trailMode === "amount" ? trail : null,
-    trail_percent: type === "trailing_stop" && trailMode === "percent" ? trail : null,
+    symbol: seed.symbol, side, qty: numText(qty), type, tif,
+    limit_price: hasLimit ? numText(limit) : null,
+    stop_price: hasStop ? numText(stop) : null,
+    trail_amount: type === "trailing_stop" && trailMode === "amount" ? numText(trail) : null,
+    trail_percent: type === "trailing_stop" && trailMode === "percent" ? numText(trail) : null,
     extended_hours: ext && type === "limit",
-    take_profit: bracket && canBracket && tp ? tp : null,
-    stop_loss: bracket && canBracket && sl ? sl : null,
+    take_profit: bracket && canBracket && tp ? numText(tp) : null,
+    stop_loss: bracket && canBracket && sl ? numText(sl) : null,
   });
 
   const edit = (fn: () => void) => { fn(); setPreview(null); setError(""); };

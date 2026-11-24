@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
-import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
+import { api, compact, dateTime, isOption, money, numText, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
 
 const TABS = ["Positions", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
@@ -161,7 +161,7 @@ function Alerts({ notify, refreshKey }: any) {
   const [op, setOp] = useState("above");
   const [price, setPrice] = useState("");
   const add = async () => {
-    try { await api("/alerts", { method: "POST", body: { symbol, op, price } }); setPrice(""); reload(); }
+    try { await api("/alerts", { method: "POST", body: { symbol, op, price: numText(price) } }); setPrice(""); reload(); }
     catch (e: any) { notify(`Could not add the alert: ${e.message}`, true); }
   };
   return (
@@ -190,7 +190,7 @@ function Alerts({ notify, refreshKey }: any) {
 
 function Screener({ onSelect }: any) {
   const [f, setF] = useState({ sector: "", min_price: "", max_price: "", min_change_pct: "", max_pe: "", min_dividend_yield: "" });
-  const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+  const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(k === "sector" ? v : numText(v))}`).join("&");
   const [rows, error] = usePoll<any[]>(`/screener?${qs}`, 5000);
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
   const num = (k: string, label: string) => <input key={k} value={(f as any)[k]} placeholder={label} aria-label={label} inputMode="decimal" onChange={set(k)} style={{ width: 110 }} />;

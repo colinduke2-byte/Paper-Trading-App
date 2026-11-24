@@ -76,3 +76,12 @@ export function store(key: string, value?: string): string | null {
   } catch {}
   return null;
 }
+
+// Money and quantities as typed by people: "1,000", "$25,000.50" and " 100 " become "1000", "25000.50" and
+// "100". Only well-formed thousands groups are removed, so "1,5" (a decimal comma) is left for the server to
+// refuse with a message that names the field.
+export function numText(v: string): string {
+  let s = String(v ?? "").trim().replace(/^\$\s*/, "").replace(/^(-)\$\s*/, "$1").replace(/\s+/g, "");
+  if (/^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(s)) s = s.replace(/,/g, "");
+  return s;
+}

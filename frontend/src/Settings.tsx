@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, dateTime, usd } from "./util";
+import { api, dateTime, numText, usd } from "./util";
 
 type Field = { key: string; type: "bool" | "number"; default: any; label: string; help: string; min: string | null; max: string | null };
 
@@ -39,7 +39,9 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
   const save = async () => {
     setBusy(true); setError("");
     try {
-      load(await api(`/accounts/${accountId}/settings`, { method: "PUT", body: values }));
+      const body = Object.fromEntries(Object.entries(values).map(([k, v]) =>
+        [k, typeof v === "string" && fields.find((f) => f.key === k)?.type === "number" ? numText(v) : v]));
+      load(await api(`/accounts/${accountId}/settings`, { method: "PUT", body }));
       onSaved("Account settings saved");
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
