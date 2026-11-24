@@ -12,7 +12,8 @@ routes_*.py module) is covered without doing anything:
 - an `async def` route under /api must be marked `@unlocked`: it runs on the event loop, which must
   never wait for a thread lock. Registration fails otherwise.
 
-The sign-in routes and the research routes (provider data only) are exempt by path.
+The sign-in routes, the research routes (provider data only) and the chart-state routes (their own file
+and lock) are exempt by path.
 """
 import asyncio
 import functools
@@ -24,7 +25,9 @@ from fastapi.routing import APIRoute
 from ..core.locking import Busy
 
 ROUTE_WAIT = float(os.environ.get("PAPERDESK_LOCK_WAIT", "2.0"))  # seconds a request waits before "busy"
-EXEMPT_PREFIXES = ("/api/auth/", "/api/research/")  # these never touch exchange state
+# These never touch exchange state: sign-in (its own session store), research (provider data only) and
+# saved chart settings (their own file and lock; they write to disk, which must not happen under the lock).
+EXEMPT_PREFIXES = ("/api/auth/", "/api/research/", "/api/chartstate")
 _MARK = "__paperdesk_lock__"
 
 

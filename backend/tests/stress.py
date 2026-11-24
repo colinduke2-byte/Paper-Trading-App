@@ -336,6 +336,13 @@ def trader(rig: Rig, seed: int, n: int, steady: str, chaos: str = None):
         r = rig.call("POST", "/api/alerts", json={"symbol": rng.choice(symbols), "op": "above", "price": "1"})
         if r.status_code == 200 and rng.random() < 0.7:
             rig.call("DELETE", f"/api/alerts/{r.json()['id']}")
+        rig.call("GET", "/api/notifications", params={"account_id": aid})
+        if rng.random() < 0.3:
+            rig.call("POST", "/api/notifications/read", json={"account_id": aid})
+        r = rig.call("POST", "/api/alert-rules", json={"kind": "price", "symbol": rng.choice(symbols), "op": "above",
+                                                      "price": str(rig.price(symbols[0]))})
+        if r.status_code == 200 and rng.random() < 0.5:
+            rig.call("DELETE", f"/api/alert-rules/{r.json()['id']}")
 
     def journal(aid):
         r = rig.call("POST", f"/api/accounts/{steady}/journal", json={"target_type": "order", "target_id": pick_order(), "note": "n"})

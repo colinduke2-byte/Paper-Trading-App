@@ -145,11 +145,15 @@ UNLOCKED_READS = {
     "/api/replay/sessions",  # reads session files
     "/api/auth/state", "/api/research/sources", "/api/research/news/{symbol}", "/api/research/calendar/{symbol}",
     "/api/research/corporate-actions/{symbol}", "/api/research/fundamentals/{symbol}",
+    "/api/chartstate", "/api/chartstate/drawings/{sym}",  # chart settings: their own file and lock, no exchange state
 }
 SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_every_changing_route_answers_busy...
     ("POST", "/api/replay/start"), ("POST", "/api/replay/step"), ("POST", "/api/replay/seek"), ("POST", "/api/replay/exit"),
 }
-NO_EXCHANGE_STATE = {("POST", "/api/auth/login"), ("POST", "/api/auth/logout")}  # the session store has its own lock
+NO_EXCHANGE_STATE = {  # the session store and the chart-state file have their own locks
+    ("POST", "/api/auth/login"), ("POST", "/api/auth/logout"),
+    ("PUT", "/api/chartstate/settings"), ("PUT", "/api/chartstate/drawings/{sym}"), ("DELETE", "/api/chartstate"),
+}
 
 
 def api_routes(app):
@@ -181,7 +185,8 @@ def test_every_api_route_runs_under_the_lock_unless_listed_here():
 
 def fill_path(path: str, aid: str) -> str:
     for name, value in (("{aid}", aid), ("{symbol}", "MKTX"), ("{oid}", "O00000001"), ("{month}", "2026-11"),
-                        ("{kind}", "fills"), ("{jid}", "J1"), ("{alert_id}", "AL00001"), ("{name}", "Main")):
+                        ("{kind}", "fills"), ("{jid}", "J1"), ("{alert_id}", "AL00001"), ("{name}", "Main"),
+                        ("{sym}", "MKTX")):
         path = path.replace(name, value)
     assert "{" not in path, f"give fill_path a value for {path}"
     return path
@@ -203,7 +208,8 @@ def test_every_changing_route_answers_busy_while_the_lock_is_stuck(monkeypatch, 
                 continue
             url = fill_path(path, sandbox)
             body = {"session": SESSION.split(".")[0], "offset": 600, "seconds": 5}
-            r = c.request(method, url, json=[] if path.startswith("/api/watchlists") else body)
+            r = c.request(method, url, json=[] if path.startswith("/api/watchlists") else body,
+                          params={"account_id": sandbox})
             if path == "/api/replay/start":  # refused before it needs the lock; checked without a replay below
                 assert r.status_code == 409
                 continue
@@ -470,7 +476,8 @@ def test_the_tick_loop_saves_off_the_lock_and_the_file_matches_memory(tmp_path):
 # ---- atomic changes -----------------------------------------------------------------------------------------------
 def book(ex, a):
     return json.dumps({"account": a.to_plain(), "orders": {k: vars(o) for k, o in ex.engine.orders.items()},
-                       "events": len(ex.events), "fill_seq": ex._peek_sequences()["fill"]}, default=str, sort_keys=True)
+                       "events": len(ex.events), "fill_seq": ex._peek_sequences()["fill"],
+                       "notifications": ex.alerting.notices.to_plain()}, default=str, sort_keys=True)
 
 
 def test_a_multi_leg_submit_that_fails_on_its_second_leg_leaves_nothing_behind():
@@ -557,15 +564,17 @@ def test_a_long_seek_holds_the_lock_only_in_short_slices(tmp_path, monkeypatch):
     assert c.post("/api/replay/start", json={"session": SESSION.split(".")[0]}).status_code == 200
     rp, sandbox = ctx.replay, list(ctx.ex.accounts)[0]
     assert rp.guard is ctx.lock
+    tick = rp.ex.tick
+    rp.ex.tick = lambda: (time.sleep(0.0001), tick())[1]  # a market slow enough that the seek takes a while
     ctx.lock.longest = (0.0, None)
-    t, out = in_thread(lambda: c.post("/api/replay/seek", json={"time": rp.end}))
+    t, out = in_thread(lambda: c.post("/api/replay/seek", json={"offset": 3600}))
     served = 0
     while t.is_alive():  # other requests are answered while the seek runs
         assert c.get(f"/api/accounts/{sandbox}").status_code == 200
         assert c.post(f"/api/accounts/{sandbox}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
         served += 1
     t.join(30)
-    assert out["value"].status_code == 200 and rp.now() == rp.end
+    assert out["value"].status_code == 200 and rp.now() == rp.start + 3600
     assert served >= 3, "the seek shut every other request out"
     assert ctx.lock.longest[0] < 0.5, ctx.lock.longest
     assert problems(ctx.ex) == []

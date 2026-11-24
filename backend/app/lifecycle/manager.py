@@ -350,14 +350,7 @@ class LifecycleManager:
                     self.on_fill(a, note["fill"])
                     self.ex.events.append({"type": "fill", "account_id": a.id, "fill": note["fill"]})
                 self._event(a, "split", note["message"])
-        ratio = Decimal(act.old) / Decimal(act.new)
-        for al in self.ex.alerts:
-            if al.get("symbol") == sym and al.get("triggered_at") is None:
-                old = D(al["price"])
-                new = (old * ratio).quantize(FOUR)
-                al["price"] = str(new.normalize() if new != new.to_integral_value() else new.quantize(Decimal(1)))
-                al["note"] = f"Adjusted from {old.normalize():f} for the {act.describe()} on {act.ex_date.isoformat()}"
-                self.ex.dirty = True
+        self.ex.alerting.on_split(act)  # alert levels are split-adjusted (app/alerts/model.py)
 
     # ---- fills -----------------------------------------------------------------------
     def on_fill(self, a, fill: Fill) -> None:
@@ -640,8 +633,13 @@ class LifecycleManager:
         covered call cannot be sold while the call is open. The cover is a long option of the same
         kind expiring no earlier, or 100 shares per contract (long for calls, short for puts). Returns
         (requirement after, underlying, legs, units) for the smallest close that meets the call, else
-        the one leaving the lowest requirement below the current one, or None."""
+        the one leaving the lowest requirement below the current one, or None.
+
+        The cover taken away must not be what another short option relies on: a pair is only
+        considered if no short option is less covered after it than before (the shares behind a
+        later-dated call cannot be used to close an earlier one that long calls already cover)."""
         ex = self.ex
+        before_unc = uncovered(pos)
         usable = lambda sym, side: (q := ex.quote(sym)) is not None and (q.ask if side == m.BUY else q.bid) > 0
         best = None
         for s_sym, s_q in pos.items():
@@ -659,9 +657,14 @@ class LifecycleManager:
                 if not usable(c_sym, c_side):
                     continue
                 legs = [{"symbol": s_sym, "side": m.BUY, "ratio": 1}, {"symbol": c_sym, "side": c_side, "ratio": ratio}]
+                closed = lambda n: self._reduced(self._reduced(pos, s_sym, s_q, Decimal(n)), c_sym, c_q, Decimal(n * ratio))
                 top = int(min(-s_q, abs(c_q) // ratio))
+                while top > 0 and any(v > before_unc.get(k, ZERO) for k, v in uncovered(closed(top)).items()):
+                    top -= 1  # that many units would take cover another short option relies on
                 for n in range(1, top + 1):
-                    after = self._reduced(self._reduced(pos, s_sym, s_q, Decimal(n)), c_sym, c_q, Decimal(n * ratio))
+                    after = closed(n)
+                    if any(v > before_unc.get(k, ZERO) for k, v in uncovered(after).items()):
+                        continue
                     req = margin.requirement(after, marks, maintenance=True)
                     q_s, q_c = ex.quote(s_sym), ex.quote(c_sym)
                     c_slip = max((marks[c_sym] - q_c.bid) if c_q > 0 else (q_c.ask - marks[c_sym]), ZERO)

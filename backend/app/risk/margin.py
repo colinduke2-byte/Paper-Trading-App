@@ -128,12 +128,11 @@ def _cells(shorts: dict, longs: dict) -> list:
             if parse(s).kind == parse(l).kind and parse(l).expiry >= parse(s).expiry]
 
 
-def _pairing_count(shorts: dict, longs: dict) -> int:
-    """Upper bound on the number of distinct pairings, after dividing out a common lot size."""
-    lot = gcd(*(int(n) for n in list(shorts.values()) + list(longs.values())))
+def _pairing_count(shorts: dict, longs: dict, step: int = 1) -> int:
+    """Upper bound on the number of distinct pairings when contracts move in blocks of `step`."""
     count = 1
     for s, l in _cells(shorts, longs):
-        count *= int(min(shorts[s], longs[l])) // lot + 1
+        count *= int(min(shorts[s], longs[l])) // step + 1
     return count
 
 
@@ -141,18 +140,24 @@ def _pairing_count(shorts: dict, longs: dict) -> int:
 def _pairings(shorts_items: tuple, longs_items: tuple) -> tuple:
     """Ways of pairing uncovered shorts with long options, as tuples of ((short, long), contracts).
 
-    Small books (nearly all real ones) are searched completely: every split of every short
-    between the longs that may cover it, including leaving it uncovered. A 10-lot butterfly
-    is searched as a 1-lot one. Larger books fall back to a handful of greedy orders. The
-    result depends on the positions only, so it is cached.
+    Small books (nearly all real ones) are searched completely, contract by contract: every
+    split of every short between the longs that may cover it, including leaving it
+    uncovered. The search must be per contract: options that share an expiry are valued
+    together, so splitting a short half-and-half between two longs can be cheaper than
+    either whole pairing (short 2 puts between 1 lower and 1 higher long put), and a search
+    in whole lots would miss it. Books too large for that are searched in the smallest
+    block size (a divisor of the common lot size) that keeps the search small, together
+    with a handful of greedy orders; that is still always a valid cover, just not
+    guaranteed to be the cheapest. The result depends on the positions only, so it is cached.
     """
     shorts, longs = dict(shorts_items), dict(longs_items)
     found = {}
-    if _pairing_count(shorts, longs) <= _MAX_EXACT:
-        lot = gcd(*(int(n) for n in list(shorts.values()) + list(longs.values())))
+    lot = gcd(*(int(n) for n in list(shorts.values()) + list(longs.values())))
+    step = next((d for d in range(1, lot + 1) if lot % d == 0 and _pairing_count(shorts, longs, d) <= _MAX_EXACT), None)
+    if step is not None:
         cells = _cells(shorts, longs)
-        left_s = {s: int(n) // lot for s, n in shorts.items()}
-        left_l = {l: int(n) // lot for l, n in longs.items()}
+        left_s = {s: int(n) // step for s, n in shorts.items()}
+        left_l = {l: int(n) // step for l, n in longs.items()}
 
         def walk(i: int, acc: list) -> None:
             if i == len(cells):
@@ -162,12 +167,13 @@ def _pairings(shorts_items: tuple, longs_items: tuple) -> tuple:
             for n in range(min(left_s[sym], left_l[l]) + 1):
                 left_s[sym] -= n
                 left_l[l] -= n
-                walk(i + 1, acc + [((sym, l), Decimal(n * lot))] if n else acc)
+                walk(i + 1, acc + [((sym, l), Decimal(n * step))] if n else acc)
                 left_s[sym] += n
                 left_l[l] += n
 
         walk(0, [])
-        return tuple(found)
+        if step == 1:
+            return tuple(found)
     by_danger = sorted(shorts, key=lambda s: (parse(s).kind,) + _danger(s))
     by_expiry = sorted(by_danger, key=lambda s: parse(s).expiry)
     long_orders = [None, sorted(longs), sorted(longs, reverse=True), sorted(longs, key=lambda l: parse(l).expiry),

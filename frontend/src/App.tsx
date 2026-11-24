@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Chart } from "./Chart";
+import { Chart, SHORTCUTS_EVENT } from "./Chart";
+import { Shortcuts } from "./chart/Shortcuts";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
 import { feedBanner, Research } from "./Research";
@@ -7,8 +8,11 @@ import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
+import { HelpDialog } from "./Help";
 import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
 import { useSignOutAction } from "./Login";
+import { bellLabel, deliver, NotificationBell, NotificationPanel, useNotifications } from "./Notifications";
+import { ALERT_AT_PRICE, AlertBuilder, AlertSeed } from "./AlertsTab";
 
 type Toast = { id: number; text: string; bad?: boolean };
 
@@ -31,11 +35,17 @@ export default function App() {
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
   const ws = useRef<WebSocket | null>(null);
   const toastId = useRef(0);
+  const notes = useNotifications(accountId, modeKey(status) || "live", connected); // the bell and its log
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [alertBuilder, setAlertBuilder] = useState<null | { seed?: AlertSeed; editing?: any }>(null);
 
   const notify = useCallback((text: string, bad = false) => {
     const id = ++toastId.current;
@@ -96,8 +106,7 @@ export default function App() {
         if (m.events?.length) {
           setRefreshKey((k) => k + 1);
           for (const e of m.events) {
-            if (e.type === "alert") notify(`Alert: ${e.alert.symbol} ${e.alert.op === "above" ? "rose to" : "fell to"} ${money(e.last)}`);
-            if (e.type === "fill" && e.fill.kind !== "trade") notify(`${e.fill.kind === "reinvestment" ? "Dividend reinvestment" : e.fill.kind === "split_settlement" ? "Split settlement" : `Option ${e.fill.kind}`}: ${e.fill.side} ${e.fill.qty} ${e.fill.symbol} at ${money(e.fill.price)}`);
+            if (e.type === "notification" && notesRef.current.receive(e.notification)) deliver(e.notification, notify);
             if (e.type === "order" && e.order.status === "filled" && e.order.parent_id) notify(`Filled: ${e.order.role?.replace("_", " ") || "order"} on ${e.order.symbol} at ${money(e.order.avg_fill_price)}`);
           }
         }
@@ -137,6 +146,25 @@ export default function App() {
     setRefreshKey((k) => k + 1);
   });
 
+  // "Alert me at this price": anything can call requestPriceAlert(symbol, price) from AlertsTab.tsx.
+  const quotesRef = useRef(quotes);
+  quotesRef.current = quotes;
+  useEffect(() => {
+    const on = (ev: Event) => {
+      const { symbol: s, price } = (ev as CustomEvent).detail || {};
+      if (!s || !(Number(price) > 0)) return;
+      const last = quotesRef.current[s]?.last;
+      setAlertBuilder({ seed: { kind: "price", symbol: s, price: Number(price).toFixed(2), op: last != null && Number(price) < last ? "below" : "above" } });
+    };
+    window.addEventListener(ALERT_AT_PRICE, on);
+    return () => window.removeEventListener(ALERT_AT_PRICE, on);
+  }, []);
+  const editAlert = (id: string) =>
+    api(`/alert-rules?account_id=${encodeURIComponent(accountId)}`).then((list: any[]) => {
+      const a = list.find((x) => x.id === id);
+      if (a) setAlertBuilder({ editing: a }); else notify("That alert has been deleted.", true);
+    }).catch((e) => notify(`Could not load the alert: ${e.message}`, true));
+
   const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000, [modeKey(status)]);
   const ticketPos = positions.find((p) => p.symbol === seed.symbol);
   const stockPos = positions.find((p) => p.symbol === symbol);
@@ -160,10 +188,15 @@ export default function App() {
 
   // Top-bar actions: desktop shows them in the header, the phone layout lists them in its menu.
   const topActions: TopAction[] = [
+    ...(accountId ? [small
+      ? { label: bellLabel(notes.unread), onClick: () => setNotesOpen(true) }
+      : { label: "Notifications", element: <NotificationBell unread={notes.unread} onClick={() => setNotesOpen(true)} /> }] : []),
     { label: "New account", onClick: () => setDialog("new") },
     { label: "Reset", onClick: () => setDialog("reset") },
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
+    { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
+    { label: "Help", title: "How PaperDesk works", onClick: () => setHelpOpen(true) },
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
   ];
   const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
@@ -189,9 +222,12 @@ export default function App() {
       ))}
     </div>
   );
+  const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const mainView = (
     <div className="view">
-      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
+      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol}
+        accountId={accountId} notify={notify} onOrdersChanged={() => setRefreshKey((k) => k + 1)} scope={status?.replay ? `replay:${status.replay.session_id}` : "live"}
+        onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
       {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
@@ -207,13 +243,22 @@ export default function App() {
   );
   const depth = <DepthTape symbol={underlyingOf(symbol)} />;
   const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
-  const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const overlays = (
     <>
+      <Shortcuts symbols={watch} symbol={symbol} onSelect={setSymbol} accountId={accountId} orders={orders} notify={notify}
+        onChanged={() => setRefreshKey((k) => k + 1)} onTicket={small ? () => setScreen("Trade") : undefined} />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
+      {notesOpen && accountId && (
+        <NotificationPanel notes={notes} onClose={() => setNotesOpen(false)} onSelect={pickSymbol} onAlert={editAlert} />
+      )}
+      {alertBuilder && accountId && (
+        <AlertBuilder accountId={accountId} seed={alertBuilder.seed} editing={alertBuilder.editing} quotes={quotes} positions={positions}
+          onClose={() => setAlertBuilder(null)} onSaved={(m) => { setAlertBuilder(null); notify(m); setRefreshKey((k) => k + 1); }} />
+      )}
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {settingsOpen && accountId && (
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}
