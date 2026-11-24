@@ -6,3 +6,4 @@ node_modules/
 data/
 frontend/dist/.vite/
 *.tmp
+.env

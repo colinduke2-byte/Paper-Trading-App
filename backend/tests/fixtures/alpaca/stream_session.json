@@ -1,0 +1,13 @@
+{
+ "_source": "Frames copied from docs.alpaca.markets/us/docs/streaming-market-data.md (welcome, auth, subscription, errors table) and real-time-stock-pricing-data.md (trade and quote examples). Only the subscription lists were edited to match the symbols in the tests.",
+ "connected": [{"T":"success","msg":"connected"}],
+ "authenticated": [{"T":"success","msg":"authenticated"}],
+ "subscription_aapl_amd": [{"T":"subscription","trades":["AAPL","AMD"],"quotes":["AAPL","AMD"],"bars":[],"updatedBars":[],"dailyBars":[],"statuses":[],"lulds":[],"corrections":["AAPL","AMD"],"cancelErrors":["AAPL","AMD"]}],
+ "trade_aapl": [{"T":"t","i":96921,"S":"AAPL","x":"D","p":126.55,"s":1,"t":"2021-02-22T15:51:44.208Z","c":["@","I"],"z":"C"}],
+ "quote_amd": [{"T":"q","S":"AMD","bx":"U","bp":87.66,"bs":1,"ax":"Q","ap":87.68,"as":4,"t":"2021-02-22T15:51:45.335689322Z","c":["R"],"z":"C"}],
+ "bar_spy": [{"T":"b","S":"SPY","o":388.985,"h":389.13,"l":388.975,"c":389.12,"v":49378,"n":461,"vw":389.062639,"t":"2021-02-22T19:15:00Z"}],
+ "auth_failed": [{"T":"error","code":402,"msg":"auth failed"}],
+ "symbol_limit": [{"T":"error","code":405,"msg":"symbol limit exceeded"}],
+ "connection_limit": [{"T":"error","code":406,"msg":"connection limit exceeded"}],
+ "insufficient_subscription": [{"T":"error","code":409,"msg":"insufficient subscription"}]
+}
