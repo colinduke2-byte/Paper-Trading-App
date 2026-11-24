@@ -12,8 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 from hypothesis import given, settings, strategies as st
 
-from app.analytics import export
-from app.analytics.trades import gains_report, tax_year_summary
+from app.analytics import export, wash
+from app.analytics.trades import closed_lots, gains_report, tax_year_summary
 from app.api.server import create_app
 from app.core import calendar as cal
 from app.core.calendar import NY
@@ -539,6 +539,13 @@ def test_ledger_invariants_and_lot_conservation_for_any_lot_choices(steps):
     # wash-sale amounts only move loss between lots: once everything is closed, nothing is left over
     if not a.lots:
         assert rep["totals"]["adjusted_gain"] == rep["totals"]["gain"]
+    # every disallowed cent is either carried into a later sale or still carried by an open lot,
+    # and an open lot never carries more shares than it holds
+    _, open_adj = wash.analyse(a, closed_lots(a))
+    held = {l.id: abs(l.qty) for ls in a.lots.values() for l in ls}
+    assert all(k in held and v["qty"] <= held[k] for k, v in open_adj.items())
+    assert rep["totals"]["wash_sale_disallowed"] == rep["totals"]["basis_adjustments"] + \
+        sum((v["amount"] for v in open_adj.values()), D(0))
     b = Account.from_plain(json.loads(json.dumps(a.to_plain())))
     assert b.cash == a.cash and gains_report(b)["totals"] == rep["totals"]
     assert [l.id for ls in b.lots.values() for l in ls] == [l.id for ls in a.lots.values() for l in ls]
@@ -717,3 +724,19 @@ def test_lot_orders_filling_in_one_step_never_short_and_never_close_unnamed_lots
         fill_ids = {f.id for f in acc.fills if f.order_id == o.id}
         assert not any(l.fill_id in fill_ids for l in acc.lots.get("ABC", []))
     ledger_ok(acc)
+
+
+def test_a_replacement_share_already_carrying_a_loss_is_not_used_again():
+    # d0 buy 10 @100 (L1); d1 buy 5 @100 (L2); d2 sell 1 of L2 @105 (named); d3 sell 4 of L1 @90: a loss of 40,
+    # replaced by the 4 shares left in L2. d4 sell 1 of L1 @90: L2's 4 shares already carry the first loss,
+    # so nothing replaces this one: 0 disallowed, and L2 carries 4 shares / 40.00.
+    a = Account("A1", "t", "margin", D("100000"), 0)
+    a.apply_fill(fill(1, "buy", 10, "100", t=ts(2026, 3, 2)), 1)
+    a.apply_fill(fill(2, "buy", 5, "100", t=ts(2026, 3, 3)), 1)
+    a.apply_fill(fill(3, "sell", 1, "105", t=ts(2026, 3, 4)), 1, [{"lot_id": "L2", "qty": "1"}])
+    a.apply_fill(fill(4, "sell", 4, "90", t=ts(2026, 3, 5)), 1)
+    a.apply_fill(fill(5, "sell", 1, "90", t=ts(2026, 3, 6)), 1)
+    rows = gains_report(a)["rows"]
+    assert [(r["lot_id"], r["wash_sale_disallowed"]) for r in rows] == [("L2", D(0)), ("L1", D("40")), ("L1", D(0))]
+    _, open_adj = wash.analyse(a, closed_lots(a))
+    assert (open_adj["L2"]["qty"], open_adj["L2"]["amount"]) == (D(4), D("40"))

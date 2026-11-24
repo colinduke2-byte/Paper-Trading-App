@@ -155,7 +155,9 @@ def analyse(account, rows: list) -> tuple[list, dict]:
                 if abs((ny_date(a["opened_at"]) - close_day).days) > WINDOW_DAYS:
                     continue
                 if a["opened_at"] <= r["closed_at"]:
-                    cap = min(held_at(a["key"], i), a["qty"] - used.get(a["key"], ZERO))
+                    # Shares still held, less those already carrying an earlier wash sale's loss.
+                    carrying = sum((c["qty"] for c in chunks.get(a["key"], ())), ZERO)
+                    cap = min(held_at(a["key"], i) - carrying, a["qty"] - used.get(a["key"], ZERO))
                 else:
                     cap = a["qty"] - used.get(a["key"], ZERO)
                 if cap > 0:
