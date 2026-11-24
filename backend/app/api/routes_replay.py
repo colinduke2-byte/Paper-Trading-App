@@ -4,7 +4,7 @@ import os
 
 from fastapi import Body, HTTPException
 
-from ..core.money import parse as parse_num
+from ..core.money import parse_cash
 from ..marketdata.replay.control import ReplayController
 from ..marketdata.replay.format import SessionFormatError
 from ..marketdata.replay.library import find_session, list_sessions, session_dirs
@@ -37,7 +37,7 @@ def register(app, ctx) -> None:
         if ctx.replay is not None:
             raise HTTPException(409, "A replay is already running. Exit it before starting another.")
         path = find_session(dirs(), str(body.get("session", "")))
-        cash = parse_num(body.get("starting_cash", 100000))
+        cash = parse_cash(body.get("starting_cash", 100000))
         if cash <= 0:
             raise ValueError("starting cash must be positive")
         sandbox = os.path.join(ctx.live.data_dir, "replay") if ctx.live.data_dir else None

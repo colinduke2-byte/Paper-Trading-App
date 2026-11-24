@@ -20,7 +20,10 @@ from typing import Optional
 
 from fastapi import Body, HTTPException, Query
 
-MAX_BYTES = 256 * 1024
+from ..core import limits
+from .hardening import allow_body
+
+MAX_BYTES = limits.MAX_CHART_RECORD
 MAX_SYMBOLS = 500
 MAX_SCOPES = 50
 SYMBOL = re.compile(r"^[A-Z0-9.\-]{1,24}$")
@@ -29,6 +32,8 @@ SCOPE = re.compile(r"^(live|replay:[A-Za-z0-9._\-]{1,80})$")
 
 def register(app, ctx):
     lock = threading.Lock()
+    allow_body(app, "/api/chartstate/settings", limits.MAX_CHART_BODY)
+    allow_body(app, "/api/chartstate/drawings/{sym}", limits.MAX_CHART_BODY)
     cache: dict = {}  # data_dir (or None) -> document
 
     def live():
@@ -75,9 +80,17 @@ def register(app, ctx):
             raise HTTPException(413, f"chart state is larger than {MAX_BYTES // 1024} KB")
         return {"updated": updated, "data": body["data"]}
 
-    def put(current, rec, store):
+    def total_after(d: dict, current, rec) -> int:
+        size = lambda r: len(json.dumps(r["data"])) if isinstance(r, dict) and "data" in r else 0
+        total = size(d.get("settings")) + sum(size(r) for sc in d["scopes"].values() for r in sc.values())
+        return total - size(current) + size(rec)
+
+    def put(current, rec, store, d=None):
         if current is not None and current.get("updated", 0) > rec["updated"]:
             return current  # keep the newer record
+        if d is not None and total_after(d, current, rec) > limits.MAX_CHART_TOTAL:
+            raise HTTPException(413, f"saved chart drawings are limited to {limits.MAX_CHART_TOTAL // limits.MB} MB "
+                                     "in total; clear drawings you no longer need")
         store(rec)
         return rec
 
@@ -105,7 +118,7 @@ def register(app, ctx):
         rec = record(body)
         with lock:
             d = doc()
-            out = put(d["settings"], rec, lambda r: d.__setitem__("settings", r))
+            out = put(d["settings"], rec, lambda r: d.__setitem__("settings", r), d)
             save(d)
             return out
 
@@ -127,7 +140,7 @@ def register(app, ctx):
             drawings = d["scopes"].setdefault(sc, {})
             if s not in drawings and len(drawings) >= MAX_SYMBOLS:
                 raise HTTPException(413, f"drawings are saved for at most {MAX_SYMBOLS} symbols")
-            out = put(drawings.get(s), rec, lambda r: drawings.__setitem__(s, r))
+            out = put(drawings.get(s), rec, lambda r: drawings.__setitem__(s, r), d)
             save(d)
             return out
 

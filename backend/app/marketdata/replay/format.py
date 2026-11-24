@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import IO, Iterator, Optional
 
+from ...core import limits
+
 FORMAT = "paperdesk-session"
 VERSION = 1
 SUFFIX = ".pdsession.gz"
@@ -137,12 +139,69 @@ def validate_header(h: dict) -> None:
     for k in ("date", "start", "symbols", "initial"):
         if k not in h:
             raise SessionFormatError(f"the session header is missing '{k}'")
-    syms = [s.get("symbol") for s in h["symbols"]]
-    if not syms or any(not isinstance(s, str) or not _SYMBOL.match(s) for s in syms):
+    if not isinstance(h["date"], str) or len(h["date"]) > 32:
+        raise SessionFormatError("the session header has no valid date")
+    if not _finite(h["start"]) or (h.get("end") is not None and not _finite(h["end"])):
+        raise SessionFormatError("the session header has no valid start or end time")
+    if not isinstance(h["symbols"], list) or not 0 < len(h["symbols"]) <= limits.MAX_SESSION_SYMBOLS \
+            or not all(isinstance(s, dict) for s in h["symbols"]):
         raise SessionFormatError("the session header has no valid symbol list")
+    syms = [s.get("symbol") for s in h["symbols"]]
+    if any(not isinstance(s, str) or not _SYMBOL.match(s) for s in syms):
+        raise SessionFormatError("the session header has no valid symbol list")
+    if not isinstance(h["initial"], dict):
+        raise SessionFormatError("the session header has no valid starting quotes")
     missing = [s for s in syms if s not in h["initial"]]
     if missing:
-        raise SessionFormatError(f"the session header has no starting quote for {', '.join(missing)}")
+        raise SessionFormatError(f"the session header has no starting quote for {', '.join(missing[:5])}")
+    for sym in syms:
+        raw = h["initial"][sym]
+        if not isinstance(raw, dict):
+            raise SessionFormatError(f"the starting quote for {sym} is not valid")
+        for k in HEADER_DECIMALS:
+            if raw.get(k) is not None and _number(raw[k], positive=False) is None:
+                raise SessionFormatError(f"the starting {k.replace('_', ' ')} for {sym} is not a finite number")
+    for k in ("label", "description", "source"):
+        if h.get(k) is not None and not isinstance(h[k], str):
+            raise SessionFormatError(f"the session header's {k} is not text")
+
+
+_MAX_VALUE = Decimal("1e12")
+
+
+def _finite(v) -> bool:
+    return not isinstance(v, bool) and isinstance(v, (int, float, Decimal)) and Decimal(str(v)).is_finite()
+
+
+def _number(v, positive: bool) -> Optional[Decimal]:
+    """A finite, non-negative (or positive) number not above 1e12 from a session file, else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float, Decimal, str)) or (isinstance(v, str) and len(v) > 40):
+        return None
+    try:
+        d = Decimal(str(v))
+    except ArithmeticError:
+        return None
+    if not d.is_finite() or d < 0 or (positive and d == 0) or d > _MAX_VALUE:
+        return None
+    return d
+
+
+def _context_symbol(sym, known: set) -> str:
+    if not isinstance(sym, str) or sym not in known:
+        raise SessionFormatError(f"context bars for unknown symbol {str(sym)[:20]}")
+    return sym
+
+
+def _bars(rows) -> list:
+    """[[ts, open, high, low, close, volume], ...] with finite numbers only."""
+    if not isinstance(rows, list):
+        raise SessionFormatError("context bars are not a list")
+    out = []
+    for r in rows:
+        if not isinstance(r, list) or len(r) < 6 or not all(_finite(v) for v in r[:6]):
+            raise SessionFormatError("a context bar is not six finite numbers")
+        out.append([int(r[0]), *(float(v) for v in r[1:6])])
+    return out
 
 
 @dataclass
@@ -170,17 +229,29 @@ def _open(path) -> IO[str]:
     return io.TextIOWrapper(gzip.open(path, "rb"), encoding="utf-8")
 
 
+def _no_constant(name):
+    raise ValueError(f"{name} is not a number")
+
+
 def _loads(line: str):
-    return json.loads(line, parse_float=Decimal)
+    return json.loads(line, parse_float=Decimal, parse_constant=_no_constant)
+
+
+def _line(f, limit: int) -> str:
+    """One line, read with a bound: a damaged or crafted file cannot make a reader hold a huge line."""
+    line = f.readline(limit + 1)
+    if len(line) > limit:
+        raise SessionFormatError(f"a line in the session file is longer than {limit // limits.MB} MB")
+    return line
 
 
 def read_header(path) -> dict:
     """Read only the first line. Cheap, used to list sessions."""
     try:
         with _open(path) as f:
-            line = f.readline()
-        h = json.loads(line)
-    except (OSError, EOFError, ValueError) as e:
+            line = _line(f, limits.MAX_SESSION_HEADER)
+        h = json.loads(line, parse_constant=_no_constant)
+    except (OSError, EOFError, ValueError, UnicodeDecodeError, RecursionError) as e:
         raise SessionFormatError(f"cannot read {os.path.basename(os.fspath(path))}: {e}") from None
     if not isinstance(h, dict):
         raise SessionFormatError("not a PaperDesk session file")
@@ -191,10 +262,16 @@ def read_header(path) -> dict:
 def iter_records(path) -> Iterator:
     """Yield every line after the header as parsed JSON (dicts for context/trailer, lists for events)."""
     with _open(path) as f:
-        f.readline()
-        for line in f:
+        _line(f, limits.MAX_SESSION_HEADER)
+        while True:
+            line = _line(f, limits.MAX_SESSION_LINE)
+            if not line:
+                return
             if line.strip():
-                yield _loads(line)
+                try:
+                    yield _loads(line)
+                except (ValueError, RecursionError) as e:
+                    raise SessionFormatError(f"the session file has a line that is not valid JSON: {str(e)[:80]}") from None
 
 
 def read_session(path) -> SessionData:
@@ -208,29 +285,43 @@ def read_session(path) -> SessionData:
             if trailer is not None:
                 raise SessionFormatError("data after the end marker")
             if isinstance(rec, list):
+                if len(rec) < 3 or not _finite(rec[1]) or not isinstance(rec[2], str):
+                    raise SessionFormatError(f"bad event {str(rec[:3])[:80]}")
                 kind, ts, sym = rec[0], float(rec[1]), rec[2]
                 if sym not in known:
-                    raise SessionFormatError(f"event for unknown symbol {sym}")
+                    raise SessionFormatError(f"event for unknown symbol {sym[:20]}")
                 if ts < last:
                     raise SessionFormatError("events are not in time order")
                 last = ts
                 if kind == QUOTE and len(rec) == 7:
-                    data.events.append((ts, QUOTE, sym, Decimal(rec[3]), Decimal(rec[4]), Decimal(rec[5]), Decimal(rec[6])))
+                    vals = [_number(rec[3], False), _number(rec[4], True), _number(rec[5], False), _number(rec[6], False)]  # a zero bid is "no bid"
+                    if any(v is None for v in vals):
+                        raise SessionFormatError(f"a quote for {sym} at {ts:.0f} has a price or size that is not a valid number")
+                    data.events.append((ts, QUOTE, sym, *vals))
                 elif kind == TRADE and len(rec) == 5:
-                    data.events.append((ts, TRADE, sym, Decimal(rec[3]), Decimal(rec[4])))
+                    vals = [_number(rec[3], True), _number(rec[4], False)]
+                    if any(v is None for v in vals):
+                        raise SessionFormatError(f"a trade for {sym} at {ts:.0f} has a price or size that is not a valid number")
+                    data.events.append((ts, TRADE, sym, *vals))
                 else:
-                    raise SessionFormatError(f"unknown event {rec[:3]}")
+                    raise SessionFormatError(f"unknown event {str(rec[:3])[:80]}")
+            elif not isinstance(rec, dict):
+                raise SessionFormatError("the session file has a line that is neither an event nor an object")
             elif "daily" in rec:
-                data.daily[rec["daily"]] = [[int(r[0]), *(float(v) for v in r[1:6])] for r in rec["bars"]]
+                data.daily[_context_symbol(rec["daily"], known)] = _bars(rec.get("bars"))
             elif "minutes" in rec:
-                data.minutes[rec["minutes"]] = [[int(r[0]), *(float(v) for v in r[1:6])] for r in rec["bars"]]
+                data.minutes[_context_symbol(rec["minutes"], known)] = _bars(rec.get("bars"))
             elif "end" in rec:
+                if not isinstance(rec["end"], dict):
+                    raise SessionFormatError("the session file's end marker is not valid")
                 trailer = rec["end"]
             # unknown object lines are ignored so later minor versions can add context
     except (OSError, EOFError) as e:
         raise SessionFormatError(f"the session file is damaged: {e}") from None
     if trailer is None:
         raise SessionFormatError("the session file is incomplete (no end marker); it may have been cut off")
+    if not isinstance(trailer.get("events", -1), int) or (trailer.get("end") is not None and not _finite(trailer["end"])):
+        raise SessionFormatError("the session file's end marker is not valid")
     if int(trailer.get("events", -1)) != len(data.events):
         raise SessionFormatError("the session file's event count does not match its end marker")
     end = trailer.get("end") or header.get("end") or last

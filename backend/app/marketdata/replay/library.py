@@ -31,8 +31,9 @@ def list_sessions(dirs: list) -> list:
             row = {"id": sid, "bundled": os.path.abspath(d) == BUNDLED_DIR, "size_bytes": os.path.getsize(path)}
             try:
                 h = read_header(path)
-            except SessionFormatError as e:
-                rows.append({**row, "error": str(e), "label": name, "date": "", "symbols": []})
+            except Exception as e:  # noqa: BLE001 - one bad file is listed with its error, never breaks the list
+                msg = str(e) if isinstance(e, SessionFormatError) else f"cannot read {name}: {type(e).__name__}"
+                rows.append({**row, "error": msg[:300], "label": name, "date": "", "symbols": []})
                 continue
             rows.append({**row, "label": h.get("label") or sid, "description": h.get("description", ""),
                          "date": h["date"], "start": h["start"], "end": h.get("end"),

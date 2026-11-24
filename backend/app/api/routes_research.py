@@ -6,10 +6,11 @@ can always label where the data came from (see app/marketdata/research.py).
 from datetime import date
 from typing import Optional
 
-from fastapi import Query
+from fastapi import HTTPException, Query, Request
 
 from ..marketdata.config import wanted_symbols
 from ..marketdata.research import ResearchHub
+from .hardening import ClientRate
 
 
 def register(app, ctx):
@@ -26,6 +27,19 @@ def register(app, ctx):
             reason = ("The synthetic feed uses fictional companies, so there is no real news, calendar or "
                       "fundamental data for them." if feed.simulated else "This feed has no research data.")
             h = ResearchHub(simulated_reason=reason)
+        return h
+
+    rate = ClientRate()
+
+    def budget(request: Request, h: ResearchHub) -> ResearchHub:
+        """Provider-backed GETs are rate limited per client: each distinct request can cost provider calls,
+        and a GET can be triggered by any page the browser opens while the loopback bypass is on."""
+        if h.configured:
+            wait = rate.allow(request.client.host if request.client else "")
+            if wait:
+                secs = max(1, round(wait))
+                raise HTTPException(429, f"Too many research requests; try again in {secs} seconds.",
+                                    headers={"Retry-After": str(secs)})
         return h
 
     def symbol_of(symbol: str) -> str:
@@ -49,18 +63,22 @@ def register(app, ctx):
         return hub().sources()
 
     @app.get("/api/research/news/{symbol}")
-    def news(symbol: str, limit: int = Query(20, ge=1, le=50)):
-        return ctx.plain(hub().news(symbol_of(symbol), limit))
+    def news(request: Request, symbol: str, limit: int = Query(20, ge=1, le=50)):
+        sym = symbol_of(symbol)
+        return ctx.plain(budget(request, hub()).news(sym, limit))
 
     @app.get("/api/research/calendar/{symbol}")
-    def calendar(symbol: str):
-        return ctx.plain(hub().calendar(symbol_of(symbol)))
+    def calendar(request: Request, symbol: str):
+        sym = symbol_of(symbol)
+        return ctx.plain(budget(request, hub()).calendar(sym))
 
     @app.get("/api/research/corporate-actions/{symbol}")
-    def corporate_actions(symbol: str, start: Optional[str] = None, end: Optional[str] = None,
-                          types: Optional[str] = None):
-        return ctx.plain(hub().corporate_actions(symbol_of(symbol), parse_day(start, "start"), parse_day(end, "end"), types))
+    def corporate_actions(request: Request, symbol: str, start: Optional[str] = Query(None, max_length=10),
+                          end: Optional[str] = Query(None, max_length=10), types: Optional[str] = Query(None, max_length=400)):
+        sym, first, last = symbol_of(symbol), parse_day(start, "start"), parse_day(end, "end")
+        return ctx.plain(budget(request, hub()).corporate_actions(sym, first, last, types))
 
     @app.get("/api/research/fundamentals/{symbol}")
-    def fundamentals(symbol: str):
-        return ctx.plain(hub().fundamentals(symbol_of(symbol)))
+    def fundamentals(request: Request, symbol: str):
+        sym = symbol_of(symbol)
+        return ctx.plain(budget(request, hub()).fundamentals(sym))

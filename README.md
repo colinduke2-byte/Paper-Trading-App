@@ -16,6 +16,7 @@ Nothing here is investment advice.
 | [docs/QUICK_START.md](docs/QUICK_START.md) | One page: from nothing to a first paper trade on Windows, then phone access |
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | The full guide: install, the screen, orders, how fills work, accounts and margin, options, reports, replay, phone access, real data, troubleshooting, glossary |
 | [docs/KNOWN_LIMITS.md](docs/KNOWN_LIMITS.md) | What is simulated, approximate, untested or not built |
+| [docs/LIMITS.md](docs/LIMITS.md) | Size and count limits, number bounds, provider and file hardening, file permissions |
 | [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) | Alpaca and Finnhub: facts, setup, how the adapter works |
 | [docs/REPLAY.md](docs/REPLAY.md) | Historical replay and the session file format |
 | [docs/PLAN.md](docs/PLAN.md) | The original plan (not a description of what exists) |
@@ -54,6 +55,7 @@ The first start creates two accounts (a 100,000 margin account and a 25,000 cash
 | `PAPERDESK_SESSION_DAYS` | `30` | Sign-ins expire after this many days without use |
 | `PAPERDESK_LOOPBACK_BYPASS` | `1` | `1`: browsers on this computer skip the passcode. `0`: everyone signs in |
 | `PAPERDESK_ALLOWED_HOSTS` | unset | Extra host names to answer to besides `localhost` (for example `mypc.local`); in LAN mode IP addresses always work |
+| `PAPERDESK_API_DOCS` | `0` | `1`: turn on FastAPI's `/docs`, `/redoc` and `/openapi.json` for development (they load scripts from a CDN) |
 | `PAPERDESK_BIND` | `127.0.0.1` | Docker only: where compose publishes the port. `0.0.0.0` is refused without LAN mode |
 | `PAPERDESK_FEED`, `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `FINNHUB_API_KEY`, ... | unset | Real market data: see [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) |
 

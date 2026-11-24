@@ -15,6 +15,7 @@ export async function lastPrice(request: APIRequestContext, symbol: string): Pro
 }
 
 type Fixtures = {
+  cleanup: void;
   problems: string[];
   account: Account;
   open: (account?: Account, symbol?: string) => Promise<void>;
@@ -23,6 +24,19 @@ type Fixtures = {
 // Every test fails if the page logs a console error or throws. A fresh account is created for each
 // test, so tests do not depend on each other's orders or positions.
 export const test = base.extend<Fixtures>({
+  // The server keeps at most 20 accounts, so every account a test creates (through the API or the UI) is
+  // deleted when the test ends.
+  cleanup: [async ({ request }, use) => {
+    // On the passcode server the request context is not signed in; nothing is listed and nothing is deleted.
+    const ids = async () => {
+      const r = await request.get("/api/accounts");
+      return r.ok() ? ((await r.json()) as { id: string }[]).map((a) => a.id) : null;
+    };
+    const before = await ids();
+    await use();
+    const after = before && (await ids());
+    for (const id of after || []) if (!before!.includes(id)) await request.delete(`/api/accounts/${id}`);
+  }, { auto: true }],
   problems: [async ({ page }, use) => {
     const problems: string[] = [];
     page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()}`); });

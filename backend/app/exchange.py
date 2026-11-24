@@ -13,7 +13,8 @@ from .core import calendar as cal
 from .core import models as m
 from .core.clock import Clock
 from .core.models import Fill, Order, Quote, from_plain, to_plain
-from .core.money import CENT, ZERO, D, cents, parse as parse_num
+from .core import limits
+from .core.money import CENT, TENTH_MILL, ZERO, D, cents, check_price, parse as parse_num, parse_cash, parse_price
 from .ledger.account import Account
 from .lifecycle.manager import LifecycleManager
 from .marketdata.feed import MarketDataProvider
@@ -68,6 +69,7 @@ class Exchange:
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
         self.dirty = False
+        self.faults: dict[str, str] = {}  # account id -> why it cannot be valued right now (see isolated())
         self.lifecycle = LifecycleManager(self)  # corporate actions, settlement, interest, PDT, margin calls
 
     # ---- time and market state -----------------------------------------
@@ -119,9 +121,9 @@ class Exchange:
 
     # ---- accounts --------------------------------------------------------
     def create_account(self, name: str, type: str = "margin", starting_cash=Decimal("100000")) -> Account:
-        starting_cash = D(starting_cash)
-        if starting_cash <= 0 or starting_cash > Decimal("1000000000"):
-            raise ValueError("starting cash must be between 0 and 1,000,000,000")
+        starting_cash = parse_cash(starting_cash)
+        if len(self.accounts) >= limits.MAX_ACCOUNTS:
+            raise ValueError(f"you can have at most {limits.MAX_ACCOUNTS} accounts; delete one first")
         name = (name or "").strip()[:40] or "Paper account"
         acct = Account(f"A{next(self._acct_seq):04d}", name, type, starting_cash, self.now())
         self.accounts[acct.id] = acct
@@ -130,13 +132,22 @@ class Exchange:
 
     def reset_account(self, account_id: str, starting_cash=None) -> Account:
         old = self.account(account_id)
+        # Validate everything before anything is replaced: a refused reset leaves the account as it was.
+        if starting_cash is not None:
+            starting_cash = parse_cash(starting_cash)
+        else:
+            try:
+                starting_cash = parse_cash(old.starting_cash)
+            except ValueError:
+                raise ValueError("this account's starting cash is not valid; give a new starting cash to reset it") from None
         for o in self.engine.active_orders():
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
-        new = Account(old.id, old.name, old.type, D(starting_cash) if starting_cash is not None else old.starting_cash, self.now())
+        new = Account(old.id, old.name, old.type, starting_cash, self.now())
         new.settings = dict(old.settings)  # a reset keeps the account's rule settings
         self.accounts[old.id] = new
+        self.faults.pop(old.id, None)
         self.dirty = True
         return new
 
@@ -146,6 +157,7 @@ class Exchange:
             raise ValueError("cannot delete the only account")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
         del self.accounts[account_id]
+        self.faults.pop(account_id, None)
         self.dirty = True
 
     def account(self, account_id: str) -> Account:
@@ -153,6 +165,34 @@ class Exchange:
             return self.accounts[account_id]
         except KeyError:
             raise KeyError(f"no such account {account_id}")
+
+    def isolated(self, account, fn, what: str):
+        """Run fn(); if it fails, record a fault on this account and return None instead of raising.
+
+        One damaged account (an impossible number from an old state file, say) must not stop the
+        tick, the stream or the account list for every other account. The fault is shown in the
+        account list so the user can reset or delete that account.
+        """
+        try:
+            out = fn()
+        except Exception as e:  # noqa: BLE001 - any failure of one account is contained
+            reason = f"{what} failed: {type(e).__name__}"
+            if self.faults.get(account.id) != reason:
+                print(f"account {account.id}: {reason}: {e!r}"[:300])
+            self.faults[account.id] = reason
+            return None
+        return out
+
+    def safe_summary(self, account_id: str) -> dict:
+        """summary(), or a flagged row for an account that cannot be valued."""
+        a = self.account(account_id)
+        out = self.isolated(a, lambda: self.summary(account_id), "valuing the account")
+        if out is not None:
+            self.faults.pop(account_id, None)
+            return out
+        return {"id": a.id, "name": a.name, "type": a.type, "broken": True,
+                "error": "This account cannot be valued (" + self.faults.get(a.id, "unknown error")
+                         + "). Reset it with a new starting cash or delete it."}
 
     def summary(self, account_id: str) -> dict:
         a = self.account(account_id)
@@ -374,8 +414,8 @@ class Exchange:
             symbol = str(req.get("symbol", "")).upper().strip()
             side, typ = req.get("side"), req.get("type", m.MARKET)
             tif = req.get("tif", m.DAY)
-            qty = parse_num(req.get("qty"))
-            num = lambda k: parse_num(req[k]) if req.get(k) not in (None, "") else None
+            qty = parse_num(req.get("qty"), "quantity")
+            num = lambda k: parse_num(req[k], k.replace("_", " ")) if req.get(k) not in (None, "") else None
             limit, stop = num("limit_price"), num("stop_price")
             trail_amt, trail_pct = num("trail_amount"), num("trail_percent")
             take_profit, stop_loss = num("take_profit"), num("stop_loss")
@@ -414,9 +454,11 @@ class Exchange:
                          ("trail percent", trail_pct), ("take profit", take_profit), ("stop loss", stop_loss)):
             if v is not None and v <= 0:
                 raise OrderRejected(f"{label} must be positive")
-        for label, v in (("limit price", limit), ("stop price", stop), ("take profit", take_profit), ("stop loss", stop_loss)):
-            if v is not None and v != v.quantize(CENT if v >= 1 else Decimal("0.0001")):
-                raise OrderRejected(f"{label} has too many decimal places")
+        for label, v in (("limit price", limit), ("stop price", stop), ("take profit", take_profit),
+                         ("stop loss", stop_loss), ("trail amount", trail_amt)):
+            self._price_ok(v, label)
+        if trail_pct is not None and trail_pct != trail_pct.quantize(TENTH_MILL):
+            raise OrderRejected("trail percent supports at most 4 decimal places")
         if typ in (m.LIMIT, m.STOP_LIMIT, m.LOO, m.LOC) and limit is None:
             raise OrderRejected("limit price is required")
         if typ in (m.STOP, m.STOP_LIMIT) and stop is None:
@@ -463,6 +505,18 @@ class Exchange:
                 c.parent_id = c.oco_group = entry.id
                 c.status = m.HELD
         return orders
+
+    @staticmethod
+    def _price_ok(v: Optional[Decimal], label: str) -> None:
+        """The price domain shared by new orders and changes: positive, on the tick grid, in range."""
+        if v is not None:
+            try:
+                check_price(v, label)
+            except ValueError as e:
+                raise OrderRejected(str(e)) from None
+
+    def _working_count(self, account_id: str) -> int:
+        return sum(1 for o in self.engine.orders.values() if o.account_id == account_id and o.active)
 
     def _estimate_price(self, o: Order) -> Decimal:
         q = self.quote(o.symbol)
@@ -709,6 +763,9 @@ class Exchange:
                     return [o] + [c for c in self.engine.orders.values()
                                   if c.id != o.id and (c.parent_id == o.id or c.oco_group == o.id)]
         orders = self._validate(a, req)
+        if self._working_count(account_id) + len(orders) > limits.MAX_WORKING_ORDERS:
+            raise OrderRejected(f"an account can have at most {limits.MAX_WORKING_ORDERS} open orders; "
+                                "cancel some first")
         entry = orders[0]
         worst = self._risk_check(a, orders)
         if not (worst.closing or worst.ok):
@@ -753,15 +810,22 @@ class Exchange:
         a = self.account(account_id)
         if o.legs:
             raise OrderRejected("a multi-leg order cannot be changed; cancel it and enter a new one")
+        if not isinstance(req, dict):
+            raise OrderRejected("a change must be a JSON object")
         try:
-            num = lambda k: parse_num(req[k]) if req.get(k) not in (None, "") else None
-            qty, limit, stop = num("qty"), num("limit_price"), num("stop_price")
+            num = lambda k, label: parse_num(req[k], label) if req.get(k) not in (None, "") else None
+            qty, limit, stop = num("qty", "quantity"), num("limit_price", "limit price"), num("stop_price", "stop price")
         except (ValueError, ArithmeticError) as e:
-            raise ValueError(f"invalid number: {e}")
+            raise OrderRejected(f"invalid number in change: {e}")
         _in_range(qty, limit, stop)
         for v in (qty, limit, stop):
             if v is not None and v <= 0:
                 raise ValueError("values must be positive")
+        # The same price domain as a new order: tick size, range. A change cannot leave a sub-cent limit.
+        self._price_ok(limit, "limit price")
+        self._price_ok(stop, "stop price")
+        if qty is not None and parse_option(o.symbol) is not None and qty != qty.to_integral_value():
+            raise OrderRejected("options trade in whole contracts")
         if qty is not None and qty > o.qty and o.oco_group:
             # the group's size is what its orders had when it was entered; fills on one have
             # already been taken off the others, and raising one would let the group over-fill
@@ -1057,8 +1121,11 @@ class Exchange:
         self._check_alerts(quotes, now)
         if now - self._last_equity_sample >= 60:
             self._last_equity_sample = now
-            for a in self.accounts.values():
-                eq = self.summary(a.id)["equity"]
+            for a in list(self.accounts.values()):
+                summ = self.isolated(a, lambda: self.summary(a.id), "valuing the account")
+                if summ is None:
+                    continue
+                eq = summ["equity"]
                 a.equity_history.append([int(now), str(eq)])
                 if len(a.equity_history) > 6000:
                     a.equity_history = a.equity_history[::2]
@@ -1134,9 +1201,9 @@ class Exchange:
             raise ValueError(f"unknown symbol {symbol}")
         if op not in ("above", "below"):
             raise ValueError("alert must be 'above' or 'below'")
-        price = parse_num(price)
-        if price <= 0:
-            raise ValueError("price must be positive")
+        price = parse_price(price, "alert price")
+        if len(self.alerts) >= limits.MAX_ALERTS:
+            raise ValueError(f"you can have at most {limits.MAX_ALERTS} alerts; delete some first")
         alert = {"id": f"AL{next(self._alert_seq):05d}", "symbol": symbol, "op": op, "price": str(price),
                  "created_at": self.now(), "triggered_at": None}
         self.alerts.append(alert)

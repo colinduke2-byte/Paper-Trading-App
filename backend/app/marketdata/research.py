@@ -12,12 +12,14 @@ processing stream; see docs/DATA_PROVIDERS.md for the exact record shape.
 import logging
 import threading
 import time
+from collections import OrderedDict
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Callable, Optional
 
 from ..core import calendar as cal
-from .http import ProviderError, dec, parse_ts
+from ..core import limits
+from .http import ProviderError, dec, parse_ts, safe_url
 
 log = logging.getLogger("paperdesk.research")
 
@@ -60,9 +62,9 @@ def news_records(rows: list) -> list:
     """Alpaca /v1beta1/news articles -> plain records (newest first)."""
     out = []
     for r in rows or []:
-        images = {i.get("size"): i.get("url") for i in r.get("images") or []}
+        images = {i.get("size"): safe_url(i.get("url")) or None for i in r.get("images") or [] if isinstance(i, dict)}
         out.append({"id": r.get("id"), "headline": r.get("headline") or "", "summary": r.get("summary") or "",
-                    "source": r.get("source") or "", "url": r.get("url") or "", "author": r.get("author") or "",
+                    "source": r.get("source") or "", "url": safe_url(r.get("url")), "author": r.get("author") or "",
                     "created_at": parse_ts(r.get("created_at")), "updated_at": parse_ts(r.get("updated_at")),
                     "symbols": r.get("symbols") or [], "image": images.get("thumb") or images.get("small"),
                     "provider": "alpaca"})
@@ -78,15 +80,58 @@ def envelope(source, items=None, *, as_of=None, available=True, stale=False, rea
     return out
 
 
+CA_RECORD_TYPES = frozenset(CA_TYPES.values())
+
+
+def clean_types(types: Optional[str]) -> Optional[str]:
+    """A comma-separated list of corporate-action record types, checked against the known set and
+    written in one canonical order (so equal requests share a cache entry). None means all types."""
+    if types is None or not str(types).strip():
+        return None
+    parts = sorted({t.strip().lower() for t in str(types)[:2000].split(",") if t.strip()})
+    bad = [t for t in parts if t not in CA_RECORD_TYPES]
+    if bad:
+        shown = ", ".join(t[:limits.MAX_ECHO_TEXT] for t in bad[:3])
+        raise ValueError(f"unknown corporate action type {shown}; choose from {', '.join(sorted(CA_RECORD_TYPES))}")
+    return ",".join(parts)
+
+
+def clamp_range(start: Optional[date], end: Optional[date], today: date) -> tuple:
+    """Default to the last year and the next 90 days; keep any range within RESEARCH_MAX_RANGE_DAYS and
+    within five years back and one year ahead, so request parameters cannot multiply provider calls."""
+    span = timedelta(days=limits.RESEARCH_MAX_RANGE_DAYS)
+    lo, hi = today - timedelta(days=5 * 365), today + timedelta(days=365)
+    start, end = start or today - timedelta(days=365), end or today + timedelta(days=90)
+    start, end = min(max(start, lo), hi), min(max(end, lo), hi)
+    if end < start:
+        raise ValueError("the end date is before the start date")
+    if end - start > span:
+        end = start + span
+    return start, end
+
+
 class _Cache:
-    def __init__(self, clock):
-        self.clock, self.rows, self.lock = clock, {}, threading.Lock()
+    """Provider responses by request. Bounded: least recently used entries go first, and nothing is
+    kept longer than RESEARCH_CACHE_MAX_AGE (a stale entry is only kept to bridge a failed refresh)."""
+
+    def __init__(self, clock, max_rows: int = limits.RESEARCH_CACHE_ROWS, max_age: float = limits.RESEARCH_CACHE_MAX_AGE):
+        self.clock, self.rows, self.lock = clock, OrderedDict(), threading.Lock()
+        self.max_rows, self.max_age = max_rows, max_age
+
+    def _evict(self, now: float) -> None:
+        for k in [k for k, (at, _) in self.rows.items() if now - at > self.max_age]:
+            del self.rows[k]
+        while len(self.rows) > self.max_rows:
+            self.rows.popitem(last=False)
 
     def get(self, key, ttl, fetch: Callable[[], object]):
         """(value, fetched_at, stale, error). Serves the last good value when a refresh fails."""
         now = self.clock()
         with self.lock:
+            self._evict(now)
             hit = self.rows.get(key)
+            if hit:
+                self.rows.move_to_end(key)
         if hit and now - hit[0] < ttl:
             return hit[1], hit[0], False, None
         try:
@@ -97,6 +142,8 @@ class _Cache:
             return None, None, True, e.message
         with self.lock:
             self.rows[key] = (now, value)
+            self.rows.move_to_end(key)
+            self._evict(now)
         return value, now, False, None
 
 
@@ -131,7 +178,13 @@ class ResearchHub:
     def today(self) -> date:
         return cal.ny_date(self.clock())
 
+    @property
+    def configured(self) -> bool:
+        """True when requests here can spend a provider's budget."""
+        return bool(self.alpaca or self.finnhub)
+
     def news(self, symbol: str, limit: int = 20) -> dict:
+        limit = max(1, min(int(limit), 50))
         if self.alpaca:
             v = self.cache.get(("news", symbol, limit), 300, lambda: news_records(self.alpaca.news(symbol, limit, max_wait=5)))
             return self._wrap("Alpaca", *v)
@@ -145,8 +198,8 @@ class ResearchHub:
                           types: Optional[str] = None) -> dict:
         if not self.alpaca:
             return self._none("corporate actions", "Set APCA_API_KEY_ID and APCA_API_SECRET_KEY.")
-        t = self.today()
-        start, end = start or t - timedelta(days=365), end or t + timedelta(days=90)
+        start, end = clamp_range(start, end, self.today())
+        types = clean_types(types)
         v = self.cache.get(("ca", symbol, start, end, types), 3600, lambda: corporate_action_records(
             self.alpaca.corporate_actions(symbol, start.isoformat(), end.isoformat(), types, max_wait=5)))
         return self._wrap("Alpaca", *v)

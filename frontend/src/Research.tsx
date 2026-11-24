@@ -1,4 +1,5 @@
 import { usePoll } from "./Market";
+import { safeUrl } from "./safeUrl";
 import { compact, dateTime, money } from "./util";
 import "./Research.css";
 
@@ -28,7 +29,9 @@ function News({ symbol }: { symbol: string }) {
       <ul className="rs-news">
         {items.map((n) => (
           <li key={n.id ?? n.url}>
-            <a href={n.url} target="_blank" rel="noopener noreferrer">{n.headline}</a>
+            {safeUrl(n.url)
+              ? <a href={safeUrl(n.url)} target="_blank" rel="noopener noreferrer">{n.headline}</a>
+              : <span>{n.headline}</span>}
             <div className="muted rs-meta">{n.source}{n.created_at ? ` · ${dateTime(n.created_at)}` : ""}</div>
             {n.summary && <p className="rs-summary">{stripTags(n.summary)}</p>}
           </li>
@@ -127,6 +130,7 @@ export function feedBanner(s: any): { text: string; title: string } {
   const title = [s.data_note, s.fallback_reason, s.stream?.message].filter(Boolean).join(" ");
   if (s.simulated_data) return { text: " · simulated market data", title };
   const src = s.data_source || s.feed;
+  if (s.data_warning) return { text: ` · ${src} feed sent invalid data`, title: [s.data_warning, title].filter(Boolean).join(" ") };
   if (s.stale) return { text: ` · ${src} prices may be stale (feed interrupted)`, title };
   if (s.realtime === false || s.delay_seconds) return { text: ` · ${src} data delayed ${Math.round((s.delay_seconds || 900) / 60)} min`, title };
   return { text: ` · real-time ${s.data_exchange || ""} prices via ${src}`.replace("  ", " "), title };

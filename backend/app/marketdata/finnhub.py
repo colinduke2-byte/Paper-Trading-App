@@ -11,7 +11,7 @@ import time
 from datetime import date, timedelta
 from typing import Optional
 
-from .http import JsonClient, RateLimiter, Transport, dec, parse_ts
+from .http import JsonClient, RateLimiter, Transport, dec, parse_ts, safe_url
 
 BASE_URL = "https://finnhub.io/api/v1"
 
@@ -56,9 +56,9 @@ def news_records(rows: list) -> list:
     out = []
     for r in rows or []:
         out.append({"id": r.get("id"), "headline": r.get("headline") or "", "summary": r.get("summary") or "",
-                    "source": r.get("source") or "", "url": r.get("url") or "", "author": "",
+                    "source": r.get("source") or "", "url": safe_url(r.get("url")), "author": "",
                     "created_at": float(r["datetime"]) if r.get("datetime") is not None else None,
-                    "symbols": [s for s in (r.get("related") or "").split(",") if s], "image": r.get("image") or None,
+                    "symbols": [s for s in (r.get("related") or "").split(",") if s], "image": safe_url(r.get("image")) or None,
                     "provider": "finnhub"})
     return sorted(out, key=lambda r: r["created_at"] or 0, reverse=True)
 

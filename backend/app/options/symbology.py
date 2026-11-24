@@ -24,9 +24,20 @@ class Contract:
         return cal.close_ts(self.expiry)
 
 
-@lru_cache(maxsize=20000)
+MAX_OCC = 21  # 6-letter root + YYMMDD + C/P + 8-digit strike
+
+
 def parse(symbol: str) -> Optional[Contract]:
-    m = _RE.match(symbol or "")
+    """The contract an OCC symbol names, or None. Text that cannot be an OCC symbol (not a string, or
+    too long) is refused before the cache, so request text never fills it."""
+    if not isinstance(symbol, str) or not 15 <= len(symbol) <= MAX_OCC:
+        return None
+    return _parse(symbol)
+
+
+@lru_cache(maxsize=20000)
+def _parse(symbol: str) -> Optional[Contract]:
+    m = _RE.match(symbol)
     if not m:
         return None
     root, yy, mm, dd, kind, strike = m.groups()

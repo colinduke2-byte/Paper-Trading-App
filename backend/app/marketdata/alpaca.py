@@ -36,7 +36,7 @@ from ..options import chain as optchain
 from ..options import pricing
 from ..options.symbology import Contract, build, parse as parse_option
 from .feed import TIMEFRAMES, MarketDataProvider
-from .http import JsonClient, ProviderError, RateLimiter, Transport, dec, loads, parse_ts
+from .http import JsonClient, ProviderError, RateLimiter, Transport, dec, invalid_status, loads, parse_ts, price
 
 log = logging.getLogger("paperdesk.alpaca")
 
@@ -190,7 +190,7 @@ class SymbolState:
     def apply_quote(self, raw: dict, ts: float) -> bool:
         if ts < self.quote_ts:
             return False
-        self.bid, self.ask = dec(raw.get("bp")), dec(raw.get("ap"))
+        self.bid, self.ask = price(raw.get("bp")), price(raw.get("ap"))
         self.bid_size = (dec(raw.get("bs")) or ZERO) * ROUND_LOT
         self.ask_size = (dec(raw.get("as")) or ZERO) * ROUND_LOT
         self.quote_ts = ts
@@ -199,7 +199,7 @@ class SymbolState:
     def apply_trade(self, raw: dict, ts: float, count_volume: bool) -> bool:
         if ts < self.trade_ts:
             return False
-        p, s = dec(raw.get("p")), dec(raw.get("s")) or ZERO
+        p, s = price(raw.get("p")), dec(raw.get("s")) or ZERO
         if p is None or p <= 0:
             return False
         self.last, self.last_size, self.trade_ts, self.new_trade = p, s, ts, True
@@ -223,17 +223,17 @@ class SymbolState:
         daily, prev = snap.get("dailyBar"), snap.get("prevDailyBar")
         if daily and (dts := parse_ts(daily.get("t"))) is not None:
             if cal.ny_date(dts) == today:
-                self.open, self.high, self.low = dec(daily["o"]), dec(daily["h"]), dec(daily["l"])
+                self.open, self.high, self.low = price(daily.get("o")), price(daily.get("h")), price(daily.get("l"))
                 self.volume = dec(daily.get("v")) or ZERO
                 if prev:
-                    self.prev_close = dec(prev.get("c"))
+                    self.prev_close = price(prev.get("c"))
             else:  # before today's first trade the daily bar is the previous session
-                self.prev_close = dec(daily.get("c"))
+                self.prev_close = price(daily.get("c"))
                 self.open = self.high = self.low = None
                 self.volume = ZERO
             changed = True
         elif prev:
-            self.prev_close = dec(prev.get("c"))
+            self.prev_close = price(prev.get("c"))
         return changed
 
     def to_quote(self) -> Optional[Quote]:
@@ -265,8 +265,8 @@ class SymbolState:
 
 def option_quote_from_snapshot(symbol: str, snap: dict) -> Optional[Quote]:
     q, t = snap.get("latestQuote") or {}, snap.get("latestTrade") or {}
-    bid, ask = dec(q.get("bp")) or ZERO, dec(q.get("ap")) or ZERO
-    last = dec(t.get("p"))
+    bid, ask = price(q.get("bp")) or ZERO, price(q.get("ap")) or ZERO
+    last = price(t.get("p"))
     if ask <= 0 and not last:
         return None
     if ask < bid:
@@ -910,7 +910,8 @@ class AlpacaFeed(MarketDataProvider):
                 "stream": {"state": p.phase, "message": p.error, "streamed": len(p.streamed()), "cap": p.cap,
                            "polled": self._polled_count},
                 "stale": stale, "rest_error": self.rest.http.last_error, "assets": len(self.info),
-                "assets_error": self.assets_error, "fallback_reason": None}
+                "assets_error": self.assets_error, "fallback_reason": None,
+                "data_warning": invalid_status()}
 
 
 # ---------------------------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import { AccountFault } from "./AccountFault";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chart, SHORTCUTS_EVENT } from "./Chart";
 import { Shortcuts } from "./chart/Shortcuts";
@@ -179,10 +180,14 @@ export default function App() {
   );
   const accountSelect = (
     <select value={accountId} aria-label="Account" onChange={(e) => setAccountId(e.target.value)}>
-      {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
+      {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type}){a.broken ? " · needs attention" : ""}</option>)}
     </select>
   );
-  const marginNotice = summary?.margin_call && (
+  const current = accounts.find((a) => a.id === accountId);
+  const marginNotice = current?.broken ? (
+    <AccountFault account={current} onReset={() => setDialog("reset")}
+      onDeleted={async (msg) => { const list = await loadAccounts(); setAccountId(list[0]?.id || ""); setRefreshKey((k) => k + 1); notify(msg); }} />
+  ) : summary?.margin_call && (
     <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
   );
   const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
@@ -296,7 +301,7 @@ function describeOption(s: string) {
 function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "reset"; account: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
   const [name, setName] = useState("");
   const [type, setType] = useState("margin");
-  const [cash, setCash] = useState(mode === "reset" && account ? String(account.starting_cash) : "100000");
+  const [cash, setCash] = useState(mode === "reset" && account && !account.broken ? String(account.starting_cash) : "100000");
   const [error, setError] = useState("");
   const submit = async () => {
     try {

@@ -3,6 +3,12 @@
 Only GET is implemented on purpose: provider code reads market data and never sends
 orders anywhere. Network access goes through a Transport object so tests can replace
 it with saved responses.
+
+Hardening (docs/LIMITS.md): requests go to https addresses only, redirects are refused (the
+credentials are in the headers, so a redirect to another host must never be followed), responses
+are capped at limits.MAX_PROVIDER_RESPONSE and given an overall deadline, and numbers in provider
+payloads are read tolerantly: an unreadable, infinite or absurd value becomes None and is counted
+(invalid_count()), so one bad record can never raise into the tick.
 """
 import json
 import re
@@ -12,8 +18,48 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Callable, Optional
+
+from ..core import limits
+
+MAX_PROVIDER_NUMBER = Decimal("1e15")  # any provider number larger than this is treated as invalid data
+_invalid = {"count": 0, "last": None}
+_invalid_lock = threading.Lock()
+
+
+def _bad_value(v) -> None:
+    with _invalid_lock:
+        _invalid["count"] += 1
+        _invalid["last"] = repr(v)[:40]
+
+
+def invalid_count() -> int:
+    """How many provider values were dropped as invalid since start-up."""
+    return _invalid["count"]
+
+
+def invalid_status() -> Optional[str]:
+    """A user-facing note when the feed has sent invalid data, else None."""
+    n = _invalid["count"]
+    if not n:
+        return None
+    return (f"The data feed sent {n} invalid value{'s' if n != 1 else ''} (for example {_invalid['last']}); "
+            "they were ignored.")
+
+
+def safe_url(v) -> str:
+    """A link from a provider, kept only when it is an absolute http or https URL; otherwise ""."""
+    if not isinstance(v, str) or not v or len(v) > 2048:
+        return ""
+    v = v.strip()
+    try:
+        parts = urllib.parse.urlsplit(v)
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in ("http", "https") or not parts.netloc or any(c in v for c in "\r\n\t\x00 "):
+        return ""
+    return v
 
 
 class ProviderError(Exception):
@@ -29,23 +75,52 @@ class RateLimited(ProviderError):
     pass
 
 
+class ResponseTooLarge(ProviderError):
+    def __init__(self, max_bytes: int):
+        super().__init__(0, f"the provider sent a response larger than {max_bytes // (1024 * 1024)} MB; it was refused")
+
+
 def loads(text: str):
     """Parse JSON keeping every non-integer number as an exact Decimal."""
     return json.loads(text, parse_float=Decimal)
 
 
 def dec(v) -> Optional[Decimal]:
+    """A provider number as a Decimal; None when missing, and None (counted) when it is not a usable number."""
     if v is None or v == "":
         return None
-    if isinstance(v, Decimal):
-        return v
-    if isinstance(v, bool):
-        raise TypeError("boolean is not a number")
-    if isinstance(v, int):
-        return Decimal(v)
-    if isinstance(v, float):
-        return Decimal(repr(v))
-    return Decimal(str(v))
+    try:
+        if isinstance(v, bool) or not isinstance(v, (Decimal, int, float, str)):
+            raise TypeError(type(v).__name__)
+        if isinstance(v, str) and len(v) > 64:
+            raise ValueError("too long")
+        if isinstance(v, Decimal):
+            d = v
+        elif isinstance(v, float):
+            d = Decimal(repr(v))
+        elif isinstance(v, int):
+            d = Decimal(v) if abs(v) <= MAX_PROVIDER_NUMBER else Decimal("Infinity")
+        else:
+            d = Decimal(v.strip())
+    except (InvalidOperation, ValueError, TypeError):
+        _bad_value(v)
+        return None
+    if not d.is_finite() or abs(d) > MAX_PROVIDER_NUMBER:
+        _bad_value(v)
+        return None
+    return d
+
+
+def price(v) -> Optional[Decimal]:
+    """A provider price: None when missing or zero (a side with no quote), None and counted when it is
+    unreadable, negative or above limits.MAX_PROVIDER_PRICE."""
+    d = dec(v)
+    if d is None or d == 0:
+        return None
+    if d < 0 or d > limits.MAX_PROVIDER_PRICE:
+        _bad_value(v)
+        return None
+    return d
 
 
 _FRACTION = re.compile(r"(\.\d{1,6})\d*")
@@ -72,16 +147,49 @@ class Transport:
         raise NotImplementedError
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the request carries provider keys in its headers."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # urllib then reports the 3xx answer as an HTTPError
+
+
+def read_capped(r, max_bytes: int, deadline: float, clock: Callable[[], float] = time.monotonic) -> bytes:
+    """Read a response body in chunks, refusing more than max_bytes or a transfer past the deadline."""
+    declared = header(dict(r.headers.items()) if getattr(r, "headers", None) else {}, "Content-Length")
+    if declared and declared.isdigit() and int(declared) > max_bytes:
+        raise ResponseTooLarge(max_bytes)
+    chunks, n = [], 0
+    while True:
+        chunk = r.read(64 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        n += len(chunk)
+        if n > max_bytes:
+            raise ResponseTooLarge(max_bytes)
+        if clock() > deadline:
+            raise OSError("the response took too long")
+        chunks.append(chunk)
+
+
 class UrllibTransport(Transport):
-    """Standard-library HTTPS client. It honours HTTPS_PROXY like the rest of Python."""
+    """Standard-library HTTPS client. It honours HTTPS_PROXY like the rest of Python, refuses redirects,
+    caps the response size and gives each request an overall deadline."""
+
+    def __init__(self, max_bytes: int = limits.MAX_PROVIDER_RESPONSE):
+        self.max_bytes = max_bytes
+        self.opener = urllib.request.build_opener(_RefuseRedirects)
 
     def get(self, url: str, headers: dict, timeout: float) -> tuple:
         req = urllib.request.Request(url, headers=headers, method="GET")
+        deadline = time.monotonic() + timeout * 4
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.status, dict(r.headers.items()), r.read().decode("utf-8", "replace")
+            with self.opener.open(req, timeout=timeout) as r:
+                return r.status, dict(r.headers.items()), read_capped(r, self.max_bytes, deadline).decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace") if e.fp else ""
+            if 300 <= e.code < 400:
+                return e.code, {}, "refused to follow a redirect"
+            body = read_capped(e, 64 * 1024, deadline).decode("utf-8", "replace") if e.fp else ""
             return e.code, dict(e.headers.items()) if e.headers else {}, body
         except urllib.error.URLError as e:
             raise OSError(str(e.reason)) from None
@@ -166,8 +274,10 @@ class JsonClient:
 
     def __init__(self, name: str, headers: dict, transport: Optional[Transport] = None,
                  limiter: Optional[RateLimiter] = None, wall_clock: Callable[[], float] = time.time,
-                 sleep: Callable[[float], None] = time.sleep, timeout: float = 15.0):
+                 sleep: Callable[[float], None] = time.sleep, timeout: float = limits.PROVIDER_TIMEOUT,
+                 allow_http: bool = False):
         self.name = name
+        self.allow_http = allow_http  # tests only: a provider address must otherwise be https
         self._headers = headers  # holds the credentials; never printed or logged
         self.transport = transport or UrllibTransport()
         self.limiter = limiter or RateLimiter(60)
@@ -180,6 +290,9 @@ class JsonClient:
         query = urllib.parse.urlencode({k: v for k, v in (params or {}).items() if v is not None and v != ""})
         url = base.rstrip("/") + path + ("?" + query if query else "")
         host = urllib.parse.urlsplit(base).hostname
+        if urllib.parse.urlsplit(base).scheme != "https" and not self.allow_http:
+            self.last_error = f"{self.name}: refused the address {base[:80]}: provider addresses must start with https://"
+            raise ProviderError(0, self.last_error)
         for attempt in range(retries + 1):
             self.limiter.acquire(max_wait)
             self.calls += 1
@@ -193,7 +306,11 @@ class JsonClient:
                 raise ProviderError(0, self.last_error) from None
             if status == 200:
                 self.last_ok, self.last_error = self.wall_clock(), None
-                return loads(body) if body.strip() else None
+                try:
+                    return loads(body) if body.strip() else None
+                except (ValueError, RecursionError):
+                    self.last_error = f"{self.name} sent a response that is not valid JSON for {path}"
+                    raise ProviderError(status, self.last_error) from None
             msg = error_message(body)
             if status == 429:
                 reset = header(headers, "X-RateLimit-Reset")
@@ -208,6 +325,9 @@ class JsonClient:
                     continue
                 self.last_error = f"{self.name} rate limit reached (HTTP 429); waiting {wait:.0f} s"
                 raise RateLimited(429, self.last_error)
+            if 300 <= status < 400:
+                self.last_error = f"{self.name} answered {path} with a redirect (HTTP {status}); redirects are refused"
+                raise ProviderError(status, self.last_error)
             if status >= 500 and attempt < retries:
                 self.sleep(0.5 * 2 ** attempt)
                 continue

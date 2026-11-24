@@ -14,11 +14,21 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core import calendar as cal
+from ..core import limits
 from ..exchange import Exchange, OrderRejected
 from ..marketdata.feed import TIMEFRAMES
 from ..marketdata.synthetic import SyntheticFeed
 from ..options import chain as optchain
 from ..options.symbology import describe, parse as parse_option
+from . import hardening
+from .hardening import clip
+
+
+def docs_settings(environ=None) -> dict:
+    """FastAPI's /docs, /redoc and /openapi.json are off unless PAPERDESK_API_DOCS=1: the docs pages load
+    scripts from a CDN, which the content security policy cannot allow."""
+    on = (environ if environ is not None else os.environ).get("PAPERDESK_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
+    return {} if on else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
 
 def plain(obj: Any) -> Any:
@@ -56,6 +66,10 @@ def order_row(o) -> dict:
 def default_exchange() -> Exchange:
     from ..marketdata.config import attach, select_feed
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
+    hardening.private_dir(data_dir)
+    from ..marketdata.config import project_root
+    for warning in hardening.permission_warnings([data_dir, str(project_root() / ".env")]):
+        print(f"warning: {warning}")
     # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
     sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
     ex = Exchange(sel.feed, data_dir=sel.data_dir, session_mode=sel.session_mode)
@@ -131,21 +145,36 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 "paper": True, **plain(ex.feed.status_info()),
                 "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
 
+    def tick_message(ex: Exchange, st: dict, sub: dict, events: list) -> dict:
+        msg = {"type": "tick", "status": st,
+               "quotes": {s: r for s in sub["symbols"] if (r := quote_row(ex, s))}}
+        acct = sub.get("account")
+        if isinstance(acct, str) and acct in ex.accounts:
+            summary = ex.safe_summary(acct)
+            msg["account"] = plain(summary)
+            if not summary.get("broken"):
+                positions = ex.isolated(ex.accounts[acct], lambda: ex.positions(acct), "listing positions")
+                msg["positions"] = plain(positions) if positions is not None else []
+        msg["events"] = [plain(e) for e in events if e.get("account_id") in (None, acct)]
+        return msg
+
     async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()
         st = status()
         for ws, sub in list(clients.items()):
-            msg = {"type": "tick", "status": st,
-                   "quotes": {s: r for s in sub["symbols"] if (r := quote_row(ex, s))}}
-            acct = sub.get("account")
-            if acct in ex.accounts:
-                msg["account"] = plain(ex.summary(acct))
-                msg["positions"] = plain(ex.positions(acct))
-            msg["events"] = [plain(e) for e in events if e.get("account_id") in (None, acct)]
+            # Each client is isolated: a failure building or sending one client's message never stops
+            # the others, and none of them loses this tick's events.
             try:
-                await ws.send_json(msg)
-            except Exception:
+                msg = tick_message(ex, st, sub, events)
+            except Exception as e:  # noqa: BLE001
+                print(clip(f"stream message failed for one client: {e!r}"))
+                continue
+            try:
+                await asyncio.wait_for(ws.send_json(msg), timeout=5)
+            except Exception:  # gone, or too slow to keep up: drop it so it cannot hold up the others
                 clients.pop(ws, None)
+                with contextlib.suppress(Exception):
+                    await ws.close(code=limits.WS_CLOSE_POLICY)
 
     async def loop() -> None:
         last = time.monotonic()  # wall time only paces replay; business logic reads ex.now()
@@ -176,22 +205,23 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             if ctx.ex is not ctx.live:
                 ctx.live.save(force=True)
 
-    app = FastAPI(title="PaperDesk", lifespan=lifespan)
+    app = FastAPI(title="PaperDesk", lifespan=lifespan, **docs_settings())
     ctx.app = app
+    app.state.broadcast = broadcast  # tests drive the stream without the tick loop
     app.state.exchange = ctx.ex
     app.state.ctx = ctx
 
     @app.exception_handler(OrderRejected)
     async def _rejected(_, exc):
-        return JSONResponse({"detail": str(exc), "rejected": True}, status_code=422)
+        return JSONResponse({"detail": clip(exc), "rejected": True}, status_code=422)
 
     @app.exception_handler(KeyError)
     async def _missing(_, exc):
-        return JSONResponse({"detail": str(exc).strip("'\"")}, status_code=404)
+        return JSONResponse({"detail": clip(str(exc).strip("'\""))}, status_code=404)
 
     @app.exception_handler(ValueError)
     async def _bad(_, exc):
-        return JSONResponse({"detail": str(exc)}, status_code=400)
+        return JSONResponse({"detail": clip(exc)}, status_code=400)
 
     # ---- market ----------------------------------------------------------
     @app.get("/api/status")
@@ -338,21 +368,22 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     @app.get("/api/accounts")
     def accounts():
         ex = ctx.ex
-        return [plain(ex.summary(a)) for a in ex.accounts]
+        # A damaged account is listed flagged ("broken": true) instead of failing the whole list.
+        return [plain(ex.safe_summary(a)) for a in list(ex.accounts)]
 
     @app.post("/api/accounts")
     def create_account(body: dict = Body(...)):
         ex = ctx.ex
         from ..core.money import parse as parse_num
         acct = ex.create_account(str(body.get("name", "")), body.get("type", "margin"),
-                                 parse_num(body.get("starting_cash", 100000)))
+                                 parse_num(body.get("starting_cash", 100000), "starting cash"))
         return plain(ex.summary(acct.id))
 
     @app.post("/api/accounts/{aid}/reset")
     def reset_account(aid: str, body: dict = Body(default={})):
         ex = ctx.ex
         from ..core.money import parse as parse_num
-        cash = parse_num(body["starting_cash"]) if body.get("starting_cash") else None
+        cash = parse_num(body["starting_cash"], "starting cash") if body.get("starting_cash") not in (None, "") else None
         if cash is not None and cash <= 0:
             raise ValueError("starting cash must be positive")
         ex.reset_account(aid, cash)
@@ -440,12 +471,21 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     @app.put("/api/watchlists/{name}")
     def put_watchlist(name: str, body: list = Body(...)):
         ex = ctx.ex
+        name = name.strip()[: limits.MAX_WATCHLIST_NAME]
+        if not name:
+            raise ValueError("a watchlist needs a name")
+        if len(body) > limits.MAX_WATCHLIST_SYMBOLS:
+            raise ValueError(f"a watchlist can hold at most {limits.MAX_WATCHLIST_SYMBOLS} symbols")
+        if name not in ex.watchlists and len(ex.watchlists) >= limits.MAX_WATCHLISTS:
+            raise ValueError(f"you can have at most {limits.MAX_WATCHLISTS} watchlists; delete one first")
         syms = []
-        for s in body[:100]:
-            s = str(s).upper().strip()
+        for s in body:
+            if not isinstance(s, str) or len(s) > limits.MAX_SYMBOL_TEXT:
+                continue
+            s = s.upper().strip()
             if ex.is_stock(s) and s not in syms:
                 syms.append(s)
-        ex.watchlists[name[:30]] = syms
+        ex.watchlists[name] = syms
         ex.dirty = True
         return ex.watchlists
 
@@ -475,17 +515,27 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     # ---- streaming --------------------------------------------------------------
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
+        addr = ws.client.host if ws.client else ""
+        if len(clients) >= limits.MAX_WS_CONNECTIONS or \
+                sum(1 for s in list(clients.values()) if s.get("addr") == addr) >= limits.MAX_WS_PER_ADDRESS:
+            await ws.close(code=limits.WS_CLOSE_POLICY, reason="too many open streams")  # refuses the handshake
+            return
         await ws.accept()
-        clients[ws] = {"symbols": [], "account": None}
+        sub = {"symbols": [], "account": None, "addr": addr}
+        clients[ws] = sub
         try:
             while True:
-                msg = await ws.receive_json()
-                if isinstance(msg, dict):
-                    if isinstance(msg.get("symbols"), list):
-                        clients[ws]["symbols"] = [str(s).upper() for s in msg["symbols"][:300]]
-                    if "account" in msg:
-                        clients[ws]["account"] = msg["account"]
+                message = await ws.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+                try:
+                    hardening.ws_update(message.get("text"), sub)
+                except hardening.BadMessage as e:
+                    await ws.close(code=e.code, reason=str(e))
+                    break
         except (WebSocketDisconnect, Exception):
+            pass
+        finally:
             clients.pop(ws, None)
 
     # ---- extension routes ----------------------------------------------------------

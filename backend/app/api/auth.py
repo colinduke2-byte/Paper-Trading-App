@@ -14,7 +14,9 @@ What is enforced, in every mode:
   * Host header check (blunts DNS rebinding): with LAN mode off only localhost, 127.0.0.0/8 and ::1;
     in LAN mode also any IP address literal and PAPERDESK_ALLOWED_HOSTS.
   * Cross-origin check on every non-GET request and on the WebSocket handshake.
-  * Security headers on every HTTP response.
+  * /api GETs a browser marks Sec-Fetch-Site: cross-site are refused (another website cannot make the
+    browser fetch account data or spend the provider budget, even with the loopback bypass on).
+  * Security headers on every HTTP response, including Cross-Origin-Resource-Policy: same-origin.
 With a passcode set, every /api route (except the sign-in endpoints), /ws and the API docs need a
 session; the static UI shell stays public so it can show the sign-in screen.
 
@@ -597,6 +599,9 @@ class AccessMiddleware:
                 headers, host, "https" if scope.get("scheme") in ("https", "wss") else "http"):
             return await self._refuse(scope, receive, send, 403,
                                       "Refused a request that came from another website.")
+        if not ws and path.startswith("/api") and headers.get("sec-fetch-site") == "cross-site":
+            return await self._refuse(scope, receive, send, 403,
+                                      "Refused a request that came from another website.")
         token = None
         if acc.protected(scope) and not acc.bypassed(scope):
             token = HTTPConnection(scope).cookies.get(COOKIE)
@@ -626,6 +631,7 @@ class AccessMiddleware:
                 add("referrer-policy", "no-referrer")
                 add("x-frame-options", "DENY")
                 add("cross-origin-opener-policy", "same-origin")
+                add("cross-origin-resource-policy", "same-origin")
                 if not is_docs:
                     add("content-security-policy", _csp(host))
                 if is_api:
@@ -663,7 +669,7 @@ class AccessMiddleware:
             body["auth_required"] = True
         resp = JSONResponse(body, status_code=status, headers={
             "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
-            "cache-control": "no-store", "content-security-policy": "default-src 'none'; frame-ancestors 'none'"})
+            "cache-control": "no-store", "cross-origin-resource-policy": "same-origin", "content-security-policy": "default-src 'none'; frame-ancestors 'none'"})
         await resp(scope, receive, send)
 
 
