@@ -54,3 +54,13 @@ def test_sessions():
     assert cal.session(_ts(2024, 6, 17, 20, 0)) == "closed"
     assert cal.session(_ts(2024, 11, 29, 13, 30)) == "post"   # early close
     assert cal.session(_ts(2024, 6, 15, 12, 0)) == "closed"
+
+
+def test_atomic_write_roundtrip_and_cleanup(tmp_path):
+    import json
+    from app.exchange import Exchange
+    target = tmp_path / "state.json"
+    Exchange._write(str(target), {"a": "café"})
+    Exchange._write(str(target), {"a": "café", "b": 2})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": "café", "b": 2}
+    assert [p.name for p in tmp_path.iterdir()] == ["state.json"]  # no stray temp files
