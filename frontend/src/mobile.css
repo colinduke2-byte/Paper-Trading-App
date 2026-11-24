@@ -207,9 +207,12 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
 .m-sheet-status { margin: 0; }
 .m-sheet-danger { display: flex; justify-content: flex-end; border-top: 1px solid var(--line); padding-top: 12px; }
 .m-sheet-danger button { min-width: 50%; }
-.m-shell .info-btn { min-width: 22px; min-height: 22px; width: 22px; height: 22px; font-size: 12px; line-height: 20px; }
-.m-shell .info-btn::after { content: ""; position: absolute; inset: -11px; } /* a 44 px tap area around the small icon */
-.m-shell .info-btn { position: relative; }
+/* The "i" looks small but its button is a full 40 px tap target; negative margins keep the label line tight. */
+.m-shell .info-btn { position: relative; width: 40px; height: 40px; min-width: 40px; min-height: 40px; margin: -12px -10px -12px -8px;
+  border: 0; border-radius: 50%; font-size: 12px; line-height: 40px; }
+.m-shell .info-btn::before { content: ""; position: absolute; left: 10px; top: 10px; width: 20px; height: 20px; box-sizing: border-box;
+  border: 1px solid #3a4655; border-radius: 50%; }
+.m-shell .info-btn[aria-expanded=true]::before { border-color: var(--accent); }
 .m-shell .info-pop { width: min(300px, calc(100vw - 24px)); font-size: 14px; }
 
 /* Toasts sit just above the tab bar, clear of the account figures in the top bar, and never take taps.
@@ -293,3 +296,6 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
   .m-shell:not(.m-kb) .m-stats { flex: none; }
   .m-shell:not(.m-kb) .m-top-row2 .paper-banner { flex: 1 1 auto; }
 }
+
+/* The option chain's spot divider is one cell across the table: never hidden by the column rules above. */
+.m-shell .chain-table tr.spot-row > td { display: table-cell !important; height: 0; padding: 0; position: static; }

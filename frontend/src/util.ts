@@ -121,10 +121,12 @@ export const tone = (v: any) => { if (!isNum(v)) return ""; const c = clean(v, 2
 // One rule: times are shown in this device's time zone and labelled with its short name, except during a
 // replay, where every time is New York time (ET), the clock of the recorded session. App sets the mode.
 export const NY = "America/New_York";
-let displayZone: string | undefined = undefined; // undefined = this device's zone
+let zoneOverride: string | undefined = undefined; // undefined = this device's zone
 
-export function setReplayTime(replay: boolean) { displayZone = replay ? NY : undefined; }
-export const inReplayTime = () => displayZone === NY;
+export function setReplayTime(replay: boolean) { zoneOverride = replay ? NY : undefined; }
+export const inReplayTime = () => zoneOverride === NY;
+/** The IANA zone times are shown in, or undefined for this device's zone (for Intl formatting options). */
+export const displayZone = () => zoneOverride;
 const deviceZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return ""; } };
 const shortName = (zone: string | undefined, at = new Date()) => {
   try {
@@ -135,7 +137,7 @@ const shortName = (zone: string | undefined, at = new Date()) => {
 
 /** Short label for the zone times are shown in: "ET" in replay or on a New York device, else e.g. "UTC" or "GMT+1". */
 export function zoneLabel(): string {
-  if (displayZone === NY || deviceZone() === NY) return "ET";
+  if (zoneOverride === NY || deviceZone() === NY) return "ET";
   return shortName(undefined) || "your time";
 }
 
@@ -144,7 +146,7 @@ export const timeHeading = (word = "Time") => `${word} (${zoneLabel()})`;
 
 /** Seconds to add to a UTC timestamp so a chart that draws UTC shows the display zone's wall clock. */
 export function displayShift(at = Date.now()): number {
-  if (displayZone !== NY) return -new Date(at).getTimezoneOffset() * 60;
+  if (zoneOverride !== NY) return -new Date(at).getTimezoneOffset() * 60;
   const d = new Date(at);
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: NY, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
     .formatToParts(d).reduce((o: any, p) => { o[p.type] = p.value; return o; }, {});
@@ -152,17 +154,17 @@ export function displayShift(at = Date.now()): number {
   return Math.round((asUtc - Math.floor(at / 1000) * 1000) / 1000);
 }
 
-export const time = (ts: number) => new Date(ts * 1000).toLocaleTimeString("en-GB", { hour12: false, timeZone: displayZone });
+export const time = (ts: number) => new Date(ts * 1000).toLocaleTimeString("en-GB", { hour12: false, timeZone: zoneOverride });
 
 export const dateTime = (ts: number) =>
-  new Date(ts * 1000).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZone: displayZone });
+  new Date(ts * 1000).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZone: zoneOverride });
 
 /** New York wall-clock time, for the US session label shown next to a local clock. */
 export const nyTime = (ts: number) => new Date(ts * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: NY });
 
 /** "Thu 26 Nov 03:40" in the display zone. */
 export const shortDateTime = (ts: number) =>
-  new Date(ts * 1000).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: displayZone }).replace(",", "");
+  new Date(ts * 1000).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: zoneOverride }).replace(",", "");
 
 export const isOption = (s: string) => /^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(s);
 

@@ -201,9 +201,15 @@ export default function App() {
   };
 
   // Switching between live and replay changes the active exchange: reload what belongs to it.
+  // The account panels wait until the account belongs to the active mode, so a remembered tab never asks
+  // the server for the previous mode's account (a 404 right after entering or leaving a replay).
+  const [acctMode, setAcctMode] = useState<string | null>(null);
+  useEffect(() => { if (status && acctMode === null) setAcctMode(modeKey(status)); }, [status]);
   useModeSwitch(status, async () => {
+    const key = modeKey(status) || "live";
     const [list, wl, syms] = await Promise.all([loadAccounts(), api("/watchlists"), api("/symbols")]).catch(() => [[], {}, []]);
     setAccountId((cur) => (list.find((a: any) => a.id === cur) ? cur : list[0]?.id || ""));
+    setAcctMode(key);
     const main = wl.Main || Object.values(wl)[0] || [];
     setWatch(main);
     setSymbol((cur) => (syms.some((x: any) => x.symbol === cur) ? cur : main[0] || syms[0]?.symbol || cur));
@@ -301,7 +307,7 @@ export default function App() {
       {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
     </div>
   );
-  const bottom = accountId && (
+  const bottom = accountId && (acctMode === null || acctMode === (modeKey(status) || "live")) && (
     <BottomPanel accountId={accountId} positions={positions} orders={orders} refreshKey={refreshKey} quotes={quotes}
       onSelect={pickSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify} />
   );

@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, bottomTab, review, place } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, bottomTab, review, place, confirmDialog } from "./fixtures";
 
 test("page loads with the paper trading banner", async ({ page, open }) => {
   await open();
@@ -96,7 +96,7 @@ test("switching account changes the figures", async ({ page, request, open }) =>
   const select = page.getByRole("combobox", { name: "Account" });
   await select.selectOption(big.id);
   await expect(top).toContainText("$56,789.00");
-  await expect(top).toContainText("Margin required");
+  await expect(top).toContainText("Maintenance margin");
   await select.selectOption(small.id);
   await expect(top).toContainText("$1,234.00");
 });
@@ -110,7 +110,7 @@ test("create an account, then reset it", async ({ page, open }) => {
   await dialog.getByLabel("Type").selectOption("cash");
   await dialog.getByLabel("Starting cash").fill("5000");
   await dialog.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByText(`Account "${name}" created`)).toBeVisible();
+  await expect(page.getByText(`"${name}" created and selected.`)).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Account" }).locator("option:checked")).toContainText(name);
   await expect(page.locator(".top-stats")).toContainText("$5,000.00");
 
@@ -119,7 +119,7 @@ test("create an account, then reset it", async ({ page, open }) => {
   await expect(page.getByText(/Filled: buy 2 MKTX/)).toBeVisible();
   await expect(page.getByText("No open positions.")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await page.getByRole("button", { name: "Reset account", exact: true }).click();
   await page.getByRole("dialog").getByLabel("Starting cash").fill("7000");
   await page.getByRole("dialog").getByRole("button", { name: "Erase and reset" }).click();
   await expect(page.getByText(/reset to \$7,000\.00/)).toBeVisible();
@@ -192,6 +192,7 @@ test("the Replay button starts a replay and Exit returns to live", async ({ page
     const bar = page.getByRole("region", { name: "Replay controls" });
     await bar.getByRole("button", { name: "+1 min" }).click();
     await bar.getByRole("button", { name: "Exit replay" }).click();
+    await confirmDialog(page, "Exit replay");
     await expect(bar).toHaveCount(0);
     await expect(page.getByRole("note")).toContainText("Paper trading · no real money");
     await expect(page.getByRole("button", { name: "Replay", exact: true })).toBeVisible();
