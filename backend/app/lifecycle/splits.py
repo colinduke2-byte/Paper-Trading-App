@@ -9,8 +9,10 @@ Stock lots
 
     Cash in lieu is the value of the old position at the pre-split price, rounded to the
     cent, minus the value of the kept shares at the split-adjusted price, rounded to the
-    cent. That makes the position's value (rounded to the cent) exactly unchanged. The
-    fraction comes out of the newest lots first; the cost basis it carried is realised.
+    cent. The fraction comes out of the newest lots first; the cost basis it carried is
+    realised. Lots and ledger are exact. Account value is unchanged to the cent when
+    valued at the exact adjusted price; a feed that publishes the adjusted price rounded
+    to a cent (25.0025 -> 25.00) moves the value by that rounding, like any price move.
 
 Options on the split underlying
     For a whole-number forward split (N-for-1, or any new/old that is a whole number N)
@@ -22,8 +24,10 @@ Options on the split underlying
     exactly) has no standard contract to map to, because the simulator only knows
     100-share deliverables. Those positions are cash settled at their pre-split model
     mark (the same mark used for account value), booked as a `split_settlement` fill.
-    Account value is unchanged to the cent because the cash received or paid equals the
-    position's market value at that mark.
+    The cash received or paid equals the position's market value at that mark (marks are
+    rounded to the cent), so account value at that mark is unchanged. Adjusted contracts
+    are valued by the model after the split; rounding each new mark to the cent can move
+    their value by up to half a cent per share.
 """
 from decimal import ROUND_FLOOR, Decimal
 
@@ -38,6 +42,11 @@ PRICE_PLACES = Decimal("0.00000001")
 
 def _cap(text: str) -> str:
     return text[:1].upper() + text[1:]
+
+
+def tidy(q: Decimal) -> Decimal:
+    """200.0000 -> 200, 3.7500 -> 3.75 (never exponent notation)."""
+    return q.quantize(Decimal(1)) if q == q.to_integral_value() else q.normalize()
 
 
 def _floor(q: Decimal, whole: bool) -> Decimal:
@@ -75,14 +84,14 @@ def split_stock(account, action, price: Decimal, ts: float) -> dict | None:
         if q == 0 and lot.cost:
             removed_cost += lot.cost
             lot.cost = ZERO
-        lot.qty = sign * q
+        lot.qty = sign * tidy(q) if q else ZERO
         lot.price = (lot.price * o / n).quantize(PRICE_PLACES)
     account.lots[sym] = [l for l in lots if l.qty != 0]
     if not account.lots[sym]:
         del account.lots[sym]
 
     adj_price = price * o / n
-    new_pos = sign * kept
+    new_pos = sign * tidy(kept) if kept else ZERO
     fraction = exact_total - kept
     # signed (shorts pay); defined so the position's value rounded to the cent is unchanged
     cash_in_lieu = cents(old_pos * price) - cents(new_pos * adj_price) if fraction > 0 else ZERO

@@ -40,6 +40,10 @@ def next_day(ex, clock, days=1):
     ex.tick()
 
 
+def logs(ex, a, kind):
+    return [msg for _, k, msg in ex.account(a).life.log if k == kind]
+
+
 def txns(ex, a, kind):
     return [t for t in ex.account(a).ledger.transactions if t.kind == kind]
 
@@ -240,13 +244,19 @@ def test_dividend_long_short_and_reinvestment():
         ledger_ok(ex.account(x))
 
 
-def test_dividends_can_be_turned_off():
+def test_dividends_are_always_paid():
+    # Review finding 7: the price always drops on the ex-date, so the "off" switch was removed.
     ex, feed, clock = make_exchange()
-    a = acct(ex, dividends=False)
+    a = acct(ex)
+    ex.account(a).settings = cfg.merged({"dividends": False})  # an old saved toggle is ignored
+    assert "dividends" not in ex.account(a).settings
+    with pytest.raises(ValueError, match="unknown setting dividends"):
+        cfg.update(cfg.defaults(), {"dividends": False})
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100})
     feed.schedule(dividend("ABC", EX, EX2, "1.00"))
     next_day(ex, clock, 2)
-    assert not txns(ex, a, "dividend")
+    [t] = txns(ex, a, "dividend")
+    assert t.postings[0] == ("cash", D("100.00"))
 
 
 # ---- interest and borrow fees ------------------------------------------------------------------
@@ -344,24 +354,73 @@ def _round_trip(ex, a, qty=10):
     ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": qty})
 
 
-def test_pattern_day_trader_blocks_the_fourth_day_trade_under_25000():
+def test_pattern_day_trader_blocks_opening_orders_after_three_day_trades_under_25000():
     ex, feed, clock = make_exchange()
     a = acct(ex, "margin", "20000")
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 50})  # held overnight: closing it is no day trade
+    next_day(ex, clock)
     for _ in range(3):
         _round_trip(ex, a)
     assert ex.summary(a)["day_trades"] == 3 and ex.summary(a)["day_trades_left"] == 0
-    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})  # opening is not a day trade
-    with pytest.raises(OrderRejected, match="Pattern day trader rule: this order would be your 4th day trade in 5 "
-                                            "business days. Margin accounts with less than 25,000.00 equity"):
-        ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 10})
-    assert not ex.preview(a, {"symbol": "ABC", "side": "sell", "qty": 10})["ok"]
+    msg = ("Pattern day trader rule: this account has made 3 day trades in the last 5 business days and its equity "
+           "(19,999.70) is below 25,000.00, so it cannot open new positions that could become a 4th day trade. "
+           "Closing orders are still allowed. New opening orders are allowed again on 2026-11-30.")
+    with pytest.raises(OrderRejected) as err:
+        ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
+    assert str(err.value) == msg
+    with pytest.raises(OrderRejected, match="Pattern day trader rule"):  # a short sale opens too
+        ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 60})
+    assert not ex.preview(a, {"symbol": "ABC", "side": "buy", "qty": 10})["ok"]
+    assert ex.preview(a, {"symbol": "ABC", "side": "sell", "qty": 50})["ok"]
+    assert ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 50})[0].status == "filled"  # closing is allowed
     # rolling window: today plus the previous 4 business days (in "always" mode every day counts)
-    next_day(ex, clock, 1)
-    assert ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 10})[0].status == "filled"  # held overnight
-    next_day(ex, clock, 3)
+    next_day(ex, clock, 4)
     assert ex.summary(a)["day_trades"] == 3
     next_day(ex, clock, 1)
     assert ex.summary(a)["day_trades"] == 0
+    assert ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})[0].status == "filled"
+
+
+def test_pdt_never_blocks_a_close_during_a_margin_call():
+    # Review finding 3: 3 day trades, then a losing position in a margin call must still be closable.
+    ex, feed, clock = make_exchange()
+    deep(ex, feed, clock, "100")
+    a = acct(ex, "margin", "20000")
+    for _ in range(2):
+        _round_trip(ex, a)
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 390})
+    ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 1})  # third day trade
+    deep(ex, feed, clock, "60")
+    s = ex.summary(a)
+    assert s["day_trades"] == 3 and s["margin_call"]
+    assert ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 389})[0].status == "filled"
+    assert ex.summary(a)["day_trades"] == 3  # the same opening lot: still one day trade
+
+
+def test_day_trades_count_once_per_opening_lot():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "margin", "100000")
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100})
+    ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 50})
+    ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 50})
+    assert ex.summary(a)["day_trades"] == 1  # buy 100, two sells of 50: one day trade
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
+    ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 20})
+    assert ex.summary(a)["day_trades"] == 3  # two opening lots closed the same day
+
+
+def test_bracket_children_that_close_are_never_blocked():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "margin", "20000")
+    for _ in range(2):
+        _round_trip(ex, a)
+    entry, tp, sl = ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10, "take_profit": "101", "stop_loss": "99"})
+    _round_trip(ex, a)  # third day trade: opening orders are now blocked
+    with pytest.raises(OrderRejected, match="Pattern day trader rule"):
+        ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10, "take_profit": "101", "stop_loss": "99"})
+    move(ex, feed, clock, "ABC", "102")
+    assert tp.status == "filled" and ex.account(a).position("ABC") == 0 and ex.summary(a)["day_trades"] == 4
 
 
 def test_pdt_allows_accounts_over_minimum_and_can_be_disabled():
@@ -416,8 +475,9 @@ def test_margin_call_grace_then_liquidation():
     # equity 1,900 x 60 - 90,000 = 24,000; maintenance 25% x 114,000 = 28,500
     s = ex.summary(a)
     assert s["margin_call"] and s["margin_call_since"] == clock.now() and s["liquidation_at"] == clock.now() + 48 * 3600
-    [t] = txns(ex, a, "margin_call")
-    assert t.memo.startswith("Margin call: equity 24,000.00 is below the 28,500.00 maintenance requirement (deficit 4,500.00)")
+    [t] = logs(ex, a, "margin_call")
+    assert t.startswith("Margin call: equity 24,000.00 is below the 28,500.00 maintenance requirement (deficit 4,500.00)")
+    assert not txns(ex, a, "margin_call")  # call events are not ledger entries
     clock.advance(47 * 3600)
     ex.tick()
     assert ex.account(a).position("ABC") == 1900 and resting.active
@@ -430,12 +490,22 @@ def test_margin_call_grace_then_liquidation():
     assert acc.position("ABC") == 1599 and acc.cash == D("-71943.01")
     s = ex.summary(a)
     assert s["equity"] == D("23996.99") and s["maintenance_requirement"] == D("23985.00") and not s["margin_call"]
-    assert s["margin_call_since"] is None
-    [liq] = txns(ex, a, "liquidation")
-    assert liq.memo.startswith("Margin call liquidation: sell 301 ABC at market")
-    assert txns(ex, a, "margin_call")[-1].memo.startswith("Margin call met after liquidation")
-    order = ex.engine.orders[liq.ref]
+    [liq] = logs(ex, a, "liquidation")
+    assert liq.startswith("Margin call liquidation: sell 301 ABC at market (order O00000003, filled)")
+    order = ex.engine.orders["O00000003"]
     assert order.role == "liquidation" and order.status == "filled"
+    # Only 0.05% above maintenance: the call stays open until equity has held for 5 minutes.
+    started = s["margin_call_since"]
+    assert started is not None
+    clock.advance(1)
+    ex.tick()
+    clock.advance(299)
+    ex.tick()
+    assert ex.summary(a)["margin_call_since"] == started
+    clock.advance(1)
+    ex.tick()
+    assert ex.summary(a)["margin_call_since"] is None
+    assert logs(ex, a, "margin_call")[-1].startswith("Margin call met: equity 23,996.99")
     ledger_ok(acc)
 
 
@@ -448,7 +518,7 @@ def test_margin_call_met_by_recovery_and_liquidation_can_be_disabled():
         ex.submit(x, {"symbol": "ABC", "side": "buy", "qty": 1900})
     deep(ex, feed, clock, "60")
     deep(ex, feed, clock, "70")  # 1,900 x 70 - 90,000 = 43,000 >= 33,250
-    assert txns(ex, a, "margin_call")[-1].memo.startswith("Margin call met: equity 43,000.00")
+    assert logs(ex, a, "margin_call")[-1].startswith("Margin call met: equity 43,000.00")  # 2% above: at once
     deep(ex, feed, clock, "60")
     clock.advance(100 * 3600)
     ex.tick()
@@ -475,13 +545,20 @@ def test_liquidation_waits_for_the_regular_session_in_us_mode():
 # ---- settings, persistence and API ---------------------------------------------------------------------
 def test_settings_validation():
     s = cfg.defaults()
-    assert s["margin_interest_rate"] == "8.0" and s["pdt_min_equity"] == "25000" and s["settled_cash_only"] is True
+    assert s["margin_interest_rate"] == "8" and s["pdt_min_equity"] == "25000" and s["settled_cash_only"] is True
     assert cfg.update(s, {"margin_interest_rate": 9.5})["margin_interest_rate"] == "9.5"
-    for bad, msg in (({"nope": 1}, "unknown setting"), ({"dividends": "yes"}, "true or false"),
+    for bad, msg in (({"nope": 1}, "unknown setting"), ({"dividend_reinvestment": "yes"}, "true or false"),
                      ({"margin_interest_rate": 80}, "between"), ({"borrow_fee_rate": "abc"}, "number")):
         with pytest.raises(ValueError, match=msg):
             cfg.update(s, bad)
-    assert cfg.merged({"dividends": False, "junk": 1, "margin_interest_rate": "bad"}) == dict(cfg.defaults(), dividends=False)
+    assert cfg.merged({"dividend_reinvestment": True, "junk": 1, "margin_interest_rate": "bad"}) == \
+        dict(cfg.defaults(), dividend_reinvestment=True)
+    # Review finding 10: absurd numbers are normalised or refused
+    for raw, want in (("-0", "0"), ("1E1", "10"), ("5.00000", "5"), (" 6.123456 ", "6.1235"), ("0.00001", "0")):
+        assert cfg.update(s, {"margin_interest_rate": raw})["margin_interest_rate"] == want
+    for raw in ("1e-999999", "0.000000000000000000000000001", "1e999999", "Infinity", "NaN", True, None, [1]):
+        with pytest.raises(ValueError):
+            cfg.update(s, {"margin_interest_rate": raw})
 
 
 def test_old_state_without_lifecycle_fields_loads():
