@@ -305,18 +305,18 @@ test("create an account from the menu", async ({ page, open }) => {
 test("landscape orientation fits without overflow", async ({ page, open }) => {
   const v = page.viewportSize()!;
   await open();
-  if (v.height + 100 >= 900) {
-    // Rotated, a tablet is wider than the 900 px breakpoint: the desktop layout takes over and must fit too.
-    await page.setViewportSize({ width: v.height + 100, height: v.width - 40 });
-    await expect(page.getByRole("combobox", { name: "Account" })).toBeVisible();
+  await page.setViewportSize({ width: v.height + 100, height: v.width - 40 }); // rotate (browser bars take some height)
+  // Short landscape screens keep the phone layout; a rotated tablet (tall enough and wider than 900 px) gets the
+  // desktop layout, which must fit as well.
+  const desktop = page.getByRole("combobox", { name: "Account" });
+  await expect(navButton(page, "Chart").or(desktop)).toBeVisible();
+  if (await desktop.isVisible()) {
     await expect(page.getByRole("navigation", { name: "Views" })).toHaveCount(0);
     await expect(page.getByRole("figure", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
     expect(await overflow(page), "rotated tablet: no horizontal page scroll").toBeLessThanOrEqual(0);
     await page.setViewportSize(v);
     return;
   }
-  await page.setViewportSize({ width: v.height + 100, height: v.width - 40 }); // rotate (browser bars take some height)
-  await expect(navButton(page, "Chart")).toBeVisible();
   for (const view of VIEWS) {
     await go(page, view);
     await fitsViewport(page, `landscape ${view}`);

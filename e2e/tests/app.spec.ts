@@ -199,3 +199,25 @@ test("the Replay button starts a replay and Exit returns to live", async ({ page
     await request.post("/api/replay/exit").catch(() => {});
   }
 });
+
+test("narrow desktop window: the chart stays inside its panel and the bottom tabs can be clicked", async ({ page, open }) => {
+  // 900-1100 px (a small laptop window, an iPad in landscape): one column, the page scrolls. The chart once
+  // spilled over the bottom tabs here, and in WebKit resized itself in a loop.
+  await page.setViewportSize({ width: 1080, height: 810 });
+  await open();
+  for (const view of ["Chart", "Options", "Company", "Chart"]) {
+    await page.getByRole("tab", { name: view }).click();
+    await expect(page.getByRole("tab", { name: view })).toHaveAttribute("aria-selected", "true");
+    const fits = await page.evaluate(() => {
+      const panel = document.querySelector(".main-view")!.getBoundingClientRect();
+      const inner = [...document.querySelectorAll(".main-view .view, .main-view .chart")].map((e) => e.getBoundingClientRect().bottom);
+      return inner.every((b) => b <= panel.bottom + 0.5) && panel.bottom <= document.querySelector(".bottom")!.getBoundingClientRect().top;
+    });
+    expect(fits, `view ${view}: content inside the main panel, above the bottom panel`).toBe(true);
+  }
+  await expect(page.getByRole("figure", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
+  for (const tab of [/^Orders/, "Fills", /^Positions/]) {
+    await bottomTab(page, tab).click({ timeout: 5000 });
+    await expect(bottomTab(page, tab)).toHaveAttribute("aria-selected", "true");
+  }
+});

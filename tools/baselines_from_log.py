@@ -22,7 +22,7 @@ def extract(path: str) -> list[str]:
     lines, inside, out = [], False, []
     with open(path, encoding="utf-8", errors="replace") as f:
         for raw in f:
-            line = STAMP.sub("", raw.rstrip("\r\n"))
+            line = STAMP.sub("", raw.rstrip("\r\n").lstrip("\ufeff"))  # logs can hold byte order marks
             if line.strip() == BEGIN:
                 inside, lines = True, []
             elif line.strip() == END and inside:

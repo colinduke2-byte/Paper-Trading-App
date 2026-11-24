@@ -123,5 +123,5 @@ label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--t
   .app .top-right { margin-left: 0; flex-wrap: wrap; }
   /* The page height is auto here, so the chart needs a size that does not come from its own canvas: otherwise
      the chart's autoSize and the layout feed each other and WebKit resizes it in a loop (iPad in landscape). */
-  .app .chart { flex: 1 0 300px; }
+  .app .chart { flex: 1 0 300px; } .app .chart-wrap { flex: 1 0 auto; } .app .main-view { flex: none; }
 }
