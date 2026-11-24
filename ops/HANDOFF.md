@@ -208,3 +208,16 @@ owner's go.
 - PR 18 (ticket UI) opened by its author; see the open pull request table.
 - Since alerts merged, PRs 13, 14, 16, 17, 18 and 19 each need main merged in again (or go through
   the `integration/wave2` integrator as described above; add 19 backup after 17 in the order).
+- PR 16 (simulated research): all 8 checks green at 4a6fb0c; its session was asked to merge the new
+  main (alerts) and push so checks re-run on the real combination before merging.
+- PR 14 (crypto) review finished: APPROVE WITH FIXES; stocks and options byte-identical to main.
+  Findings sent to the crypto session (session_01Byytwa7UbHxm5YYWZw1VQb): (1) HIGH: a crypto stop
+  (market) buy can drive cash negative in cash and margin accounts (stop 41,000, gap to 60,000 ->
+  cash -44,360): reject stop-buy without a limit AND cap any crypto buy fill to affordable cash;
+  (2) raising `crypto_fee_rate` with a resting buy makes cash negative; (3) the "resting crypto buy
+  blocks a margin stock buy" rule is order-dependent and buying power does not reflect it: apply it
+  only to crypto buys; (4) liquidation sells crypto in whole coins (lifecycle/manager.py ~582);
+  (5) provider sizes not floored to the increment leave unsellable dust; (6) `symbols()` copies the
+  asset table on every call; plus low items. Merge PR 14 only after these are fixed.
+- Pre-existing nondeterminism noted by that reviewer: `exchange.py` ~1190 iterates a set of symbols,
+  so same-tick option fill order varies with the hash seed. Make it sorted (deterministic engine rule).
