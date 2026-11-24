@@ -30,7 +30,7 @@ const SECTIONS: Section[] = [
           <li><b>simulated market data</b>: the companies are fictional and the prices are generated. This is the default.</li>
           <li><b>real-time … prices via Alpaca</b>: real quotes from your own Alpaca key. Orders are still only simulated.</li>
           <li><b>data delayed</b> or <b>prices may be stale</b>: the feed is late or interrupted. Do not trust the prices.</li>
-          <li>A blue banner, <b>Replay of …</b>: you are in a replay sandbox, not on your normal accounts. Press Exit replay to leave.</li>
+          <li>A blue banner, <b>Replay of …</b>: you are in a replay account, not on your normal accounts. Times in a replay are New York time (ET). Press Exit replay to leave.</li>
         </ul>
         <p>Hover over the banner on a computer for more detail. Option prices marked <i>model prices</i> are calculated, not quoted.</p>
       </>
@@ -60,7 +60,7 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>A <b>cash account</b> cannot borrow and cannot sell short. A <b>margin account</b> can borrow against its holdings and can sell short (Sell more shares than you own). Buying power on a margin account is about twice its spare equity for stocks.</p>
-        <p>If a margin account's value falls below the maintenance requirement you get a <b>margin call</b>. Unless you fix it within the grace period, PaperDesk sells positions for you (you can turn that off in Settings). The <b>Settings</b> button lists every account rule (settlement, day trading limit, interest, margin calls) with its default.</p>
+        <p>If a margin account's value falls below the maintenance requirement you get a <b>margin call</b>. Unless you fix it within the grace period, PaperDesk sells positions for you (you can turn that off in Account rules). The <b>Account rules</b> button lists every account rule (settlement, day trading limit, interest, margin calls) with its default.</p>
         <p><b>Reset</b> erases an account's history and starts again. It cannot be undone.</p>
       </>
     ),
@@ -81,7 +81,7 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>Phone access is off by default. To turn it on, set a passcode and LAN mode in the <code>.env</code> file, restart PaperDesk, and open the address it prints from a phone on the same Wi-Fi. Home Wi-Fi only: the connection is not encrypted.</p>
-        <p>On a phone, the tabs at the bottom switch between Watchlist, Chart, Trade and Account. The menu at the top right holds the account picker, New account, Reset, Replay, Settings, this help and Sign out.</p>
+        <p>On a phone, the tabs at the bottom switch between Watchlist, Chart, Trade and Account. The menu at the top right holds the account picker, New account, Replay, Account rules, keyboard shortcuts, this help, Sign out and, apart from the rest, Reset account.</p>
       </>
     ),
   },
