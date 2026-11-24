@@ -48,6 +48,8 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
+      - run: npm test
+        working-directory: frontend
 
   # One job per browser engine (WebKit, the slowest, in two shards), so the e2e stage stays well under
   # 15 minutes. No retries: a flaky test is fixed, not retried. Traces and screenshots are uploaded only when
