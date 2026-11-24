@@ -432,6 +432,8 @@ def test_api_orders_positions_watchlist_and_alerts_for_crypto(api):
     assert any(a["id"] == al["id"] and a["triggered_at"] for a in cl.get("/api/alerts").json())
     s = cl.get(f"/api/accounts/{aid}").json()
     assert "crypto_buying_power" in s
+    # Chart drawings are saved per symbol, crypto pairs included (the UI encodes the slash).
+    assert cl.get("/api/chartstate/drawings/SIMCOIN%2FUSD").status_code == 200
     csv_text = cl.get(f"/api/accounts/{aid}/export/fills.csv")
     if csv_text.status_code == 200:
         assert "0.01234" in csv_text.text

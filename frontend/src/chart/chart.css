@@ -1,0 +1,87 @@
+/* Chart tools. Scoped to .ct-* classes so the page layout (styles.css) stays with the layout stream. */
+.ct-wrap { position: relative; }
+.ct-bar { display: flex; gap: 6px; padding: 6px 10px; align-items: center; flex-wrap: wrap; }
+.ct-draw-bar { padding-top: 0; }
+.ct-seg { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; flex-wrap: wrap; }
+.ct-seg button { border-radius: 0; padding: 3px 8px; color: var(--muted); font-size: 11.5px; }
+.ct-seg button.on { background: #223149; color: var(--text); }
+.ct-btn { border: 1px solid var(--line); padding: 3px 8px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.ct-btn:hover:not(:disabled) { background: var(--panel2); color: var(--text); }
+.ct-btn.on { background: #223149; color: var(--text); border-color: #2f4a6e; }
+.ct-btn.primary { background: var(--accent); color: #06121f; font-weight: 700; border-color: var(--accent); }
+.ct-select { width: auto; padding: 3px 6px; font-size: 11.5px; }
+.ct-compare { display: flex; gap: 4px; }
+.ct-compare input { width: 92px; padding: 3px 6px; font-size: 11.5px; text-transform: uppercase; }
+.ct-compare input::placeholder { text-transform: none; }
+.ct-chip { display: inline-flex; align-items: center; gap: 4px; color: #e5c07b; border: 1px solid #5a4520; border-radius: 4px; padding: 0 0 0 7px; font-size: 11.5px; }
+.ct-chip .ct-btn { border: 0; }
+.ct-hint { font-size: 11px; }
+
+.ct-stage { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.ct-host { position: relative; z-index: 0; }
+.ct-legend { position: absolute; left: 8px; top: 4px; z-index: 3; pointer-events: none; font-size: 11px; color: var(--muted);
+  display: flex; flex-direction: column; gap: 1px; max-width: calc(100% - 80px);
+  text-shadow: 0 0 3px #12161c, 0 0 3px #12161c; }
+.ct-legend-row { display: flex; flex-wrap: wrap; gap: 2px 9px; }
+.ct-legend b { color: var(--text); font-weight: 600; }
+.ct-legend b.up { color: var(--up); } .ct-legend b.down { color: var(--down); }
+.ct-swatch { display: inline-block; width: 8px; height: 2px; vertical-align: middle; margin-right: 4px; }
+
+.ct-order-handle { position: absolute; z-index: 4; transform: translateY(-50%); background: #12161ce6; border: 1px solid; border-radius: 3px;
+  padding: 1px 6px; font-size: 11px; line-height: 16px; cursor: ns-resize; touch-action: none; white-space: nowrap; user-select: none; }
+.ct-order-handle:focus-visible { outline: 2px solid var(--accent); }
+
+.ct-draw-layer { position: absolute; z-index: 2; cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none; }
+.ct-draw-layer.select { cursor: default; }
+
+.ct-panel { position: absolute; z-index: 6; top: 4px; right: 70px; width: 400px; max-width: calc(100% - 16px); max-height: calc(100% - 8px);
+  overflow: auto; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px; box-shadow: 0 6px 20px #0009;
+  display: flex; flex-direction: column; gap: 6px; }
+.ct-panel p { margin: 0; }
+.ct-panel-head { display: flex; justify-content: space-between; align-items: center; }
+.ct-ind-row { display: flex; align-items: flex-end; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.ct-ind-name { flex: 1 1 80px; align-self: center; }
+.ct-ind-row .ct-btn { align-self: flex-end; }
+.ct-param { display: flex; flex-direction: column; gap: 1px; font-size: 10.5px; color: var(--muted); }
+.ct-param input { width: 64px; padding: 3px 5px; }
+.ct-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ct-list li { display: flex; align-items: center; gap: 6px; }
+.ct-list li.sel .ct-link { color: var(--accent); }
+.ct-link { flex: 1; text-align: left; padding: 3px 4px; color: var(--text); }
+.ct-link:hover { background: #222a35; }
+
+.ct-popover { position: absolute; z-index: 7; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px;
+  box-shadow: 0 6px 20px #0009; display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+.ct-popover form { display: flex; flex-direction: column; gap: 6px; }
+.ct-pop-title { color: var(--muted); font-size: 11px; padding: 0 4px; }
+.ct-menu-item { text-align: left; padding: 5px 8px; }
+.ct-menu-item:hover, .ct-menu-item:focus-visible { background: #222a35; }
+.ct-row { display: flex; gap: 6px; justify-content: flex-end; }
+.ct-confirm { position: absolute; z-index: 8; left: 50%; top: 12px; transform: translateX(-50%); width: 340px; max-width: calc(100% - 16px);
+  background: var(--panel2); border: 1px solid #2f4a6e; border-radius: 6px; padding: 10px; box-shadow: 0 6px 20px #000a; }
+.ct-confirm p { margin: 0 0 8px; }
+.ct-confirm .notice { margin: 0 0 8px; }
+
+/* Shortcut help overlay */
+.ct-help-bg { position: fixed; inset: 0; background: #000a; display: grid; place-items: center; z-index: 45; padding: 16px; }
+.ct-help { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; width: 460px; max-width: 100%;
+  max-height: 100%; overflow: auto; }
+.ct-help h3 { padding: 0 0 8px; font-size: 14px; text-transform: none; letter-spacing: 0; color: var(--text); justify-content: space-between; }
+.ct-help h4 { margin: 10px 0 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.ct-help dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; }
+.ct-help dt { white-space: nowrap; } .ct-help dd { margin: 0; color: var(--muted); }
+.ct-help kbd { background: var(--bg); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; font: 11px ui-monospace, monospace; }
+.ct-help .ct-confirm-body { display: flex; flex-direction: column; gap: 10px; }
+
+/* The phone layout (MobileShell SMALL_QUERY): touch-sized chart controls. */
+@media (max-width: 899px), (max-height: 540px) and (max-width: 1199px) {
+  .ct-bar { padding: 6px 8px; }
+  .ct-seg button, .ct-btn, .ct-select, .ct-compare input, .ct-menu-item, .ct-param input, .ct-panel select, .ct-popover input,
+  .ct-link { min-height: 40px; min-width: 40px; }
+  .ct-seg button { padding: 3px 10px; }
+  .ct-compare input { width: 84px; }
+  .ct-order-handle { min-height: 40px; line-height: 38px; }
+  .ct-hint { flex-basis: 100%; }
+  .ct-panel { right: 8px; left: 8px; width: auto; }
+  .ct-legend { font-size: 10.5px; max-width: calc(100% - 60px); }
+}
