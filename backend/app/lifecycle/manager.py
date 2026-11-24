@@ -226,9 +226,16 @@ class LifecycleManager:
     def _apply_split(self, act: CorporateAction, now: float) -> None:
         sym = act.symbol
         reason = f"Canceled because of the {act.describe()} effective {act.ex_date.isoformat()}"
+        on_sym = lambda s: s == sym or ((c := parse(s)) is not None and c.underlying == sym)
         for _ in range(3):  # canceling a partly filled entry releases its bracket children
-            open_ = [o for o in self.ex.engine.active_orders()
-                     if o.symbol == sym or ((c := parse(o.symbol)) is not None and c.underlying == sym)]
+            active = self.ex.engine.active_orders()
+            open_ = [o for o in active if on_sym(o.symbol) or any(on_sym(l["symbol"]) for l in o.legs or ())]
+            # A linked group (one-cancels-other, one-triggers-other, bracket) is one instruction: when any
+            # member is on the split symbol, cancel the whole group so no half of it is left working.
+            ids = {o.id for o in open_}
+            groups = {o.oco_group for o in open_ if o.oco_group} | ids | {o.parent_id for o in open_ if o.parent_id}
+            open_ += [o for o in active if o.id not in ids and (o.oco_group in groups or o.parent_id in groups
+                                                                or o.id in groups)]
             if not open_:
                 break
             for o in open_:

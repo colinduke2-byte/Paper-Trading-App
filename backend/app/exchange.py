@@ -85,6 +85,12 @@ class Exchange:
             return None
         return optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), self.now())
 
+    def quote_source(self, symbol: str) -> str:
+        """Where quote(symbol) comes from: the feed's name, or "model" for a modelled option price."""
+        if not self.is_stock(symbol) and parse_option(symbol) is not None and self.feed.option_quote(symbol) is None:
+            return "model"
+        return self.feed.name
+
     def mark(self, symbol: str) -> Decimal:
         q = self.quote(symbol)
         if q is None:
@@ -841,7 +847,16 @@ class Exchange:
             req_before = margin.evaluate("cash", a.cash, before_pos, marks).requirement
             req_after = margin.evaluate("cash", cash_after, after_pos, marks).requirement
             bp_after = cents(max(worst.cash_after - worst.requirement, ZERO))
-        warnings = ["Option prices are simulated model prices, not market data."]
+        # Exchange.quote() uses the provider's option quote when the feed has one, else the model.
+        sources = {l["symbol"]: self.quote_source(l["symbol"]) for l in o.legs}
+        modeled = [sym for sym in sources if sources[sym] == "model"]
+        simulated = bool(modeled) or self.feed.simulated
+        warnings = []
+        if modeled and len(modeled) == sum(parse_option(sym) is not None for sym in sources):
+            warnings.append("Option prices are simulated model prices, not market data.")
+        elif modeled:
+            warnings.append("Some legs use simulated model prices, not market data: "
+                            + ", ".join(describe(sym) for sym in modeled) + ".")
         if not shape["at_expiry"]:
             warnings.append("The legs expire on different dates, so profit and break-even prices depend on what "
                             "the later options are worth when the first one expires and are not shown.")
@@ -857,6 +872,7 @@ class Exchange:
             leg_qty = o.qty * l["ratio"]
             rows.append({"symbol": l["symbol"], "description": describe(l["symbol"]), "side": l["side"],
                          "ratio": l["ratio"], "qty": leg_qty, "bid": q.bid, "ask": q.ask, "estimated_price": px,
+                         "source": sources[l["symbol"]],
                          "position_before": held, "position_after": held + (leg_qty if l["side"] == m.BUY else -leg_qty)})
         return {"ok": ok, "reason": None if ok else rule or worst.reason, "underlying": o.symbol, "qty": o.qty,
                 "type": m.LIMIT if o.limit_price is not None else m.MARKET, "tif": o.tif, "legs": rows,
@@ -872,7 +888,7 @@ class Exchange:
                 "margin_effect": req_after - req_before,
                 "buying_power_before": self.summary(account_id)["buying_power"],
                 "buying_power_after": None if worst.closing else bp_after, "closing": worst.closing,
-                "simulated": True, "warnings": warnings}
+                "simulated": simulated, "warnings": warnings}
 
     # ---- auctions, good-till-date and multi-leg matching (called from tick) ----
     def _orders_before_feed(self, now: float, sess: str) -> None:
