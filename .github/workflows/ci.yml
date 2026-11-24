@@ -49,9 +49,22 @@ jobs:
       - run: npm run build
         working-directory: frontend
 
+  # One job per browser engine (WebKit, the slowest, in two shards), so the e2e stage stays well under
+  # 15 minutes. No retries: a flaky test is fixed, not retried. Traces and screenshots are uploaded only when
+  # something fails. Visual baselines live in e2e/tests/__screenshots__/linux (see e2e/README.md).
   e2e:
+    name: e2e (${{ matrix.engine }}${{ matrix.shards > 1 && format(' {0}/{1}', matrix.shard, matrix.shards) || '' }})
     needs: [backend, frontend]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { engine: chromium, shard: 1, shards: 1 }
+          - { engine: firefox, shard: 1, shards: 1 }
+          - { engine: webkit, shard: 1, shards: 2 }
+          - { engine: webkit, shard: 2, shards: 2 }
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: actions/setup-python@v5.6.0
@@ -73,19 +86,90 @@ jobs:
         working-directory: frontend
       - run: npm ci
         working-directory: e2e
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps ${{ matrix.engine }}
         working-directory: e2e
-      # The test run starts its own server (synthetic feed, private port, temporary data directory).
-      - run: npx playwright test
+      # The test run starts its own servers (synthetic feed, private ports, temporary data directories).
+      - run: npx playwright test --shard=${{ matrix.shard }}/${{ matrix.shards }}
         working-directory: e2e
         env:
           CI: "true"
           E2E_PYTHON: python
-      - name: Upload Playwright traces
+          E2E_ENGINES: ${{ matrix.engine }}
+      - name: Upload traces, screenshots and new visual baselines
         if: failure()
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: playwright-traces
+          name: playwright-${{ matrix.engine }}-${{ matrix.shard }}
+          path: |
+            e2e/test-results/
+            e2e/playwright-report/
+            e2e/tests/__screenshots__/
+          retention-days: 7
+
+  # The desktop suite in Microsoft Edge on Windows, against a server started by run.bat (so paths, line
+  # endings and a non-UTC time zone are exercised end to end).
+  e2e-windows:
+    name: e2e (windows, Edge, run.bat)
+    needs: [backend, frontend]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            e2e/package-lock.json
+      - name: Use a time zone that is not UTC
+        run: tzutil /s "Pacific Standard Time"
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: npm ci
+        working-directory: e2e
+      - name: Start run.bat and wait for the API
+        shell: pwsh
+        env:
+          PAPERDESK_NO_BROWSER: "1"
+          PAPERDESK_NO_PAUSE: "1"
+          PAPERDESK_DATA: ${{ runner.temp }}\paperdesk-e2e-data
+          PORT: "8000"
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'run-bat-e2e.log'
+          $p = Start-Process -FilePath cmd.exe -ArgumentList '/c', 'run.bat' -RedirectStandardOutput $log `
+               -RedirectStandardError "$log.err" -PassThru -NoNewWindow
+          for ($i = 0; $i -lt 180; $i++) {
+            if ($p.HasExited) { break }
+            try { $s = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/status' -TimeoutSec 3; if ($s.paper -eq $true) { exit 0 } } catch { }
+            Start-Sleep -Seconds 2
+          }
+          Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
+          throw 'run.bat did not start the server on http://127.0.0.1:8000'
+      - name: Desktop and sign-in suites in Edge
+        working-directory: e2e
+        env:
+          CI: "true"
+          E2E_SKIP_BUILD: "1"
+          E2E_BASE_URL: http://127.0.0.1:8000
+          E2E_ENGINES: chromium
+          E2E_CHANNEL: msedge
+          E2E_PYTHON: ${{ github.workspace }}\backend\.venv\Scripts\python.exe
+        run: npx playwright test --project=desktop --project=auth-desktop
+      - name: Server output
+        if: always()
+        shell: pwsh
+        run: Get-Content (Join-Path $env:RUNNER_TEMP 'run-bat-e2e.log'), (Join-Path $env:RUNNER_TEMP 'run-bat-e2e.log.err') -ErrorAction SilentlyContinue | Select-Object -Last 200
+      - name: Upload traces and screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: playwright-windows-edge
           path: |
             e2e/test-results/
             e2e/playwright-report/
