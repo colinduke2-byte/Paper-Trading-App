@@ -467,3 +467,23 @@ def test_replay_routes_serve_research_on_the_simulated_clock(tmp_path, monkeypat
     day = cal.ny_date(rp.now()).isoformat()
     e = c.get("/api/research/economic-calendar").json()
     assert all(r["actual"] is None for r in e["items"] if r["date"] > day)
+
+
+# ---- notification centre: earnings of held symbols through the calendar alert ---------------------------
+def test_calendar_alert_notifies_upcoming_earnings_of_held_symbols():
+    f = feed()
+    ts, k = first_release(f.research, "ORBT")  # after the close on 2027-02-01
+    ex, clock = _exchange(f, start=ts - 6 * 86400)
+    a = ex.create_account("t", "margin", D(100000)).id
+    ex.submit(a, {"symbol": "ORBT", "side": "buy", "qty": 10})
+    al = ex.alerting.create({"kind": "calendar", "account_id": a, "events": ["earnings"], "days_before": 3,
+                             "repeat": True})
+    for _ in range(5):
+        clock.advance(86400)
+        ex.tick()
+    notes = [n for n in ex.alerting.notices.logs[a] if n.get("alert_id") == al["id"]]
+    assert [n["title"] for n in notes] == ["Upcoming earnings: ORBT"]  # once, three days ahead, held only
+    assert "reports Q4 2026 results after close in 3 days (2027-02-01)" in notes[0]["text"]
+    assert "Simulated data" in notes[0]["text"]
+    with pytest.raises(ValueError, match="dividend, split, earnings"):
+        ex.alerting.create({"kind": "calendar", "account_id": a, "events": ["mergers"]})
