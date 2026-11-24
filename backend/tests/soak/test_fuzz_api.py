@@ -67,13 +67,12 @@ def client(tmp_path):
 
 @pytest.mark.xfail(strict=True, reason=(
     "core/money.py parse() raises decimal.InvalidOperation (an ArithmeticError, not a ValueError) for text "
-    "that is not a number; api/server.py create_account/reset_account/add_alert and routes_replay.start call "
+    "that is not a number; api/server.py create_account/reset_account and routes_replay.start call "
     "it outside any try, so the server answers 500 instead of 400"))
 @pytest.mark.parametrize("method,url,body", [
     ("POST", "/api/accounts", {"name": "x", "starting_cash": "abc"}),
     ("POST", "/api/accounts/A0001/reset", {"starting_cash": "abc"}),
     ("POST", "/api/accounts/A0001/reset", {"starting_cash": [1]}),
-    ("POST", "/api/alerts", {"symbol": "NVLX", "op": "above", "price": "abc"}),
     ("POST", "/api/replay/start", {"session": "sample-2026-03-13", "starting_cash": "abc"}),
 ])
 def test_a_non_numeric_amount_is_a_400_not_a_500(tmp_path, method, url, body):

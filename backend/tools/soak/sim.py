@@ -69,14 +69,16 @@ def state_text(ex) -> str:
     """What save() writes to state.json, as text (without touching the disk)."""
     return json.dumps({"version": 1, "accounts": [a.to_plain() for a in ex.accounts.values()],
                        "orders": [to_plain(o) for o in ex.engine.orders.values()],
-                       "watchlists": ex.watchlists, "alerts": ex.alerts,
+                       "watchlists": ex.watchlists, "alerts": ex.alerting.to_plain(),
+                       "notifications": ex.alerting.notices.to_plain(),
                        "seq": ex._peek_sequences(), "lifecycle": ex.lifecycle.to_plain()})
 
 
 def snapshot(ex) -> str:
     return json.dumps({"accounts": [a.to_plain() for a in ex.accounts.values()],
                        "orders": [to_plain(o) for o in ex.engine.orders.values()],
-                       "watchlists": ex.watchlists, "alerts": ex.alerts,
+                       "watchlists": ex.watchlists, "alerts": ex.alerting.to_plain(),
+                       "notifications": ex.alerting.notices.to_plain(),
                        "lifecycle": ex.lifecycle.to_plain()}, sort_keys=True)
 
 
@@ -234,6 +236,19 @@ class Sim:
     def _op_alert(self, cmd):
         self.ex.add_alert(cmd["symbol"], cmd["dir"], cmd["price"])
 
+    def _op_alert_rule(self, cmd):
+        self.ex.alerting.create(cmd["req"])
+
+    def _op_alert_edit(self, cmd):
+        al = self.ex.alerting
+        if cmd["action"] == "delete":
+            al.get(cmd["id"])
+            al.delete(cmd["id"])
+        elif cmd["action"] == "edit":
+            al.update(cmd["id"], {"repeat": True, "cooldown": 120})
+        else:
+            al.update(cmd["id"], {"status": "paused" if cmd["action"] == "pause" else "active"})
+
     def _op_reload(self, cmd):
         self._reload(cmd.get("force", True), check=True)
 
@@ -349,16 +364,27 @@ class Sim:
 
     # ---- running ---------------------------------------------------------------------------
     def step(self, cmd: Optional[dict] = None) -> dict:
-        cmd = cmd if cmd is not None else self.trader.next(self)
         self.step_no += 1
-        self.trace.append(cmd)
         try:
+            cmd = cmd if cmd is not None else self.trader.next(self)  # the trader reads summaries: they can fail too
+            self.trace.append(cmd)
             self.apply(cmd)
             self.check_light()
             if self.step_no % self.full_every == 0:
                 self.check_full()
         except inv.InvariantError as e:
             raise SoakFailure(self.seed, self.mode, self.step_no, e.name, e.message, list(self.trace), cmd) from e
+        except OrderRejected as e:
+            if "combo_without_bid" in inv.KNOWN and "a leg to be sold needs a bid" in str(e):
+                # Confirmed (test_findings: a waiting market combo without a bid stops the market). Do what a
+                # user would: cancel the waiting market combos, and go on.
+                inv.SOFT_SEEN.setdefault("combo_without_bid", [0, str(e)])[0] += 1
+                for o in [o for o in self.ex.engine.orders.values() if o.legs and o.active and o.limit_price is None]:
+                    self.ex.cancel(o.account_id, o.id)
+                self._drain()
+                return cmd
+            raise SoakFailure(self.seed, self.mode, self.step_no, "exception:OrderRejected",
+                              f"{e!r} at {_where(e)}", list(self.trace), cmd) from e
         except Exception as e:  # an unexpected exception is a failure too
             raise SoakFailure(self.seed, self.mode, self.step_no, f"exception:{type(e).__name__}",
                               f"{e!r} at {_where(e)}", list(self.trace), cmd) from e

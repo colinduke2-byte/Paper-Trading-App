@@ -50,7 +50,7 @@ OPS = [
     ("tick", 30), ("run", 7), ("stock", 18), ("option", 8), ("close", 11), ("multileg", 6), ("bracket", 4),
     ("oco", 3), ("oto", 3), ("auction", 3), ("preview", 3), ("replace", 4), ("cancel", 4), ("cancel_all", 0.4),
     ("settings", 1.0), ("lot_method", 0.5), ("shock", 2.0), ("offline", 0.3), ("reload", 0.25), ("reset", 0.12),
-    ("replay", 0.06), ("lever", 1.5), ("squeeze", 1.0), ("create_account", 0.05), ("delete_account", 0.03), ("journal", 0.5), ("alert", 0.4),
+    ("replay", 0.06), ("lever", 1.5), ("squeeze", 1.0), ("alert_rule", 0.6), ("alert_edit", 0.2), ("create_account", 0.05), ("delete_account", 0.03), ("journal", 0.5), ("alert", 0.4),
 ]
 
 
@@ -432,6 +432,59 @@ class Trader:
         long_delta = (q > 0) if not c else ((q > 0) == (c.kind == "C"))
         factor = self.rng.choice(("0.55", "0.7", "0.8")) if long_delta else self.rng.choice(("1.3", "1.5", "1.9"))
         return {"op": "shock", "symbol": under, "factor": factor}
+
+    def _gen_alert_rule(self, ex, sim):
+        """An alert of any kind from app/alerts (price, change, volume, indicator, option, position, account,
+        reminder, calendar), sometimes repeating, with a cool-down or an expiry."""
+        r = self.rng
+        kind = r.choice(("price", "change", "volume", "indicator", "option", "position", "account", "reminder",
+                         "calendar"))
+        sym = self._symbol(ex)
+        q = ex.feed.quote(sym)
+        aid = self._account(ex)
+        req = {"kind": kind, "symbol": sym, "op": r.choice(("above", "below"))}
+        if kind == "price":
+            req["price"] = _px(q.last * Decimal(repr(r.choice((0.95, 1.0, 1.05))))) if q else "10"
+        elif kind == "change":
+            req.update(value=r.choice(("-3", "1", "5")), basis=r.choice(("day", "reference")))
+        elif kind == "volume":
+            req.update(value=r.choice(("1000", "2", "100000")), mode=r.choice(("level", "average")))
+        elif kind == "indicator":
+            ind = r.choice(("sma", "ema", "rsi", "macd"))
+            req.update(indicator=ind, tf=r.choice(("1m", "5m", "1h", "1d")), period=r.choice((2, 14, 50)))
+            req["op"] = r.choice(("above", "below")) if ind == "rsi" else r.choice(("crosses_above", "crosses_below"))
+            if ind == "rsi":
+                req["value"] = r.choice(("30", "70"))
+        elif kind == "option":
+            got = self._contract(ex, sym, offset=r.randint(-2, 2), kind=r.choice("CP"))
+            if got is None:
+                return None
+            req.update(symbol=got[0], metric=r.choice(("iv", "delta")), value=r.choice(("0.5", "30", "-0.3")))
+        elif kind == "position":
+            held = sorted(ex.account(aid).positions())
+            req.update(account_id=aid, symbol=r.choice(held) if held else sym,
+                       metric=r.choice(("unrealized_pnl", "unrealized_pct")), value=r.choice(("-100", "0", "5")))
+        elif kind == "account":
+            req.update(account_id=aid, metric=r.choice(("equity", "buying_power", "margin_excess", "unrealized_pnl",
+                                                         "day_pnl")), value=r.choice(("0", "10000", "100000")))
+        elif kind == "reminder":
+            req.update(in_minutes=r.choice(("1", "90", "3000")), message="check the book")
+        else:
+            req.update(account_id=aid, events=r.sample(["dividend", "split"], r.randint(1, 2)),
+                       days_before=r.randint(0, 10))
+        if r.random() < 0.3:
+            req.update(repeat=True, cooldown=r.choice((60, 900, 86400)))
+        if r.random() < 0.2:
+            req["expires_in_hours"] = r.choice(("1", "48"))
+        return {"op": "alert_rule", "req": req}
+
+    def _gen_alert_edit(self, ex, sim):
+        rows = ex.alerting.list()
+        if not rows:
+            return None
+        al = self.rng.choice(rows)
+        action = self.rng.choice(("pause", "resume", "delete", "edit"))
+        return {"op": "alert_edit", "id": al["id"], "action": action}
 
     def _gen_offline(self, ex, sim):
         return {"op": "offline", "days": self.rng.choice((0.3, 1, 1, 2, 3, 7, 16, 45)), "force": self.rng.random() < 0.7}

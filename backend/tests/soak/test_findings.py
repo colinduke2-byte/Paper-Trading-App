@@ -97,3 +97,47 @@ def test_cash_account_cash_never_goes_negative_after_a_gap():
     assert o.status == "working"
     move(ex, feed, clock, "ABC", "200.00")  # the price gaps through the stop
     assert a.cash >= 0, f"cash account cash {a.cash}, order {o.status}"
+
+
+# ---- a waiting multi-leg market order whose sold leg loses its bid --------------------------------------
+def _waiting_combo():
+    from datetime import datetime, timezone
+    from app.core import calendar as cal
+    from app.core.clock import SimClock
+    from app.exchange import Exchange
+    from app.marketdata.feed import SimFeed
+    from app.options import chain
+    from app.options.symbology import build
+    t = datetime(2026, 11, 21, 15, 0, tzinfo=timezone.utc).timestamp()  # a Saturday: the market is closed
+    clock, feed = SimClock(t), SimFeed()
+    ex = Exchange(feed, clock, session_mode="us")
+    feed.set_quote("ABC", D("99.99"), D("100"), D("100"))
+    ex.tick()
+    a = ex.create_account("m", "margin", D("100000"))
+    exp = chain.expirations(cal.ny_date(t))[3]
+    legs = [{"symbol": build("ABC", exp, "C", D("100")), "side": "buy"},
+            {"symbol": build("ABC", exp, "C", D("110")), "side": "sell"}]
+    [o] = ex.submit(a.id, {"legs": legs, "qty": 1, "tif": "gtc"})  # a market combo waits for the open
+    assert o.status == "working"
+    clock.advance(60)
+    feed.set_quote("ABC", D("39.99"), D("40"), D("40"))  # the sold 110 call is now bid at zero
+    return ex, feed, clock, a
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "exchange.py _worst_case -> _multileg_cost -> _multileg_net raises OrderRejected for a WORKING multi-leg "
+    "market order once a sold leg has no bid; summary() calls _worst_case, so tick() raises in the equity "
+    "sample and in _roll_sessions (before the feed steps): every tick fails, the lifecycle stops at that day "
+    "and the market freezes for every account until the order is canceled; GET /api/accounts/{id} answers 422"))
+def test_a_waiting_market_combo_without_a_bid_does_not_stop_the_market():
+    ex, feed, clock, a = _waiting_combo()
+    errors = 0
+    for _ in range(3):
+        try:
+            ex.tick()
+        except Exception:
+            errors += 1
+        clock.advance(86400)
+        feed.set_quote("ABC", D("39.99"), D("40"), D("40"))
+    assert errors == 0
+    ex.summary(a.id)

@@ -27,7 +27,7 @@ STATUSES = set(m.ACTIVE) | set(m.TERMINAL)
 BAD_NUMBER = re.compile(r"^[+-]?(nan|snan|inf|infinity)$", re.I)
 # Float values allowed in state.json: times (seconds since the epoch). Paths use [] for list indices.
 TIME_PATHS = re.compile(r"(\.(ts|created_at|updated_at|expire_at|auction_at|opened_at|closed_at|triggered_at|"
-                        r"margin_call_since|margin_call_ok_since)$)|(\.lots\.[A-Z0-9]+\[\]\[\]$)|"
+                        r"margin_call_since|margin_call_ok_since|expires_at|rearm_at|at)$)|(\.lots\.[A-Z0-9]+\[\]\[\]$)|"
                         r"(\.log\[\]\[\]$)|(\.equity_history\[\]\[\]$)")
 
 
@@ -41,7 +41,7 @@ class InvariantError(AssertionError):
 # Failures already confirmed and reported (each has an xfail test in tests/soak/test_findings.py).
 # A soak run counts them in SOFT_SEEN instead of stopping, so it can go on to find new ones;
 # `python -m tools.soak --strict` (or clearing this set) makes them stop the run again.
-CONFIRMED = {"statement_reconciliation", "statement_positions", "cash_account_negative_cash"}
+CONFIRMED = {"statement_reconciliation", "statement_positions", "cash_account_negative_cash", "combo_without_bid"}
 KNOWN = set()
 SOFT_SEEN: dict = {}
 
