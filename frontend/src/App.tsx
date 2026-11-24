@@ -194,7 +194,7 @@ export default function App() {
       {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
-      {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
+      {view === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
     </div>
   );
   const bottom = accountId && (

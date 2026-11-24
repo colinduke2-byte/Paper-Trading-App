@@ -189,7 +189,7 @@ falls back to synthetic, with the cause shown.
 {"source": "Alpaca", "as_of": 1795500000.0, "available": true, "stale": false, "reason": null, "items": []}
 ```
 
-`available: false` comes with a `reason` (for example, no key or the synthetic feed). `stale: true`
+`available: false` comes with a `reason` (for example, no key). On the synthetic feed the same routes serve simulated research; see `docs/SIMULATED_RESEARCH.md`. `stale: true`
 means a refresh failed and saved data is shown. Fundamentals use `data` in place of `items`.
 
 **Corporate actions (for the dividend and split processing stream).** In process, call

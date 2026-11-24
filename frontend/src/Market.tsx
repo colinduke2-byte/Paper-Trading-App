@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, compact, money, pct, qty, time, tone } from "./util";
+import { KeyRatios } from "./ResearchViews";
+import "./Research.css";
 
 export function usePoll<T>(path: string | null, ms: number, deps: any[] = []): [T | null, string, () => void] {
   const [data, setData] = useState<T | null>(null);
@@ -193,20 +195,24 @@ export function OptionChain({ symbol, onTrade }: { symbol: string; onTrade: (opt
 }
 
 export function Company({ info }: { info: any }) {
+  // Simulated research (fictional companies) has statements behind these figures; use them when present.
+  const [env] = usePoll<any>(info?.symbol ? `/research/fundamentals/${info.symbol}` : null, 60000);
   if (!info) return <p className="muted pad">Loading company data…</p>;
+  const sim = env?.available && env.data?.simulated ? env.data : null;
   const row = (k: string, v: string) => <div key={k}><span>{k}</span><b>{v}</b></div>;
+  const eps = sim ? sim.eps : info.eps, pe = sim ? sim.pe : info.pe;
   return (
     <div className="company">
-      {info.simulated !== false ? <div className="notice">Every company in this build is fictional and its figures are generated. Connect a market data provider for real fundamentals.</div>
+      {info.simulated !== false ? <div className="notice">Every company in this build is fictional and its figures are simulated. Financial statements, earnings, news and calendars are on the Research tab.</div>
         : <div className="notice">These figures are computed from price data only. Earnings, dividends and fundamentals from the data provider are on the Research tab.</div>}
       <div className="facts">
         {row("Name", info.name)}
         {row("Sector", info.sector)}
         {row("Type", info.type === "etf" ? "Fund" : "Stock")}
-        {row("Market cap", compact(info.market_cap))}
-        {row("Shares outstanding", compact(info.shares_outstanding))}
-        {row("Earnings per share", money(info.eps))}
-        {row("Price / earnings", info.pe == null ? "–" : info.pe.toFixed(1))}
+        {row("Market cap", compact(sim ? sim.market_cap : info.market_cap))}
+        {row("Shares outstanding", compact(sim ? sim.shares_outstanding : info.shares_outstanding))}
+        {info.type !== "etf" && row(sim ? "Earnings per share (trailing)" : "Earnings per share", money(eps))}
+        {info.type !== "etf" && row("Price / earnings", pe == null ? "–" : pe.toFixed(1))}
         {row("Dividend per share", money(info.dividend))}
         {row("Dividend yield", info.dividend_yield_pct == null ? "–" : info.dividend_yield_pct.toFixed(2) + "%")}
         {row("52-week high", money(info.high_52w))}
@@ -214,6 +220,13 @@ export function Company({ info }: { info: any }) {
         {row("Average volume (30 days)", compact(info.avg_volume_30d))}
         {row("Volatility (annual)", info.historical_volatility == null ? "–" : (info.historical_volatility * 100).toFixed(0) + "%")}
       </div>
+      {sim && (
+        <section className="rs-block company-ratios" aria-labelledby="co-ratios">
+          <h3 id="co-ratios">{sim.kind === "fund" ? "Fund details" : `Key ratios (${sim.last_period}, trailing four quarters)`}</h3>
+          <div className="rs-source">Source: Simulated (fictional companies and events)</div>
+          <KeyRatios f={sim} />
+        </section>
+      )}
     </div>
   );
 }

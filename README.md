@@ -129,7 +129,9 @@ requests reach the container through Docker's network rather than from `127.0.0.
 - **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute
   to weekly) with SMA, EMA, Bollinger bands, VWAP and RSI, depth ladder, time and sales,
   company facts, screener, and a Research tab (news, earnings and dividend calendar,
-  corporate actions, fundamentals; real data needs a provider).
+  corporate actions, fundamentals). Without a provider the Research tab is filled with simulated
+  research for the fictional companies: financial statements, earnings reports that gap the price,
+  news, and an economic calendar, all labelled Simulated (see `docs/SIMULATED_RESEARCH.md`).
 - **Orders:** market, limit, stop, stop-limit and trailing stop; market and limit on open
   and on close; day, good-till-canceled, good-till-date, immediate-or-cancel and
   fill-or-kill; brackets, one-cancels-other groups and one-triggers-other chains; order
