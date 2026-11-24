@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChangeOrderButton } from "./ChangeOrder";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
 import { api, compact, dateTime, isOption, money, numText, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
@@ -103,7 +104,9 @@ function Orders({ accountId, orders, onChanged, notify, onSelect }: any) {
                 <td>{TIFS[o.tif]}</td>
                 <td className="num">{o.avg_fill_price == null ? "–" : money(o.avg_fill_price, o.avg_fill_price < 1 ? 4 : 2)}</td>
                 <td title={o.reason || undefined}>{STATUS[o.status] || o.status}{o.reason && o.status !== "filled" ? <span className="muted"> · {o.reason}</span> : null}</td>
-                <td className="num">{active(o) && <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button>}</td>
+                <td className="num row-actions">{active(o) && <>
+                  <ChangeOrderButton accountId={accountId} order={o} onChanged={onChanged} notify={notify} />
+                  <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button></>}</td>
               </tr>
             ))}
           </tbody>

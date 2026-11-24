@@ -123,3 +123,4 @@ label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--t
   .app .right-col { overflow: visible; } .app .qh-grid { margin-left: 0; grid-template-columns: repeat(2, auto); }
   .app .top-right { margin-left: 0; flex-wrap: wrap; }
 }
+td.row-actions { white-space: nowrap; } td.row-actions button + button { margin-left: 4px; }

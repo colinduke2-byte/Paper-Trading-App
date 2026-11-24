@@ -61,13 +61,19 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
         <h3 id="settings-title">Account rules</h3>
         {summary && (
           <div style={S.stats}>
-            <div style={S.stat}><span className="muted">Settled cash</span><b>{usd(summary.settled_cash)}</b></div>
+            {type === "margin" && summary.settled_cash < 0
+              ? <div style={S.stat} title="Cash is below zero because the account has borrowed to buy (a margin loan). Margin interest is charged on it when that rule is on.">
+                  <span className="muted">Margin loan (borrowed)</span><b>{usd(-summary.settled_cash)}</b></div>
+              : <div style={S.stat}><span className="muted">Settled cash</span><b>{usd(summary.settled_cash)}</b></div>}
             <div style={S.stat}><span className="muted">Unsettled</span><b>{usd(summary.unsettled_cash)}</b></div>
             {type === "margin" && <div style={S.stat}><span className="muted">Day trades (5 days)</span><b>{summary.day_trades ?? "–"}{summary.day_trades_left != null ? ` · ${summary.day_trades_left} left` : ""}</b></div>}
             {type === "margin" && <div style={S.stat}><span className="muted">Accrued interest</span><b>{usd(summary.accrued_interest)}</b></div>}
             {type === "margin" && <div style={S.stat}><span className="muted">Accrued borrow fee</span><b>{usd(summary.accrued_borrow_fee)}</b></div>}
             {summary.pending_dividends ? <div style={S.stat}><span className="muted">Dividends pending</span><b>{usd(summary.pending_dividends)}</b></div> : null}
           </div>
+        )}
+        {type === "margin" && summary?.settled_cash < 0 && (
+          <p className="muted" style={S.help}>This account has borrowed {usd(-summary.settled_cash)} to buy: its cash is below zero. That is normal in a margin account; margin interest is charged on the loan when that rule is on.</p>
         )}
         {summary?.prices_unavailable?.length > 0 && (
           <div className="notice" role="status">Prices unavailable for {summary.prices_unavailable.join(", ")}: margin checks are paused until they return.</div>

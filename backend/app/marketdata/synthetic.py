@@ -100,7 +100,8 @@ class SyntheticFeed(MarketDataProvider):
             self.store.daily[sym] = rows
             prev_close = cents(Decimal(repr(round(price, 2))))
             # Intraday minutes for today so charts are not empty at start-up.
-            midnight = int(cal.trading_day_start(today, self._mode))
+            # (from UTC midnight in both modes: the bundled replay samples are built from this and must not change)
+            midnight = int(now // 86400) * 86400
             minute_sigma = vol * math.sqrt(60 / self.year_seconds)
             p = price * math.exp(daily_sigma * 0.3 * rng.gauss(0, 1))
             day_open = p

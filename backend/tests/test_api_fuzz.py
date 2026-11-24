@@ -91,12 +91,15 @@ def baselines(aid, oid, jid, calls):
         ("DELETE", f"/api/accounts/{aid}/journal/{jid}"): None,
         ("PUT", f"/api/accounts/{aid}/settings"): {"settings": settings},
         ("POST", f"/api/accounts/{aid}/settings/reset"): None,
+        ("PUT", "/api/chartstate/settings"): {"updated": 1, "data": {"type": "candles"}},
+        ("PUT", "/api/chartstate/drawings/NVLX"): {"updated": 1, "data": [{"id": "d1"}]},
+        ("DELETE", "/api/chartstate"): None,
     }
 
 
 def _template(path, aid, oid, jid):
     return path.replace(aid, "{aid}").replace(oid, "{oid}").replace(jid, "{jid}").replace("/Fuzz", "/{name}") \
-        .replace("/AL99999", "/{alert_id}")
+        .replace("/AL99999", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym}")
 
 
 def variants(body):
@@ -237,3 +240,10 @@ def test_a_malformed_websocket_subscription_does_not_stop_the_stream():
                 if msg.get("account"):
                     break
             assert msg["account"]["id"] == "A0001"
+
+
+def test_option_descriptions_match_the_ui():
+    """frontend/src/util.test.ts checks describeOption() against these same strings."""
+    from app.options.symbology import describe
+    assert describe("MKTX261204C00400000") == "MKTX 04 Dec 2026 400 Call"
+    assert describe("NVLX270115P00102500") == "NVLX 15 Jan 2027 102.5 Put"

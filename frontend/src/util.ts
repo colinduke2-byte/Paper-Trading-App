@@ -85,3 +85,13 @@ export function numText(v: string): string {
   if (/^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(s)) s = s.replace(/,/g, "");
   return s;
 }
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// The same text as the server's options.symbology.describe(): "MKTX 04 Dec 2026 400 Call".
+export function describeOption(s: string): string {
+  const m = s.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+  if (!m) return s;
+  const strike = String(Number(m[6]) / 1000);
+  return `${m[1]} ${m[4]} ${MONTHS[Number(m[3]) - 1]} 20${m[2]} ${strike} ${m[5] === "C" ? "Call" : "Put"}`;
+}

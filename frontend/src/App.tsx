@@ -11,7 +11,7 @@ import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { HelpDialog } from "./Help";
-import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd } from "./util";
+import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption } from "./util";
 import { useSignOutAction } from "./Login";
 
 type Toast = { id: number; text: string; bad?: boolean };
@@ -289,12 +289,6 @@ export default function App() {
       {overlays}
     </div>
   );
-}
-
-function describeOption(s: string) {
-  const m = s.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
-  if (!m) return s;
-  return `${m[1]} 20${m[2]}-${m[3]}-${m[4]} ${Number(m[6]) / 1000} ${m[5] === "C" ? "Call" : "Put"}`;
 }
 
 function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "reset"; account: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
