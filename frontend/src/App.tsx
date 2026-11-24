@@ -7,6 +7,7 @@ import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
+import { BuilderInit, closingLegs, StrategyBuilder } from "./StrategyBuilder";
 import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
 import { useSignOutAction } from "./Login";
 
@@ -31,6 +32,7 @@ export default function App() {
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [builder, setBuilder] = useState<BuilderInit | null>(null); // the strategy builder, when open
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
@@ -155,6 +157,11 @@ export default function App() {
     setScreen("Trade");
   };
   const startTrade = (side: string) => { setSeed({ symbol, side, nonce: Date.now() }); setScreen("Trade"); };
+  const openBuilder = (init: Omit<BuilderInit, "nonce">) => { if (init.symbol !== symbol) setSymbol(init.symbol); setBuilder({ ...init, nonce: Date.now() }); };
+  const closeStrategy = (rows: any[], name: string) => {
+    const { legs, qty } = closingLegs(rows);
+    openBuilder({ symbol: rows.find((r) => r.underlying)?.underlying || rows[0].symbol, legs, qty, title: `Close ${name.toLowerCase()}` });
+  };
 
   if (fatal) return <div className="fatal"><h1>PaperDesk</h1><p>{fatal}</p></div>;
 
@@ -192,14 +199,15 @@ export default function App() {
   const mainView = (
     <div className="view">
       {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
-      {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
+      {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} onStrategy={(legs) => openBuilder({ symbol, legs })} />}
       {view === "Company" && <Company info={info} />}
       {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
     </div>
   );
   const bottom = accountId && (
     <BottomPanel accountId={accountId} positions={positions} orders={orders} refreshKey={refreshKey} quotes={quotes}
-      onSelect={pickSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify} />
+      onSelect={pickSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify}
+      onCloseStrategy={closeStrategy} />
   );
   const ticketEl = accountId && (
     <Ticket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} description={ticketDesc} position={ticketPos}
@@ -214,6 +222,10 @@ export default function App() {
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
+      {builder && accountId && (
+        <StrategyBuilder key={builder.nonce} init={builder} accountId={accountId} stockQuote={quotes[builder.symbol]} feed={status?.feed || "feed"}
+          onClose={() => setBuilder(null)} onPlaced={(m) => { setBuilder(null); notify(m); setRefreshKey((k) => k + 1); }} />
+      )}
       {settingsOpen && accountId && (
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}

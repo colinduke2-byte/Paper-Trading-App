@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, compact, money, pct, qty, time, tone } from "./util";
+import { describeLeg, legFromSymbol, parseOption } from "./payoff";
+
+const describeContract = (s: string) => describeLeg(parseOption(s)?.underlying || s, legFromSymbol(s, "buy"));
 
 export function usePoll<T>(path: string | null, ms: number, deps: any[] = []): [T | null, string, () => void] {
   const [data, setData] = useState<T | null>(null);
@@ -136,10 +139,28 @@ export function DepthTape({ symbol }: { symbol: string }) {
   );
 }
 
-export function OptionChain({ symbol, onTrade }: { symbol: string; onTrade: (optSymbol: string, side: string, price: number) => void }) {
+export type StrategyPick = { symbol: string; side: "buy" | "sell"; ratio: number };
+
+export function OptionChain({ symbol, onTrade, onStrategy }: {
+  symbol: string; onTrade: (optSymbol: string, side: string, price: number) => void;
+  onStrategy?: (legs?: StrategyPick[]) => void; // opens the strategy builder, empty or with legs picked in the chain
+}) {
   const [exps] = usePoll<any[]>(`/options/expirations/${symbol}`, 0);
   const [expiry, setExpiry] = useState("");
-  useEffect(() => { setExpiry(""); }, [symbol]);
+  // "Add to strategy" mode: a click on a bid adds a sell leg, on an ask a buy leg, instead of opening the ticket.
+  const [adding, setAdding] = useState(false);
+  const [picks, setPicks] = useState<StrategyPick[]>([]);
+  const [pickNote, setPickNote] = useState("");
+  useEffect(() => { setExpiry(""); setPicks([]); setAdding(false); }, [symbol]);
+  const pick = (s: string, side: "buy" | "sell") => {
+    setPickNote("");
+    const at = picks.findIndex((p) => p.symbol === s);
+    if (at >= 0) setPicks(picks[at].side === side ? picks.filter((_, i) => i !== at) : picks.map((p, i) => (i === at ? { ...p, side } : p)));
+    else if (picks.length >= 4) setPickNote("A strategy has at most 4 legs. Remove one first (click it again).");
+    else setPicks([...picks, { symbol: s, side, ratio: 1 }]);
+  };
+  const picked = (s: string, side: string) => picks.some((p) => p.symbol === s && p.side === side);
+  const press = (s: string, side: "buy" | "sell", price: number) => (adding ? pick(s, side) : onTrade(s, side, price));
   const chosen = expiry || (exps && exps[1]?.date) || (exps && exps[0]?.date) || "";
   const [chain, error] = usePoll<any>(chosen ? `/options/chain/${symbol}?expiry=${chosen}` : null, 3000);
   const cells = (o: any, itm: boolean, order: string[]) => {
@@ -149,8 +170,10 @@ export function OptionChain({ symbol, onTrade }: { symbol: string; onTrade: (opt
       vol: <td key="vol" className={"num muted" + c}>{compact(o.volume)}</td>,
       iv: <td key="iv" className={"num" + c}>{(o.iv * 100).toFixed(1)}%</td>,
       delta: <td key="delta" className={"num" + c}>{o.delta.toFixed(2)}</td>,
-      bid: <td key="bid" className={"num" + c}><button className="px down" title="Sell at the bid" onClick={() => onTrade(o.symbol, "sell", o.bid)}>{money(o.bid)}</button></td>,
-      ask: <td key="ask" className={"num" + c}><button className="px up" title="Buy at the ask" onClick={() => onTrade(o.symbol, "buy", o.ask)}>{money(o.ask)}</button></td>,
+      bid: <td key="bid" className={"num" + c}><button className={"px down" + (picked(o.symbol, "sell") ? " picked" : "")} title={adding ? "Add a sell leg" : "Sell at the bid"}
+        aria-pressed={adding ? picked(o.symbol, "sell") : undefined} onClick={() => press(o.symbol, "sell", o.bid)}>{money(o.bid)}</button></td>,
+      ask: <td key="ask" className={"num" + c}><button className={"px up" + (picked(o.symbol, "buy") ? " picked" : "")} title={adding ? "Add a buy leg" : "Buy at the ask"}
+        aria-pressed={adding ? picked(o.symbol, "buy") : undefined} onClick={() => press(o.symbol, "buy", o.ask)}>{money(o.ask)}</button></td>,
     };
     return order.map((k) => all[k]);
   };
@@ -163,7 +186,13 @@ export function OptionChain({ symbol, onTrade }: { symbol: string; onTrade: (opt
           </select>
         </label>
         <span className="tag">{chain?.source_label || "model prices, not market data"}{chain?.model_legs ? ` · ${chain.model_legs} model-priced` : ""}</span>
-        <span className="muted">Click a bid to sell or an ask to buy. Each contract covers 100 shares.</span>
+        <span className="muted">{adding ? "Adding to a strategy: click an ask to add a buy leg, a bid to add a sell leg." : "Click a bid to sell or an ask to buy. Each contract covers 100 shares."}</span>
+        {onStrategy && (
+          <span className="chain-strategy">
+            <button className="ghost sm" onClick={() => onStrategy()}>Build a strategy…</button>
+            <button className={"ghost sm" + (adding ? " on" : "")} aria-pressed={adding} onClick={() => { setAdding(!adding); setPickNote(""); }}>Add to strategy</button>
+          </span>
+        )}
       </div>
       {error && <div className="notice bad">Could not load the option chain: {error}</div>}
       <div className="scroll">
@@ -188,6 +217,16 @@ export function OptionChain({ symbol, onTrade }: { symbol: string; onTrade: (opt
         </table>
         {!chain && !error && <p className="muted pad">Loading option chain…</p>}
       </div>
+      {adding && (
+        <div className="strategy-tray" role="region" aria-label="Strategy legs picked">
+          <span>{picks.length === 0 ? "No legs yet. Pick bids (sell) and asks (buy) in the chain." : picks.map((p) => `${p.side === "buy" ? "Buy" : "Sell"} ${describeContract(p.symbol)}`).join(" · ")}</span>
+          {pickNote && <span className="down">{pickNote}</span>}
+          <span className="strategy-tray-actions">
+            {picks.length > 0 && <button className="ghost sm" onClick={() => setPicks([])}>Clear</button>}
+            <button className="primary sm" disabled={!picks.length} onClick={() => onStrategy?.(picks)}>Open in strategy builder ({picks.length} leg{picks.length === 1 ? "" : "s"})</button>
+          </span>
+        </div>
+      )}
     </div>
   );
 }
