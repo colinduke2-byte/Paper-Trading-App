@@ -250,7 +250,7 @@ def test_dividends_are_always_paid():
     a = acct(ex)
     ex.account(a).settings = cfg.merged({"dividends": False})  # an old saved toggle is ignored
     assert "dividends" not in ex.account(a).settings
-    with pytest.raises(ValueError, match="unknown setting dividends"):
+    with pytest.raises(ValueError, match="(?i)unknown setting dividends"):
         cfg.update(cfg.defaults(), {"dividends": False})
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100})
     feed.schedule(dividend("ABC", EX, EX2, "1.00"))
@@ -547,8 +547,8 @@ def test_settings_validation():
     s = cfg.defaults()
     assert s["margin_interest_rate"] == "8" and s["pdt_min_equity"] == "25000" and s["settled_cash_only"] is True
     assert cfg.update(s, {"margin_interest_rate": 9.5})["margin_interest_rate"] == "9.5"
-    for bad, msg in (({"nope": 1}, "unknown setting"), ({"dividend_reinvestment": "yes"}, "true or false"),
-                     ({"margin_interest_rate": 80}, "between"), ({"borrow_fee_rate": "abc"}, "number")):
+    for bad, msg in (({"nope": 1}, "(?i)unknown setting"), ({"dividend_reinvestment": "yes"}, "on or off"),
+                     ({"margin_interest_rate": 80}, "from 0 to 50"), ({"borrow_fee_rate": "abc"}, "number")):
         with pytest.raises(ValueError, match=msg):
             cfg.update(s, bad)
     assert cfg.merged({"dividend_reinvestment": True, "junk": 1, "margin_interest_rate": "bad"}) == \
@@ -613,7 +613,7 @@ def test_settings_api():
     assert r.status_code == 200 and r.json()["settings"]["margin_interest_rate"] == "6.25"
     assert ex.account(a).settings["dividend_reinvestment"] is True and ex.dirty
     r = c.put(f"/api/accounts/{a}/settings", json={"borrow_fee_rate": -1})
-    assert r.status_code == 400 and "between" in r.json()["detail"]
+    assert r.status_code == 400 and "from 0 to 200" in r.json()["detail"]
     assert c.put("/api/accounts/NOPE/settings", json={}).status_code == 404
     assert c.post(f"/api/accounts/{a}/settings/reset").json()["settings"] == cfg.defaults()
     feed.schedule(dividend("ABC", EX2, PAY, "0.25"))

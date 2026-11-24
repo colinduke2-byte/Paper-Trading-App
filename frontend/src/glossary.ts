@@ -1,0 +1,23 @@
+// Plain-language definitions for the jargon PaperDesk shows. Used by <Info term="…"/>.
+export const GLOSSARY: Record<string, { title: string; text: string }> = {
+  buying_power: { title: "Buying power", text: "How much stock you can buy right now. In a margin account it can be up to twice your spare account value, because the simulated broker lends you the rest. In a cash account it is your cash." },
+  buying_power_options: { title: "Buying power for options", text: "How much you can spend on options. Options cannot be bought with borrowed money, so this is lower than stock buying power in a margin account." },
+  maintenance_margin: { title: "Maintenance margin", text: "The smallest account value you must keep for the positions you hold (25% of long stock, 30% of short stock, more for written options). If your account value falls below it you get a margin call." },
+  margin_call: { title: "Margin call", text: "Your account value fell below the maintenance margin. You can only reduce positions until it is back above. If it is not met in time, positions are sold for you (see Account rules)." },
+  settled_cash: { title: "Settled cash", text: "Cash from sales counts as settled one business day after the trade (T+1). Cash accounts can only buy with settled cash when that rule is on." },
+  day_trades: { title: "Day trades", text: "A day trade is buying and selling the same stock (or option) on the same day. Margin accounts worth less than the pattern day trader minimum may make only 3 in any 5 business days." },
+  delta: { title: "Delta", text: "How much the option price moves when the stock moves $1. A delta of 0.50 means about $0.50 per share, or $50 per contract." },
+  iv: { title: "IV (implied volatility)", text: "How much the option price assumes the stock will move over a year, in percent. Higher IV means more expensive options." },
+  oi: { title: "OI (open interest)", text: "How many contracts of this option are currently held by traders. Higher means it is easier to trade." },
+  twr: { title: "Time-weighted return", text: "The account's return with the effect of deposits and withdrawals removed, so you can compare it with a stock or index." },
+  sharpe: { title: "Sharpe ratio", text: "Return per unit of risk: the yearly return above the risk-free rate, divided by volatility. Higher is better; above 1 is good. Needs at least two days of history." },
+  max_drawdown: { title: "Max drawdown", text: "The largest fall in account value from a peak to a later low, in percent." },
+  wash_sale: { title: "Wash-sale flag", text: "A loss closed within 30 days before or after buying the same symbol again. Real tax rules may disallow such a loss; here it is information only, not tax advice." },
+  mark: { title: "Mark", text: "The current price used to value a position: the last trade, or the middle of the bid and ask for options." },
+  time_in_force: { title: "Time in force", text: "How long an order stays open. Day: until the close. Good till canceled: until it fills or you cancel it. Immediate or cancel: fill what you can now, cancel the rest. Fill or kill: all at once or nothing." },
+  bracket: { title: "Take profit and stop loss", text: "Two exit orders attached to a buy or sell: one sells at a higher price to take profit, the other at a lower price to limit the loss. When one fills, the other is canceled." },
+  limit_order: { title: "Limit order", text: "Fills only at your price or better. It may wait, or never fill, if the market does not reach your price." },
+  stop_order: { title: "Stop order", text: "Waits until the price reaches the stop, then becomes a market order. Used to limit losses or to buy on a breakout." },
+  day_pnl: { title: "Day P&L", text: "How much the account value changed since the start of today's trading day." },
+  unrealized: { title: "Unrealized P&L", text: "Profit or loss on positions you still hold, at the current price. It becomes realized when you close them." },
+};

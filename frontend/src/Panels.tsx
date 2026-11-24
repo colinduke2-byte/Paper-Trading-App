@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
-import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
+import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, price, qty, signed, signedUsd, SHOW_TAB, STATUS, store, TIFS, timeHeading, tone, usd } from "./util";
 
 const TABS = ["Positions", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
@@ -9,7 +9,14 @@ export function BottomPanel(p: {
   accountId: string; positions: any[]; orders: any[]; refreshKey: number; quotes: Record<string, any>;
   onSelect: (s: string) => void; onClose: (pos: any) => void; onChanged: () => void; notify: (m: string, bad?: boolean) => void;
 }) {
-  const [tab, setTab] = useState("Positions");
+  // The last tab is remembered; other components can switch it with showTab() (util.ts).
+  const [tab, setTabState] = useState(() => { const t = store("pd.tab"); return t && TABS.includes(t) ? t : "Positions"; });
+  const setTab = (t: string) => { setTabState(t); store("pd.tab", t); };
+  useEffect(() => {
+    const on = (e: Event) => { const t = (e as CustomEvent).detail; if (TABS.includes(t)) setTab(t); };
+    window.addEventListener(SHOW_TAB, on);
+    return () => window.removeEventListener(SHOW_TAB, on);
+  }, []);
   const open = p.orders.filter((o) => ["working", "partially_filled", "held"].includes(o.status));
   return (
     <section className="panel bottom">
@@ -120,18 +127,23 @@ function Fills({ accountId, refreshKey }: any) {
   if (!rows.length) return <p className="muted pad">No fills yet.</p>;
   return (
     <table>
-      <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th className="num">Qty</th><th className="num">Price</th><th className="num">Fee</th><th>Kind</th></tr></thead>
+      <thead><tr><th>{timeHeading()}</th><th>Symbol</th><th>Side</th><th className="num">Qty</th><th className="num">Price</th><th className="num">Fee</th><th>Kind</th></tr></thead>
       <tbody>
         {rows.map((f) => (
           <tr key={f.id}><td className="muted">{dateTime(f.ts)}</td><td>{f.description}</td>
             <td className={f.side === "buy" ? "up" : "down"}>{f.side === "buy" ? "Buy" : "Sell"}</td>
-            <td className="num">{qty(f.qty)}</td><td className="num">{money(f.price, f.price < 1 && f.price > 0 ? 4 : 2)}</td>
-            <td className="num">{money(f.fee)}</td><td>{f.kind}</td></tr>
+            <td className="num">{qty(f.qty)}</td><td className="num">{price(f.price)}</td>
+            <td className="num">{usd(f.fee)}</td><td>{FILL_KINDS[f.kind] || f.kind}</td></tr>
         ))}
       </tbody>
     </table>
   );
 }
+
+const FILL_KINDS: Record<string, string> = {
+  trade: "Trade", exercise: "Exercise", assignment: "Assignment", expiration: "Expired", "closed at expiry": "Closed at expiry",
+  reinvestment: "Dividend reinvestment", split_settlement: "Split settlement",
+};
 
 function Activity({ accountId, refreshKey }: any) {
   const [rows, error] = usePoll<any[]>(`/accounts/${accountId}/ledger`, 0, [refreshKey]);
@@ -139,15 +151,15 @@ function Activity({ accountId, refreshKey }: any) {
   if (!rows) return <p className="muted pad">Loading…</p>;
   return (
     <table>
-      <thead><tr><th>Time</th><th>Entry</th><th className="num">Cash change</th><th className="num">Realised P&amp;L</th></tr></thead>
+      <thead><tr><th>{timeHeading()}</th><th>Entry</th><th className="num">Cash change</th><th className="num">Realized P&amp;L</th></tr></thead>
       <tbody>
         {rows.map((t) => {
           const get = (name: string) => t.postings.filter((x: any) => x[0] === name).reduce((a: number, x: any) => a + x[1], 0);
           const pnl = -get("income:realized");
           return (
             <tr key={t.id}><td className="muted">{dateTime(t.ts)}</td><td>{t.memo}</td>
-              <td className={"num " + tone(get("cash"))}>{signed(get("cash"))}</td>
-              <td className={"num " + tone(pnl)}>{pnl ? signed(pnl) : "–"}</td></tr>
+              <td className={"num " + tone(get("cash"))}>{signedUsd(get("cash"))}</td>
+              <td className={"num " + tone(pnl)}>{pnl ? signedUsd(pnl) : "–"}</td></tr>
           );
         })}
       </tbody>

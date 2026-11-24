@@ -5,14 +5,65 @@ import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from
 import { BottomPanel } from "./Panels";
 import { feedBanner, Research } from "./Research";
 import { Ticket, TicketSeed } from "./Ticket";
-import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
+import { MobileShell, Screen, SCREENS, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { HelpDialog } from "./Help";
-import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
+import { api, inReplayTime, isOption, nyTime, OPEN_SETTINGS, price, qty as fmtQty, sessionOk, setReplayTime, shortDateTime, signedOut, signedUsd, store, ticketFocus, time, tone, underlyingOf, usd, zoneLabel } from "./util";
+import { ConnectionContext, useConnectionState } from "./connection";
+import { ConfirmHost } from "./Confirm";
+import { Info } from "./Info";
+import { Welcome } from "./Welcome";
 import { useSignOutAction } from "./Login";
 
 type Toast = { id: number; text: string; bad?: boolean };
+const MAIN_VIEWS = ["Chart", "Options", "Company", "Research"];
+
+const FILL_KIND: Record<string, string> = { exercise: "exercised", assignment: "assigned" };
+
+/** Toast text for a stream event, or null when the event needs no message. */
+function eventText(e: any): { text: string; bad?: boolean } | null {
+  if (e.type === "alert") return { text: `Alert: ${e.alert.symbol} ${e.alert.op === "above" ? "rose to" : "fell to"} ${price(e.last)}.` };
+  if (e.type === "lifecycle") {
+    if (!e.message) return null;
+    return { text: e.message, bad: ["margin_call", "liquidation", "prices_unavailable"].includes(e.kind) && !/ met[:.]/.test(e.message) };
+  }
+  if (e.type === "fill") {
+    const f = e.fill, name = f.description || f.symbol, n = fmtQty(f.qty);
+    const bought = f.side === "buy" ? "bought" : "sold";
+    if (f.kind === "trade") return null; // the ticket reports its own fills
+    if (f.kind === "reinvestment") return { text: `Dividend reinvested: bought ${n} ${name} at ${price(f.price)}.` };
+    if (f.kind === "split_settlement") return { text: `Split settled: ${bought} ${n} ${name} at ${price(f.price)}.` };
+    if (f.kind === "expiration") return { text: `${name} expired worthless.` };
+    if (f.kind === "closed at expiry") return { text: `${name} was closed at expiry for ${price(f.price)} a share (its value in the money).` };
+    if (FILL_KIND[f.kind]) {
+      // Exercise and assignment book two fills: the option leaves at zero (skipped) and the shares move at the strike.
+      if (isOption(f.symbol)) return null;
+      return { text: `Option ${FILL_KIND[f.kind]}: you ${bought} ${n} ${name} at ${price(f.price)}.` };
+    }
+    return { text: `${f.kind.replace(/^./, (c: string) => c.toUpperCase())}: ${bought} ${n} ${name} at ${price(f.price)}.` };
+  }
+  if (e.type === "order" && e.order.status === "filled") {
+    const o = e.order, role = o.role === "take_profit" ? "Take profit" : o.role === "stop_loss" ? "Stop loss" : o.role === "liquidation" ? "Margin call sale" : null;
+    if (!role && !o.parent_id) return null;
+    return { text: `${role || "Linked order"} filled: ${o.side === "buy" ? "bought" : "sold"} ${fmtQty(o.filled_qty ?? o.qty)} ${o.description || o.symbol} at ${price(o.avg_fill_price)}.`, bad: o.role === "liquidation" };
+  }
+  return null;
+}
+
+/** The account figures shown in the desktop header, each with a definition. */
+function accountStats(summary: any) {
+  return (
+    <>
+      <div><span>Account value</span><b>{usd(summary?.equity)}</b></div>
+      <div><span>Day P&amp;L <Info term="day_pnl" /></span><b className={tone(summary?.day_pnl)}>{signedUsd(summary?.day_pnl)}</b></div>
+      <div title={summary?.type === "margin" ? `Options: ${usd(summary?.option_buying_power)}` : undefined}>
+        <span>Buying power <Info term="buying_power" /></span><b>{usd(summary?.buying_power)}</b></div>
+      <div><span>Cash</span><b>{usd(summary?.cash)}</b></div>
+      {summary?.type === "margin" && <div><span>Maintenance margin <Info term="maintenance_margin" /></span><b>{usd(summary?.maintenance_requirement)}</b></div>}
+    </>
+  );
+}
 
 export default function App() {
   const [accounts, setAccounts] = useState<any[]>([]);
@@ -26,7 +77,8 @@ export default function App() {
   const [status, setStatus] = useState<any>(null);
   const [connected, setConnected] = useState(false);
   const [fatal, setFatal] = useState("");
-  const [view, setView] = useState("Chart");
+  const [view, setViewState] = useState(() => { const v = store("pd.view"); return v && MAIN_VIEWS.includes(v) ? v : "Chart"; });
+  const setView = (v: string) => { setViewState(v); store("pd.view", v); };
   const [seed, setSeed] = useState<TicketSeed>({ symbol });
   const [refreshKey, setRefreshKey] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -35,7 +87,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const small = useSmallScreen();
-  const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
+  // The view shown on a small screen, remembered between visits.
+  const [screen, setScreenState] = useState<Screen>(() => { const v = store("pd.screen") as Screen; return v && SCREENS.includes(v) ? v : "Chart"; });
+  const setScreen = useCallback((v: Screen) => { setScreenState(v); store("pd.screen", v); }, []);
+  const [welcomed, setWelcomed] = useState(() => !!store("pd.welcomed"));
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
   const ws = useRef<WebSocket | null>(null);
   const toastId = useRef(0);
@@ -45,6 +100,8 @@ export default function App() {
     setToasts((t) => [...t.slice(-3), { id, text, bad }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), bad ? 9000 : 5000);
   }, []);
+
+  const conn = useConnectionState(connected, () => notify("Reconnected. Prices and balances are live again."));
 
   const loadAccounts = useCallback(async () => {
     const list = await api("/accounts");
@@ -63,9 +120,22 @@ export default function App() {
         if (!list.find((a: any) => a.id === accountId)) setAccountId(list[0]?.id || "");
         setWatch(wl.Main || Object.values(wl)[0] || []);
       } catch (e: any) {
-        setFatal(`Cannot reach the PaperDesk server (${e.message}). Check that it is running, then reload.`);
+        setFatal("PaperDesk can't reach its server. Check that PaperDesk is still running on your computer (the window where you started it). This page tries again every few seconds.");
       }
     })();
+  }, []);
+
+  // While the server cannot be reached at start-up, try again every 3 s and reload once it answers.
+  useEffect(() => {
+    if (!fatal) return;
+    const t = setInterval(() => fetch("/api/status").then((r) => { if (r.ok) location.reload(); }).catch(() => {}), 3000);
+    return () => clearInterval(t);
+  }, [fatal]);
+
+  useEffect(() => {
+    const open = () => setSettingsOpen(true);
+    window.addEventListener(OPEN_SETTINGS, open);
+    return () => window.removeEventListener(OPEN_SETTINGS, open);
   }, []);
 
   useEffect(() => { if (accountId) store("pd.account", accountId); setSummary(null); setPositions([]); setOrders([]); loadOrders(); }, [accountId]);
@@ -99,9 +169,9 @@ export default function App() {
         if (m.events?.length) {
           setRefreshKey((k) => k + 1);
           for (const e of m.events) {
-            if (e.type === "alert") notify(`Alert: ${e.alert.symbol} ${e.alert.op === "above" ? "rose to" : "fell to"} ${money(e.last)}`);
-            if (e.type === "fill" && e.fill.kind !== "trade") notify(`${e.fill.kind === "reinvestment" ? "Dividend reinvestment" : e.fill.kind === "split_settlement" ? "Split settlement" : `Option ${e.fill.kind}`}: ${e.fill.side} ${e.fill.qty} ${e.fill.symbol} at ${money(e.fill.price)}`);
-            if (e.type === "order" && e.order.status === "filled" && e.order.parent_id) notify(`Filled: ${e.order.role?.replace("_", " ") || "order"} on ${e.order.symbol} at ${money(e.order.avg_fill_price)}`);
+            if (e.account_id && e.account_id !== subRef.current.accountId) continue; // another account's event
+            const text = eventText(e);
+            if (text) notify(text.text, text.bad);
           }
         }
       };
@@ -151,27 +221,43 @@ export default function App() {
     setSymbol(p.underlying || p.symbol);
     setTimeout(() => setSeed({ symbol: p.symbol, side: p.qty > 0 ? "sell" : "buy", qty: Math.abs(p.qty), nonce: Date.now() }), 0);
     setScreen("Trade");
+    ticketFocus();
   };
   const pickSymbol = (s: string) => { setSymbol(s); setScreen("Chart"); };
   const tradeOption = (s: string, side: string, price: number) => {
     setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() });
     setScreen("Trade");
+    ticketFocus();
   };
   const startTrade = (side: string) => { setSeed({ symbol, side, nonce: Date.now() }); setScreen("Trade"); };
+  const dismissWelcome = () => { setWelcomed(true); store("pd.welcomed", "1"); };
+  const firstTrade = () => {
+    const s = watch.includes("MKTX") || !watch.length ? "MKTX" : watch[0];
+    dismissWelcome();
+    setSymbol(s);
+    setTimeout(() => setSeed({ symbol: s, side: "buy", qty: 10, type: "market", nonce: Date.now() }), 0);
+    setScreen("Trade");
+    ticketFocus();
+  };
 
-  if (fatal) return <div className="fatal"><h1>PaperDesk</h1><p>{fatal}</p></div>;
+  if (fatal) return <div className="fatal"><h1>PaperDesk</h1><p role="alert">{fatal}</p></div>;
 
   // Top-bar actions: desktop shows them in the header, the phone layout lists them in its menu.
   const topActions: TopAction[] = [
     { label: "New account", onClick: () => setDialog("new") },
-    { label: "Reset", onClick: () => setDialog("reset") },
-    ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
-    ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
+    { label: "Reset account", danger: true, title: "Erase this account's positions, orders and history and start again", onClick: () => setDialog("reset") },
+    ...(status?.replay ? [] : [{ label: "Replay", title: "Practice on a recorded trading session", onClick: () => setReplayPicker(true) }]),
+    ...(accountId ? [{ label: "Account rules", title: "Settlement, day trading, interest and margin call rules for this account", onClick: () => setSettingsOpen(true) }] : []),
     { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
     { label: "Help", title: "How PaperDesk works", onClick: () => setHelpOpen(true) },
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
   ];
-  const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
+  // Times follow one rule (util.ts): this device's zone, labelled, except in a replay, where everything is ET.
+  setReplayTime(!!status?.replay);
+  const sessionName = status ? (status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours") : "";
+  const clock = !status ? "" : status.replay ? "" // the replay bar shows the replay clock
+    : `${time(status.time)} ${zoneLabel()}${status.session_mode === "us" && zoneLabel() !== "ET" ? ` (${nyTime(status.time)} ET)` : ""}`;
+  const session = status ? (clock ? `${sessionName} · ${clock}` : sessionName) : "Connecting…";
   const banner = (
     <div className={status?.replay ? "paper-banner replay" : "paper-banner"} role="note" title={status?.replay ? undefined : feedBanner(status).title}>
       {replayBanner(status) ?? <>Paper trading · no real money{feedBanner(status).text}</>}
@@ -182,9 +268,19 @@ export default function App() {
       {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
     </select>
   );
-  const marginNotice = summary?.margin_call && (
-    <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
-  );
+  const marginNotice = summary?.margin_call ? (
+    <div className="notice bad wide" role="alert">
+      Margin call: your account value ({usd(summary.equity)}) is {usd(Math.max(0, summary.maintenance_requirement - summary.equity))} below
+      the maintenance margin ({usd(summary.maintenance_requirement)}). New positions are blocked. Sell or close positions to meet the call
+      {summary.liquidation_at ? <>{" "}by {shortDateTime(summary.liquidation_at)} {zoneLabel()}, or PaperDesk will sell them for you at market.</> : "."}
+      {" "}<Info term="margin_call" />
+    </div>
+  ) : null;
+  const welcome = !welcomed && !status?.replay && accountId && summary && !positions.length && !orders.length ? (
+    <Welcome simulated={status?.simulated_data !== false} symbol={watch.includes("MKTX") || !watch.length ? "MKTX" : watch[0]}
+      onFirstTrade={firstTrade} onHelp={() => setHelpOpen(true)} onDismiss={dismissWelcome} />
+  ) : null;
+  const notices = (marginNotice || welcome) ? <>{marginNotice}{welcome}</> : null;
   const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
   const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
   const mainTabs = (
@@ -213,12 +309,20 @@ export default function App() {
     <Ticket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} description={ticketDesc} position={ticketPos}
       onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
   );
-  const depth = <DepthTape symbol={underlyingOf(symbol)} />;
+  // Under an option ticket the depth ladder is the underlying stock's, so it says so.
+  const depth = <DepthTape symbol={underlyingOf(symbol)} note={isOption(seed.symbol) ? `${underlyingOf(seed.symbol)} stock, not the option` : undefined} />;
   const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
+  const lostBar = conn.stale ? (
+    <div className="lost-bar" role="alert">
+      <b>Connection to the PaperDesk server lost.</b>{" "}
+      Prices and balances below are frozen{status ? ` as of ${time(status.time)} ${zoneLabel()}` : ""}. Reconnecting…
+    </div>
+  ) : null;
   const overlays = (
     <>
       <Shortcuts symbols={watch} symbol={symbol} onSelect={setSymbol} accountId={accountId} orders={orders} notify={notify}
         onChanged={() => setRefreshKey((k) => k + 1)} onTicket={small ? () => setScreen("Trade") : undefined} />
+      <ConfirmHost />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
@@ -236,37 +340,37 @@ export default function App() {
 
   if (small) {
     return (
+      <ConnectionContext.Provider value={conn}>
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
-        notice={marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        notice={notices} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
         ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
-        replayBar={status?.replay ? replayBar : null} mode={mode}>
+        replayBar={status?.replay ? replayBar : null} mode={mode} stale={conn.stale} lostBar={lostBar}>
         {overlays}
       </MobileShell>
+      </ConnectionContext.Provider>
     );
   }
 
   return (
-    <div className="app" data-account={accountId}>
+    <ConnectionContext.Provider value={conn}>
+    <div className={conn.stale ? "app stale" : "app"} data-account={accountId}>
       <header className="top">
         <div className="brand">PaperDesk</div>
         {banner}
         <div className="top-stats">
-          <div><span>Account value</span><b>{usd(summary?.equity)}</b></div>
-          <div><span>Day P&amp;L</span><b className={tone(summary?.day_pnl)}>{signed(summary?.day_pnl)}</b></div>
-          <div><span>Buying power</span><b>{usd(summary?.buying_power)}</b></div>
-          <div><span>Cash</span><b>{usd(summary?.cash)}</b></div>
-          {summary?.type === "margin" && <div><span>Margin required</span><b>{usd(summary?.maintenance_requirement)}</b></div>}
+          {accountStats(summary)}
         </div>
         <div className="top-right">
-          <span className={connected ? "dot ok" : "dot"} title={connected ? "Live connection" : "Reconnecting…"} />
+          <span className={connected ? "dot ok" : "dot"} role="img" aria-label={connected ? "Live connection" : "Reconnecting"} title={connected ? "Live connection" : "Reconnecting…"} />
           <span className="muted">{session}</span>
           {accountSelect}
-          {topActions.map((a) => <Fragment key={a.label}>{a.element ?? <button className="ghost sm" title={a.title} onClick={a.onClick}>{a.label}</button>}</Fragment>)}
+          {topActions.map((a) => <Fragment key={a.label}>{a.element ?? <button className={a.danger ? "ghost sm danger-outline" : "ghost sm"} title={a.title} onClick={a.onClick}>{a.label}</button>}</Fragment>)}
         </div>
       </header>
+      {lostBar}
       {replayBar}
-      {marginNotice}
+      {notices}
       <main key={mode}>
         {watchlist}
         <div className="center-col">
@@ -284,6 +388,7 @@ export default function App() {
       </main>
       {overlays}
     </div>
+    </ConnectionContext.Provider>
   );
 }
 
@@ -298,21 +403,27 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
   const [type, setType] = useState("margin");
   const [cash, setCash] = useState(mode === "reset" && account ? String(account.starting_cash) : "100000");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const initialCash = mode === "reset" && account ? String(account.starting_cash) : "100000";
+  const dirty = name !== "" || type !== "margin" || cash !== initialCash;
   const submit = async () => {
+    setBusy(true);
     try {
       if (mode === "new") {
         const a = await api("/accounts", { method: "POST", body: { name, type, starting_cash: cash } });
-        onDone(a.id, `Account "${a.name}" created`);
+        onDone(a.id, `"${a.name}" created and selected.`);
       } else {
         await api(`/accounts/${account.id}/reset`, { method: "POST", body: { starting_cash: cash } });
-        onDone(account.id, `Account "${account.name}" reset to ${usd(Number(cash))}`);
+        onDone(account.id, `"${account.name}" was reset to ${usd(Number(cash))}.`);
       }
     } catch (e: any) { setError(e.message); }
+    setBusy(false);
   };
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <h3>{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
+    <div className="modal-bg" onClick={() => { if (!dirty) onClose(); }}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title" onClick={(e) => e.stopPropagation()}>
+        <h3 id="account-dialog-title">{mode === "new" ? "New paper account" : "Reset this account"}</h3>
+        {mode === "reset" && <p className="dialog-name" title={account?.name}>{account?.name}</p>}
         {mode === "reset" && <p className="muted">This erases the account's positions, orders and history and starts again with the cash below. It cannot be undone.</p>}
         {mode === "new" && (
           <>
@@ -329,7 +440,7 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
         {error && <div className="notice bad" role="alert">{error}</div>}
         <div className="row">
           <button className="ghost" onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={submit}>{mode === "new" ? "Create account" : "Erase and reset"}</button>
+          <button className={mode === "new" ? "primary" : "danger"} onClick={submit} disabled={busy}>{mode === "new" ? "Create account" : "Erase and reset"}</button>
         </div>
       </div>
     </div>

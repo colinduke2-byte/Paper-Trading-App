@@ -1,4 +1,4 @@
-.research { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 12px; padding-bottom: 10px; }
+.research { flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 12px; padding-bottom: 10px; }
 .rs-side { min-width: 0; }
 .rs-block { min-width: 0; }
 .rs-source, .rs-state { font-size: 11px; padding: 0 10px 6px; color: var(--muted); overflow-wrap: anywhere; }

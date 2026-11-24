@@ -102,8 +102,9 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
     feed = SyntheticFeed(seed=synthetic_seed, now=now, always_open=mode == "always")
     feed.fallback_reason = reason
     from .research import ResearchHub
-    feed.research = ResearchHub(simulated_reason="The synthetic feed uses fictional companies, so there is no "
-                                                 "real news, calendar or fundamental data for them.")
+    feed.research = ResearchHub(simulated_reason="News, earnings dates and fundamentals need real market data, and "
+                                                 "PaperDesk is showing simulated prices for fictional companies. "
+                                                 "docs/DATA_PROVIDERS.md explains how to connect a provider.")
     return Selection(feed, mode, data_dir, [], reason)
 
 
