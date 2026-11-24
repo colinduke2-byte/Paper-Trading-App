@@ -376,3 +376,85 @@ def test_a_worthless_quoted_option_is_not_a_missing_price():
     clock.advance(61)
     ex.tick()
     assert ex.account(a).equity_history  # sampled
+
+
+# ---- N14: the margin-call grace period counts running, open-market time only ----------------------------
+def test_margin_call_grace_does_not_run_while_the_app_is_closed():
+    tmp = tempfile.mkdtemp()
+    clock, feed = SimClock(T0), SimFeed()
+    ex = Exchange(feed, clock, data_dir=tmp)
+    feed.set_quote("ABC", "99.99", "100.00", "100.00", bid_size=100000, ask_size=100000)
+    ex.tick()
+    acc = ex.create_account("t", "margin", D("100000"))
+    ex.submit(acc.id, {"symbol": "ABC", "side": "buy", "qty": 1900})
+    clock.advance(5)
+    feed.set_quote("ABC", "59.99", "60.00", "60.00", bid_size=100000, ask_size=100000)
+    ex.tick()
+    assert acc.life.margin_call_since is not None
+    for _ in range(10):  # ten minutes of the 48 hours used
+        clock.advance(60)
+        ex.tick()
+    ex.save(force=True)
+    feed2 = SimFeed(INFO)
+    ex2 = Exchange(feed2, SimClock(T0 + 49 * 3600), data_dir=tmp)
+    ex2.load()
+    feed2.set_quote("ABC", "59.99", "60.00", "60.00", bid_size=100000, ask_size=100000)
+    ex2.tick()  # 49 hours later: the first tick does not liquidate
+    acc2 = ex2.account(acc.id)
+    assert acc2.positions() == {"ABC": D(1900)}
+    assert acc2.life.margin_call_counted == 600
+    assert "47.8 hours" in acc2.life.log[-1][2]
+    s = ex2.summary(acc.id)
+    assert s["grace_hours_left"] == (48 * 3600 - 600) / 3600
+    assert s["liquidation_at"] == ex2.now() + 48 * 3600 - 600
+
+
+# ---- N9 / N10: accrued charges in account value; the interest memo names every rate used ----------------
+def test_accrued_charges_count_in_equity_and_the_memo_lists_each_rate():
+    from datetime import datetime, timezone
+    clock, feed = SimClock(T0), SimFeed()
+    ex = Exchange(feed, clock)
+    feed.set_quote("ABC", "99.99", "100.00", "100.00", bid_size=100000, ask_size=100000)
+    ex.tick()
+    acc = ex.create_account("t", "margin", D("100000"))
+    acc.settings["margin_interest_rate"] = "7.2"
+    ex.submit(acc.id, {"symbol": "ABC", "side": "buy", "qty": 1500})  # cash -50,000: 10.00 a day at 7.2%
+    clock.advance(86400 * 3)
+    ex.tick()  # Nov 24, 25, 26 accrued
+    s = ex.summary(acc.id)
+    mv = D(1500) * D("100.00")
+    assert s["accrued_charges"] == D("30.00") and s["equity"] == s["cash"] + mv - D("30.00")
+    pos, marks, eq, maint = ex.lifecycle._state(acc)
+    assert eq == s["equity"]  # margin checks see the same account value
+    acc.settings["margin_interest_rate"] = "3.6"  # 5.00 a day from Nov 27
+    clock.set(datetime(2026, 12, 1, 0, 0, 30, tzinfo=timezone.utc).timestamp())
+    ex.tick()
+    [t] = [t for t in acc.ledger.transactions if t.kind == "interest"]
+    assert t.postings[0] == ("expense:margin_interest", D("50.00"))
+    assert t.memo == "Margin interest for November 2026: 50.00 (3.6% a year for 4 days, 7.2% a year for 3 days; actual/360)"
+    assert ex.summary(acc.id)["accrued_charges"] == 0
+
+
+# ---- N13: reset keeps settings and the tax-lot method, clears the journal, validates the cap --------------
+def test_reset_keeps_settings_and_lot_method_and_validates_the_starting_cash():
+    import pytest
+    from fastapi.testclient import TestClient
+    from app.api.server import create_app
+    clock, feed = SimClock(T0), SimFeed()
+    ex = Exchange(feed, clock)
+    feed.set_quote("ABC", "99.99", "100.00", "100.00")
+    ex.tick()
+    acc = ex.create_account("t", "margin", D("100000"))
+    acc.lot_method, acc.settings["margin_interest_rate"] = "lifo", "5"
+    acc.journal.append({"id": "J1", "note": "x"})
+    c = TestClient(create_app(ex, run_loop=False))
+    r = c.post(f"/api/accounts/{acc.id}/reset", json={"starting_cash": "2000000000"})
+    assert r.status_code == 400 and "1,000,000,000" in r.json()["detail"]
+    r = c.post(f"/api/accounts/{acc.id}/reset", json={"starting_cash": "-5"})
+    assert r.status_code == 400
+    assert c.post(f"/api/accounts/{acc.id}/reset", json={"starting_cash": "5000"}).status_code == 200
+    new = ex.account(acc.id)
+    assert new.lot_method == "lifo" and new.settings["margin_interest_rate"] == "5" and new.journal == []
+    assert new.cash == D("5000")
+    with pytest.raises(ValueError):
+        ex.create_account("x", "margin", D("0.001"))

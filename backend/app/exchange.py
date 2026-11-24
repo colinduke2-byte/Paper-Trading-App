@@ -137,10 +137,17 @@ class Exchange:
         return marks
 
     # ---- accounts --------------------------------------------------------
-    def create_account(self, name: str, type: str = "margin", starting_cash=Decimal("100000")) -> Account:
-        starting_cash = D(starting_cash)
-        if starting_cash <= 0 or starting_cash > Decimal("1000000000"):
+    @staticmethod
+    def _starting_cash(value) -> Decimal:
+        value = D(value)
+        if not value.is_finite() or value <= 0 or value > Decimal("1000000000"):
             raise ValueError("starting cash must be between 0 and 1,000,000,000")
+        if value != cents(value):
+            raise ValueError("starting cash can have at most 2 decimal places")
+        return value
+
+    def create_account(self, name: str, type: str = "margin", starting_cash=Decimal("100000")) -> Account:
+        starting_cash = self._starting_cash(starting_cash)
         name = (name or "").strip()[:40] or "Paper account"
         acct = Account(f"A{next(self._acct_seq):04d}", name, type, starting_cash, self.now())
         self.accounts[acct.id] = acct
@@ -148,13 +155,18 @@ class Exchange:
         return acct
 
     def reset_account(self, account_id: str, starting_cash=None) -> Account:
+        """Start the account again with fresh cash. Its rule settings and tax-lot method are kept; positions,
+        orders, history and the trade journal are cleared."""
         old = self.account(account_id)
+        cash = self._starting_cash(starting_cash) if starting_cash is not None else old.starting_cash
         for o in self.engine.active_orders():
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
-        new = Account(old.id, old.name, old.type, D(starting_cash) if starting_cash is not None else old.starting_cash, self.now())
+        new = Account(old.id, old.name, old.type, cash, self.now())
         new.settings = dict(old.settings)  # a reset keeps the account's rule settings
+        new.lot_method = old.lot_method  # ... and its tax-lot method
+        self._day_start_wanted.pop(old.id, None)
         self.accounts[old.id] = new
         self.dirty = True
         return new

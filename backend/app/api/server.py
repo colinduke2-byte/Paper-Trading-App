@@ -355,10 +355,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     def reset_account(aid: str, body: dict = Body(default={})):
         ex = ctx.ex
         from ..core.money import parse as parse_num
-        cash = parse_num(body["starting_cash"]) if body.get("starting_cash") else None
-        if cash is not None and cash <= 0:
-            raise ValueError("starting cash must be positive")
-        ex.reset_account(aid, cash)
+        cash = parse_num(body["starting_cash"]) if body.get("starting_cash") not in (None, "") else None
+        ex.reset_account(aid, cash)  # validated like a new account's starting cash
         return plain(ex.summary(aid))
 
     @app.delete("/api/accounts/{aid}")

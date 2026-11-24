@@ -33,7 +33,10 @@ SPEC = {
     "margin_call_liquidation": ("bool", True, "Liquidate on unmet margin calls",
                                 "Sell positions with market orders when a margin call is not met in time.", None),
     "margin_call_grace_hours": ("number", "48", "Margin call grace period (hours)",
-                                "Time to meet a margin call before positions are liquidated.", ("0", "720")),
+                                "Time to meet a margin call before positions are liquidated. Only time while the "
+                                "market is open and PaperDesk is running counts (in US session mode that is the "
+                                "regular session, so 48 hours is about seven trading days); time while the app is "
+                                "closed or a replay runs does not.", ("0", "720")),
 }
 
 

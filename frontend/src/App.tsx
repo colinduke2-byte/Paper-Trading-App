@@ -28,7 +28,7 @@ export default function App() {
   const [seed, setSeed] = useState<TicketSeed>({ symbol });
   const [refreshKey, setRefreshKey] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [dialog, setDialog] = useState<null | "new" | "reset">(null);
+  const [dialog, setDialog] = useState<null | "new" | "reset" | "delete">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const small = useSmallScreen();
@@ -162,6 +162,7 @@ export default function App() {
   const topActions: TopAction[] = [
     { label: "New account", onClick: () => setDialog("new") },
     { label: "Reset", onClick: () => setDialog("reset") },
+    ...(accounts.length > 1 && accountId ? [{ label: "Delete account", title: "Delete this paper account and its history", onClick: () => setDialog("delete") }] : []),
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
@@ -221,7 +222,7 @@ export default function App() {
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}
       {dialog && (
-        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
+        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} next={accounts.find((a) => a.id !== accountId)} onClose={() => setDialog(null)}
           onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />
       )}
     </>
@@ -286,7 +287,8 @@ function describeOption(s: string) {
   return `${m[1]} 20${m[2]}-${m[3]}-${m[4]} ${Number(m[6]) / 1000} ${m[5] === "C" ? "Call" : "Put"}`;
 }
 
-function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "reset"; account: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+function AccountDialog({ mode, account, next, onClose, onDone }: { mode: "new" | "reset" | "delete"; account: any; next?: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+  if (mode === "delete") return <DeleteAccountDialog account={account} next={next} onClose={onClose} onDone={onDone} />;
   const [name, setName] = useState("");
   const [type, setType] = useState("margin");
   const [cash, setCash] = useState(mode === "reset" && account ? String(account.starting_cash) : "100000");
@@ -306,7 +308,7 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <h3>{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
-        {mode === "reset" && <p className="muted">This erases the account's positions, orders and history and starts again with the cash below. It cannot be undone.</p>}
+        {mode === "reset" && <p className="muted">This erases the account's positions, orders, history and trade journal and starts again with the cash below. The account's rule settings and tax-lot method are kept. It cannot be undone.</p>}
         {mode === "new" && (
           <>
             <label>Name<input value={name} placeholder="Paper account" onChange={(e) => setName(e.target.value)} autoFocus /></label>
@@ -323,6 +325,34 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
         <div className="row">
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" onClick={submit}>{mode === "new" ? "Create account" : "Erase and reset"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteAccountDialog({ account, next, onClose, onDone }: { account: any; next?: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+  const [typed, setTyped] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const name = account?.name ?? "";
+  const confirm = async () => {
+    setBusy(true); setError("");
+    try {
+      await api(`/accounts/${account.id}`, { method: "DELETE" });
+      onDone(next?.id ?? "", `Account "${name}" deleted`);
+    } catch (e: any) { setError(e.message); setBusy(false); }
+  };
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" onClick={(e) => e.stopPropagation()}>
+        <h3 id="delete-title">Delete "{name}"</h3>
+        <p className="muted">This permanently deletes the paper account with its positions, open orders, fills, statements and trade journal. It cannot be undone. Type the account name to confirm.</p>
+        <label>Account name<input value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus aria-label="Type the account name to confirm" /></label>
+        {error && <div className="notice bad" role="alert">{error}</div>}
+        <div className="row">
+          <button className="ghost" onClick={onClose}>Cancel</button>
+          <button className="primary danger" disabled={busy || typed.trim() !== name.trim()} onClick={confirm}>Delete account</button>
         </div>
       </div>
     </div>

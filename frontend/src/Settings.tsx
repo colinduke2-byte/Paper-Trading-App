@@ -67,11 +67,14 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
             {summary.pending_dividends ? <div style={S.stat}><span className="muted">Dividends pending</span><b>{usd(summary.pending_dividends)}</b></div> : null}
           </div>
         )}
+        {summary && (summary.accrued_charges > 0 || summary.pending_dividends) ? (
+          <p className="muted" style={S.help}>Account value includes dividends pending and subtracts interest and borrow fees accrued but not yet charged (they are charged on the first day of each month).</p>
+        ) : null}
         {summary?.prices_unavailable?.length > 0 && (
           <div className="notice" role="status">Prices unavailable for {summary.prices_unavailable.join(", ")}: margin checks are paused until they return.</div>
         )}
         {summary?.liquidation_at && (
-          <div className="notice bad" role="alert">Margin call: positions will be liquidated from {dateTime(summary.liquidation_at)} unless it is met.</div>
+          <div className="notice bad" role="alert">Margin call: positions will be liquidated after {summary.grace_hours_left != null ? `${summary.grace_hours_left.toFixed(1)} more hours` : "the grace period"} of open market time unless it is met (about {dateTime(summary.liquidation_at)} if PaperDesk keeps running). Time while PaperDesk is closed or a replay runs does not count.</div>
         )}
         {!fields.length && !error && <p className="muted">Loading settings…</p>}
         <div style={S.list}>
@@ -91,6 +94,7 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
             );
           })}
         </div>
+        <LifecycleLog accountId={accountId} />
         {hidden > 0 && <p className="muted">Rules that only apply to {type === "cash" ? "margin" : "cash"} accounts are hidden.</p>}
         {error && <div className="notice bad" role="alert">{error}</div>}
         <div className="row">
@@ -100,5 +104,26 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Margin calls, liquidation steps, expiry settlements and other account events (GET /lifecycle). */
+function LifecycleLog({ accountId }: { accountId: string }) {
+  const [log, setLog] = useState<any[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api(`/accounts/${accountId}/lifecycle`).then((r) => setLog(r.log)).catch((e) => setError(e.message));
+  }, [accountId]);
+  return (
+    <details className="lifecycle-log">
+      <summary>Margin call and liquidation log{log ? ` (${log.length})` : ""}</summary>
+      {error && <div className="notice bad" role="alert">Could not load the log: {error}</div>}
+      {log && !log.length && <p className="muted" style={S.help}>No margin calls or liquidations on this account.</p>}
+      {log && log.length > 0 && (
+        <ul style={{ ...S.list, gap: 4, paddingLeft: 16, margin: "6px 0", fontSize: 12 }}>
+          {log.map((e, i) => <li key={i}><span className="muted">{dateTime(e.ts)}</span> {e.message}</li>)}
+        </ul>
+      )}
+    </details>
   );
 }
