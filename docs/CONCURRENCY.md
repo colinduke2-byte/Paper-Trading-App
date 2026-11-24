@@ -29,10 +29,11 @@ there is no lock order between exchange objects to get wrong.
 | Saving (`ex.write_snapshot`) | `paperdesk-save` thread | none: writes text produced under the lock | Runs without `ctx.lock`. `Exchange._io_lock` serialises writers; snapshots are numbered, so an older one never replaces a newer file |
 | Broadcast (`server.py: broadcast`) | event loop | none: sends the messages `turn()` built | No lock held while awaiting `send_json` |
 | WebSocket endpoint `/ws` | event loop | none: edits its own entry in `ctx.clients` | `ctx.clients` is only replaced item by item; readers copy it with `list(...)` |
-| Plain `def` routes under `/api` (orders, accounts, settings, journal, watchlists, alerts, reports, lifecycle, replay pause/resume/speed, status) | Starlette worker threads, up to 40 at once | read and change everything | Wrapped centrally by `app/api/locking.py`: the whole handler runs under `ctx.lock`, and its result is copied before the lock is released |
+| Plain `def` routes under `/api` (orders, accounts, settings, journal, watchlists, alerts and notifications, reports, lifecycle, replay pause/resume/speed, status) | Starlette worker threads, up to 40 at once | read and change everything | Wrapped centrally by `app/api/locking.py`: the whole handler runs under `ctx.lock`, and its result is copied before the lock is released |
 | Market data routes (`/api/symbols`, `quotes`, `bars`, `depth`, `trades`, `fundamentals`, `movers`, `screener`, `options/*`) | worker threads | read the feed only (a live feed may call the provider) | `@unlocked`. The feed hands data over through its own structures (below) |
 | `/api/accounts/{id}/analytics`, `/statements/{month}` (+`/html`) | worker threads | price history from the feed, then the account | `@unlocked`: fetch prices first, then one `with ctx.locked():` block for the account |
 | `/api/research/*` | worker threads | provider data; `ctx.ex.feed` and `is_stock` only | exempt by path |
+| `/api/chartstate*` | worker threads | none: chart settings in `chartstate.json` | exempt by path. Its own lock guards its document and its file write (a leaf lock) |
 | `/api/auth/*`, access middleware | event loop (login is `async`) and worker threads | none: the session store | exempt by path. `Sessions.lock` and the login limiter are leaf locks |
 | Replay start / exit (`ctx.enter_replay`, `ctx.exit_replay`) | worker threads | swap `ctx.ex`, `ctx.replay`; snapshot live or the sandbox | `@unlocked` routes; the swap and snapshot happen in one `ctx.locked()` block, the session file is read before it and state files are written after it |
 | Replay step / seek (`ReplayController._command`) | worker threads | run up to thousands of sandbox ticks | `@unlocked` routes. The controller holds its command lock for the whole command and takes `ctx.lock` in slices of about 20 ms, so ticks, broadcasts and other requests carry on |
@@ -50,8 +51,8 @@ there is no lock order between exchange objects to get wrong.
 3. `ctx.lock` may be held when `Exchange._io_lock` is taken (a direct `ex.save()` in tests and tools).
    The server never does this: it writes after releasing `ctx.lock`. A thread holding `_io_lock`
    never asks for `ctx.lock`.
-4. `Sessions.lock`, the login limiter, `RateLimiter.lock`, the research cache lock and the replay
-   route's `starting` mutex are leaves: nothing else is taken while they are held, and the auth code
+4. `Sessions.lock`, the login limiter, `RateLimiter.lock`, the research cache lock, the chart-state
+   lock and the replay route's `starting` mutex are leaves: nothing else is taken while they are held, and the auth code
    never touches `ctx.lock`.
 
 ## What the lock guarantees
@@ -75,8 +76,17 @@ there is no lock order between exchange objects to get wrong.
 - **The tick is never starved.** It waits in a priority lane; ordinary waiters are served first come,
   first served. `ctx.metrics` counts turns, skipped turns, tick errors and the longest wait.
 
-Not covered: a fault *inside a tick* (a bug) is reported and the market goes on, but the part of the
-tick that already ran is kept; the tick is not transactional.
+Not covered:
+
+- A fault *inside a tick* (a bug) is reported and the market goes on, but the part of the tick that
+  already ran is kept; the tick is not transactional.
+- Indicator and volume alerts (`app/alerts/engine.py`: `_seed`, `_advance_series`, `_average_volume`)
+  call `feed.bars()` from the tick. With a live feed that can be a provider request made while the tick
+  holds the lock. The feed caches bars, so it happens when an alert first needs history and at bar
+  boundaries. Requests then wait (and answer `503` after 2 seconds) until the provider answers. The fix
+  belongs in the alert engine: ask for history outside the tick and evaluate when it has arrived.
+- Taking the snapshot for `state.json` serialises the whole state under the lock (about 8 ms per
+  500 orders with their fills). It is the longest regular hold; an incremental format would shorten it.
 
 ## Adding a route
 
