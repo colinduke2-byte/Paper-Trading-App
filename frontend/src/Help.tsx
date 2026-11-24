@@ -91,7 +91,8 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>PaperDesk is a paper trading simulator. It uses open-source software; the file <code>THIRD_PARTY_NOTICES.md</code> in the PaperDesk folder lists every package with its licence.</p>
-        <p>Price charts: <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Charting by TradingView</a> (TradingView Lightweight Charts, Copyright TradingView, Inc., Apache License 2.0).</p>
+        <p>Price charts: TradingView Lightweight Charts, Copyright TradingView, Inc., Apache License 2.0.</p>
+        <p><a className="help-link" href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Charting by TradingView</a></p>
       </>
     ),
   },
