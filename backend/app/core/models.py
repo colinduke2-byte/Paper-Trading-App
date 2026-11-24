@@ -7,9 +7,18 @@ from .money import ZERO, D
 
 BUY, SELL = "buy", "sell"
 MARKET, LIMIT, STOP, STOP_LIMIT, TRAILING_STOP = "market", "limit", "stop", "stop_limit", "trailing_stop"
-ORDER_TYPES = (MARKET, LIMIT, STOP, STOP_LIMIT, TRAILING_STOP)
-DAY, GTC, IOC, FOK = "day", "gtc", "ioc", "fok"
-TIFS = (DAY, GTC, IOC, FOK)
+# Auction orders wait for the next regular-session open or close and trade once, at the auction price.
+MOO, MOC, LOO, LOC = "market_on_open", "market_on_close", "limit_on_open", "limit_on_close"
+OPEN_TYPES, CLOSE_TYPES = (MOO, LOO), (MOC, LOC)
+AUCTION_TYPES = OPEN_TYPES + CLOSE_TYPES
+MULTILEG = "multileg"  # one order, two to four legs, filled all-or-none at a net price
+ORDER_TYPES = (MARKET, LIMIT, STOP, STOP_LIMIT, TRAILING_STOP) + AUCTION_TYPES
+DAY, GTC, IOC, FOK, GTD = "day", "gtc", "ioc", "fok", "gtd"
+OPG, CLS = "opg", "cls"  # set by the system on auction orders: good for one open / one close only
+TIFS = (DAY, GTC, IOC, FOK, GTD)
+# Roles of linked child orders. Bracket children and 'exit' children are sized to what their
+# parent filled; 'triggered' children keep their own size and need the parent to fill in full.
+TAKE_PROFIT, STOP_LOSS, EXIT, TRIGGERED = "take_profit", "stop_loss", "exit", "triggered"
 
 HELD, WORKING, PARTIAL, FILLED, CANCELED, REJECTED, EXPIRED = (
     "held", "working", "partially_filled", "filled", "canceled", "rejected", "expired")
@@ -58,7 +67,7 @@ class Order:
     avg_fill_price: Optional[Decimal] = None
     parent_id: Optional[str] = None
     oco_group: Optional[str] = None
-    role: Optional[str] = None  # 'take_profit' / 'stop_loss' for bracket children
+    role: Optional[str] = None  # 'take_profit' / 'stop_loss' / 'exit' / 'triggered' for linked children
     triggered: bool = False
     trail_ref: Optional[Decimal] = None
     created_at: float = 0.0
@@ -66,6 +75,12 @@ class Order:
     reason: Optional[str] = None
     client_id: Optional[str] = None
     fees: Decimal = ZERO
+    expire_at: Optional[float] = None  # good-till-date: the order expires at this time
+    good_till: Optional[str] = None  # good-till-date: the date as entered (YYYY-MM-DD)
+    # Multi-leg orders: [{"symbol", "side", "ratio"}]. `symbol` is then the underlying, `qty` the
+    # number of units, `side` is always buy and `limit_price` is the signed net price per unit
+    # (positive = net debit, negative = net credit, None = at market).
+    legs: Optional[list] = None
 
     @property
     def remaining(self) -> Decimal:
