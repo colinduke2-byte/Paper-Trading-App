@@ -982,6 +982,7 @@ class Exchange:
         start finds it already in the past), the auction was missed and the order expires
         unfilled instead of silently waiting for another day's auction.
         """
+        self._enforce_cash_orders(now, "the account can no longer pay for this order at the current price")
         due = [o for o in self.engine.orders.values() if o.type in m.AUCTION_TYPES and o.status == m.WORKING
                and (o.auction_at is None or o.auction_at <= now)]
         self._due_open = set()
@@ -1001,6 +1002,7 @@ class Exchange:
 
     def _orders_after_feed(self, quotes: list, now: float, sess: str) -> None:
         """Run the opening auction on the first quotes of the session, then re-price multi-leg orders."""
+        self._enforce_cash_orders(now, "the account can no longer pay for this order at the current price")
         if self._due_open:
             due, self._due_open = self._due_open, set()
             self._handle(self.engine.on_auction("open", self.quote, now, only=due))
@@ -1118,6 +1120,10 @@ class Exchange:
                         # broker would close them just before the last bell.
                         settle = min(n, (max(a.cash, ZERO) // (c.strike * 100)) if buys_stock
                                      else (max(a.position(c.underlying), ZERO) // 100))
+                        if long:
+                            # Exercising a long option is a choice, so it may only use what nothing
+                            # else needs. An assignment is an obligation and uses whatever is there.
+                            settle = min(settle, self._free_to_exercise(a, sym, c, buys_stock))
                     if settle > 0:
                         book(sym, m.SELL if long else m.BUY, settle, ZERO, kind)
                         book(c.underlying, m.BUY if buys_stock else m.SELL, settle * 100, c.strike, kind)
@@ -1126,6 +1132,76 @@ class Exchange:
                 else:
                     book(sym, m.SELL if long else m.BUY, n, ZERO, "expiration")
                 self.dirty = True
+        self._enforce_cash_orders(now, "the cash reserved for this order was used to settle an option at expiry")
+
+    def _free_to_exercise(self, a: Account, sym: str, c, buys_stock: bool) -> Decimal:
+        """How many contracts of a long option a cash account can exercise without using cash or
+        shares that something else relies on.
+
+        A call is paid for only with cash that is spare in every scenario of the pre-trade check:
+        not the cash that secures short puts and not the cash reserved for open buy orders. A put
+        delivers only shares that cover no other short call and that no open order is selling.
+        """
+        if buys_stock:
+            try:
+                worst = self._worst_case(a, [])
+            except OrderRejected:  # an open order cannot be priced right now: spend nothing
+                return ZERO
+            spare = worst.cash_after - worst.requirement if worst.ok else ZERO
+            return max(spare, ZERO) // (c.strike * 100)
+        shares = a.position(c.underlying)
+        for other, held in a.positions().items():
+            oc = parse_option(other)
+            if oc is not None and other != sym and held < 0 and oc.kind == "C" and oc.underlying == c.underlying:
+                shares += held * 100
+        for o in self.engine.orders.values():
+            if o.account_id == a.id and o.active:
+                selling = self._leg_deltas(o) if o.legs else {o.symbol: -o.remaining if o.side == m.SELL else ZERO}
+                shares += min(selling.get(c.underlying, ZERO), ZERO)
+        return max(shares, ZERO) // 100
+
+    def _enforce_cash_orders(self, now: float, cause: str) -> None:
+        """Cancel open orders a cash account can no longer pay for, before they can fill.
+
+        The pre-trade check reserves cash for an order when it is entered. Later events can use
+        that cash or move the price: an option settles at expiry, or a stop or other market-type
+        buy would now fill well above the price it was reserved at. A cash account must never go
+        below zero, so whenever its open orders no longer pass the pre-trade check, the orders
+        that open risk are canceled, newest first and buys before sells, until the rest pass.
+        Orders that only close a position are left alone. This runs before orders are matched
+        on each tick and after options settle; the matching engine itself knows nothing of cash.
+        """
+        open_by_account: dict = {}
+        for o in self.engine.orders.values():
+            if o.status in (m.WORKING, m.PARTIAL):
+                open_by_account.setdefault(o.account_id, []).append(o)
+        for account_id, orders in open_by_account.items():
+            a = self.accounts.get(account_id)
+            if a is None or a.type != "cash":
+                continue
+
+            def passes() -> bool:
+                try:
+                    return self._worst_case(a, []).ok
+                except OrderRejected:  # an open order cannot be priced right now
+                    return True
+
+            if passes():
+                continue
+
+            def only_closes(o: Order) -> bool:
+                deltas = self._leg_deltas(o) if o.legs else {o.symbol: o.remaining if o.side == m.BUY else -o.remaining}
+                return all(a.position(sym) != 0 and (a.position(sym) > 0) != (d > 0) and abs(d) <= abs(a.position(sym))
+                           for sym, d in deltas.items())
+
+            opening = sorted((o for o in orders if not only_closes(o)),
+                             key=lambda o: (o.side != m.BUY, -o.created_at, o.id), reverse=False)
+            for o in opening:
+                if not o.active:
+                    continue  # already ended with its entry or its group
+                self._handle(self.engine.cancel(o.id, now, f"canceled: {cause}"))
+                if passes():
+                    break
 
     # ---- alerts and watchlists ----------------------------------------------
     def add_alert(self, symbol: str, op: str, price) -> dict:

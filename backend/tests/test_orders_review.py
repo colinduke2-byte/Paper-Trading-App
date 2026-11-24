@@ -1,6 +1,6 @@
 """Regression tests for the findings of the independent review of the orders stream."""
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -11,6 +11,7 @@ from app.api.server import create_app
 from app.core import calendar as cal
 from app.core.clock import SimClock
 from app.exchange import Exchange, OrderRejected
+from app.lifecycle.actions import dividend
 from app.marketdata.feed import SimFeed
 from app.marketdata.synthetic import SyntheticFeed
 from app.matching.multileg import net_price
@@ -116,36 +117,55 @@ def test_cash_account_buying_back_a_covered_call_may_not_spend_the_cash_behind_a
 
 
 SINGLE_SYMS = EX_SYMS + ["ABC"]
+FAR_SYMS = [s for s in EX_SYMS if parse(s).expiry == FAR] + ["ABC"]
 
 
 @st.composite
-def cash_script(draw):
+def cash_script(draw, symbols=SINGLE_SYMS, most=10):
+    """Orders and price moves. About one order in three is a resting order: a limit away from the
+    market, a stop, or an on-open/on-close order, so that open orders are normally still working
+    when options expire."""
     steps = []
-    for _ in range(draw(st.integers(1, 10))):
-        kind = draw(st.sampled_from(["single", "single", "single", "multi", "move"]))
+    for _ in range(draw(st.integers(0, most))):
+        kind = draw(st.sampled_from(["single", "single", "resting", "resting", "multi", "move"]))
         if kind == "move":
             steps.append(("move", Decimal(draw(st.integers(8000, 12000))) / 100))
-        elif kind == "single":
-            symbol = draw(st.sampled_from(SINGLE_SYMS))
+        elif kind in ("single", "resting"):
+            symbol = draw(st.sampled_from(symbols))
+            stock = symbol == "ABC"
             req = {"symbol": symbol, "side": draw(st.sampled_from(["buy", "sell"])),
-                   "qty": draw(st.sampled_from([100, 100, 200, 50])) if symbol == "ABC" else draw(st.integers(1, 3))}
-            if draw(st.booleans()):
-                px = draw(st.integers(1, 1500)) if symbol != "ABC" else draw(st.integers(8000, 12000))
+                   "qty": draw(st.sampled_from([100, 100, 200, 50])) if stock else draw(st.integers(1, 3))}
+            if kind == "resting":
+                how = draw(st.sampled_from(["limit", "limit", "stop", "trailing", "auction"] if stock else ["limit", "limit", "stop"]))
+                if how == "limit":  # buys below the market, sells above it
+                    px = draw(st.integers(6000, 9900) if req["side"] == "buy" else st.integers(10100, 14000)) if stock \
+                        else draw(st.integers(1, 40) if req["side"] == "buy" else st.integers(800, 3000))
+                    req.update(type="limit", limit_price=str(Decimal(px) / 100), tif="gtc")
+                elif how == "stop":  # buy stops above the market, sell stops below it
+                    px = draw(st.integers(10100, 12500) if req["side"] == "buy" else st.integers(7500, 9900)) if stock \
+                        else draw(st.integers(600, 2500) if req["side"] == "buy" else st.integers(1, 30))
+                    req.update(type="stop", stop_price=str(Decimal(px) / 100), tif="gtc")
+                elif how == "trailing":
+                    req.update(type="trailing_stop", trail_amount=str(draw(st.integers(1, 10))), tif="gtc")
+                else:
+                    req.update(type=draw(st.sampled_from(["market_on_open", "market_on_close"])))
+            elif draw(st.booleans()):
+                px = draw(st.integers(1, 1500)) if not stock else draw(st.integers(8000, 12000))
                 req.update(type="limit", limit_price=str(Decimal(px) / 100), tif="gtc")
             steps.append(("order", req))
         else:
-            symbols = draw(st.lists(st.sampled_from(SINGLE_SYMS), min_size=2, max_size=4, unique=True))
-            legs = [leg(s, draw(st.sampled_from(["buy", "sell"])), 100 if s == "ABC" else draw(st.integers(1, 2))) for s in symbols]
-            if any(s != "ABC" for s in symbols):
-                steps.append(("order", {"legs": legs, "qty": draw(st.integers(1, 2))}))
+            chosen = draw(st.lists(st.sampled_from(symbols), min_size=2, max_size=4, unique=True))
+            legs = [leg(s, draw(st.sampled_from(["buy", "sell"])), 100 if s == "ABC" else draw(st.integers(1, 2))) for s in chosen]
+            if any(s != "ABC" for s in chosen):
+                req = {"legs": legs, "qty": draw(st.integers(1, 2))}
+                if draw(st.booleans()):  # a resting net-limit order
+                    req.update(type="limit", limit_price=str(Decimal(draw(st.integers(0, 300))) / 100),
+                               price_effect=draw(st.sampled_from(["debit", "credit"])), tif="gtc")
+                steps.append(("order", req))
     return steps
 
 
-@settings(max_examples=250, deadline=None)
-@given(cash_script(), st.integers(1000, 60000), st.integers(6000, 14000), st.integers(6000, 14000))
-def test_cash_account_never_ends_an_expiry_with_negative_cash_or_short_stock(steps, cash, near_px, far_px):
-    ex, feed, clock = make_exchange()
-    a = acct(ex, "cash", str(cash))
+def play(ex, feed, clock, a, steps):
     for step in steps:
         if step[0] == "move":
             move(ex, feed, clock, "ABC", step[1])
@@ -155,13 +175,146 @@ def test_cash_account_never_ends_an_expiry_with_negative_cash_or_short_stock(ste
             except OrderRejected:
                 pass
         cash_account_is_sound(ex, a)
+
+
+@settings(max_examples=300, deadline=None)
+@given(cash_script(), cash_script(FAR_SYMS, most=5), st.integers(1000, 60000), st.integers(6000, 14000),
+       st.integers(6000, 14000), st.sampled_from([None, None, "0.50", "3"]), st.booleans())
+def test_cash_account_never_ends_an_expiry_with_negative_cash_or_short_stock(steps, later, cash, near_px, far_px,
+                                                                              dividend_amount, reinvest):
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", str(cash))
+    ex.account(a).settings.update(dividend_reinvestment=reinvest)  # settlement and settled-cash rules are on by default
+    if dividend_amount:
+        day = ex.lifecycle.today() + timedelta(days=1)
+        feed.schedule(dividend("ABC", day, day + timedelta(days=1), dividend_amount))
+    play(ex, feed, clock, a, steps)
     at_expiry(ex, feed, clock, Decimal(near_px) / 100, NEAR)
     cash_account_is_sound(ex, a)
+    play(ex, feed, clock, a, later)  # trading goes on between the two expiries, around what was assigned
     at_expiry(ex, feed, clock, Decimal(far_px) / 100, FAR)
     cash_account_is_sound(ex, a)
     assert not [s for s in ex.account(a).positions() if parse(s)]  # every option is gone
+    for _ in range(3):  # the days after: whatever is still resting may fill, the open and close come round
+        move(ex, feed, clock, "ABC", Decimal(far_px) / 100 + 1, seconds=86400)
+        cash_account_is_sound(ex, a)
     led = ex.account(a).ledger
     assert sum(led.balances.values()) == 0 and all(sum(v for _, v in t.postings) == 0 for t in led.transactions)
+
+
+def test_exercise_does_not_spend_cash_reserved_for_an_open_buy_order():
+    """The saved example: a resting buy at 80 reserves 8,000; exercising a call then spent it."""
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "10018")
+    [resting] = ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100, "type": "limit", "limit_price": "80", "tif": "gtc"})
+    call = opt("C", 90)
+    assert ex.submit(a, {"symbol": call, "side": "buy", "qty": 1})[0].status == "filled"
+    with pytest.raises(OrderRejected, match="insufficient cash"):
+        ex.submit(a, {"symbol": call, "side": "buy", "qty": 1})
+    cash = ex.account(a).cash
+    assert D("8000") < cash < D("9000") + 1
+    at_expiry(ex, feed, clock, "90.01", NEAR)
+    account = ex.account(a)
+    # exercising would cost 9,000 and only about 1,000 is not reserved: the call is closed for its 0.01
+    assert account.fills[-1].kind == "closed at expiry" and account.fills[-1].price == D("0.01")
+    assert account.cash == cash + D("1.00") and held(ex, a) == {} and resting.status == "working"
+    at_expiry(ex, feed, clock, "60.00", FAR)
+    assert resting.status == "filled" and held(ex, a) == {"ABC": 100} and account.cash == cash + D("1.00") - D("6000")
+    cash_account_is_sound(ex, a)
+
+
+def test_exercise_does_not_spend_the_cash_behind_a_later_short_put():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "10500")
+    ex.submit(a, {"symbol": C100, "side": "buy", "qty": 1})
+    far_put = opt("P", 100, FAR)
+    assert ex.submit(a, {"symbol": far_put, "side": "sell", "qty": 1})[0].status == "filled"
+    cash = ex.account(a).cash
+    at_expiry(ex, feed, clock, "105", NEAR)
+    assert ex.account(a).fills[-1].kind == "closed at expiry" and ex.account(a).cash == cash + D("500")
+    assert held(ex, a) == {far_put: -1}
+    at_expiry(ex, feed, clock, "60", FAR)  # the put is assigned and the cash is there
+    assert held(ex, a) == {"ABC": 100} and ex.account(a).cash == cash + D("500") - D("10000") >= 0
+
+
+def test_put_exercise_does_not_deliver_shares_that_cover_a_later_call_or_an_open_sell_order():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "11000")
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100})
+    ex.submit(a, {"symbol": P100, "side": "buy", "qty": 1})
+    far_call = opt("C", 110, FAR)
+    assert ex.submit(a, {"symbol": far_call, "side": "sell", "qty": 1})[0].status == "filled"
+    cash = ex.account(a).cash
+    at_expiry(ex, feed, clock, "90", NEAR)
+    assert ex.account(a).fills[-1].kind == "closed at expiry" and ex.account(a).cash == cash + D("1000")
+    assert held(ex, a) == {"ABC": 100, far_call: -1}  # the shares still cover the later call
+    at_expiry(ex, feed, clock, "140", FAR)
+    assert held(ex, a) == {} and ex.account(a).cash == cash + D("1000") + D("11000")
+    # shares an open order is already selling are not delivered either
+    ex, feed, clock = make_exchange()
+    b = acct(ex, "cash", "11000")
+    far_put = opt("P", 100, FAR)
+    ex.submit(b, {"symbol": "ABC", "side": "buy", "qty": 100})
+    ex.submit(b, {"symbol": far_put, "side": "buy", "qty": 1})
+    [sell] = ex.submit(b, {"symbol": "ABC", "side": "sell", "qty": 100, "type": "limit", "limit_price": "150", "tif": "gtc"})
+    expiry = cal.close_ts(opt_expiry(far_put))
+    clock.set(expiry - 5)
+    move(ex, feed, clock, "ABC", "80", seconds=10)
+    assert sell.status == "working" and held(ex, b) == {"ABC": 100}
+    assert ex.account(b).fills[-1].kind == "closed at expiry"
+    move(ex, feed, clock, "ABC", "151")
+    assert sell.status == "filled" and held(ex, b) == {}
+    cash_account_is_sound(ex, b)
+
+
+def opt_expiry(symbol):
+    return parse(symbol).expiry
+
+
+def test_cash_account_buy_stop_is_canceled_when_the_price_gaps_past_what_it_can_pay():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "10200")
+    [stop] = ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100, "type": "stop", "stop_price": "101", "tif": "gtc"})
+    [other] = ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1, "type": "limit", "limit_price": "50", "tif": "gtc"})
+    ex.drain_events()
+    move(ex, feed, clock, "ABC", "120")  # the stop would trigger and buy 100 shares at 120: 12,000
+    assert stop.status == "canceled" and stop.filled_qty == 0
+    assert stop.reason == "canceled: the account can no longer pay for this order at the current price"
+    assert other.status == "working"  # only what was needed is canceled
+    assert ex.account(a).cash == D("10200") and not ex.positions(a)
+    assert [e["order"].id for e in ex.drain_events() if e["type"] == "order" and e["order"].status == "canceled"] == [stop.id]
+    # a stop the account can still pay for triggers as before
+    [ok] = ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 50, "type": "stop", "stop_price": "121", "tif": "gtc"})
+    move(ex, feed, clock, "ABC", "122")
+    assert ok.status == "filled" and ex.account(a).cash == D("10200") - 50 * D("122")
+    # a margin account is not touched by this rule
+    mrg = acct(ex, "margin", "10200")
+    [m_stop] = ex.submit(mrg, {"symbol": "ABC", "side": "buy", "qty": 100, "type": "stop", "stop_price": "123", "tif": "gtc"})
+    move(ex, feed, clock, "ABC", "160")
+    assert m_stop.status == "filled" and ex.account(mrg).cash < 0
+
+
+def test_cash_account_on_open_buy_is_canceled_when_the_open_is_out_of_reach():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "10200")
+    [moo] = ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100, "type": "market_on_open"})
+    clock.set(T0 - T0 % 86400 + 86400 + 5)
+    feed.set_quote("ABC", "129.99", "130", "130")
+    ex.tick()
+    assert moo.status == "canceled" and "can no longer pay" in moo.reason and ex.account(a).cash == D("10200")
+
+
+def test_closing_orders_survive_when_reserved_cash_is_used_at_expiry():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "20500")
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 100})
+    ex.submit(a, {"symbol": P100, "side": "sell", "qty": 1})  # secured with 10,000
+    [target] = ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 100, "type": "limit", "limit_price": "150", "tif": "gtc"})
+    [bid] = ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 5, "type": "limit", "limit_price": "70", "tif": "gtc"})
+    at_expiry(ex, feed, clock, "95", NEAR)  # assigned: 10,000 of cash becomes 100 more shares
+    assert held(ex, a) == {"ABC": 200}
+    assert target.status == "working" and bid.status == "working"  # both are still affordable
+    cash_account_is_sound(ex, a)
 
 
 # ---- 2. editing a held triggered order ---------------------------------------------------------
