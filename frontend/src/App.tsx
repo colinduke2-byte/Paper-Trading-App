@@ -8,6 +8,7 @@ import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
+import { HelpDialog } from "./Help";
 import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
 import { useSignOutAction } from "./Login";
 
@@ -32,6 +33,7 @@ export default function App() {
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
@@ -166,6 +168,7 @@ export default function App() {
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
     { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
+    { label: "Help", title: "How PaperDesk works", onClick: () => setHelpOpen(true) },
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
   ];
   const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
@@ -220,6 +223,7 @@ export default function App() {
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {settingsOpen && accountId && (
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}
