@@ -1,16 +1,21 @@
 # PaperDesk in Docker. Start: docker compose up --build   then open http://127.0.0.1:8000
 #
-# SECURITY: PaperDesk has NO login. Anyone who can reach the port can trade, reset and delete your
-# paper accounts. The port is therefore published on 127.0.0.1 only. Do not change it to
-# "8000:8000" or "0.0.0.0:8000:8000", and do not put it behind a public reverse proxy without
-# adding your own authentication in front.
+# SECURITY: by default PaperDesk has NO login. Anyone who can reach the port can trade, reset and delete
+# your paper accounts. The port is therefore published on 127.0.0.1 only. Do not edit the ports line.
+#
+# To use PaperDesk from a phone on your home Wi-Fi (LAN mode), set all three in .env instead:
+#   PAPERDESK_LAN=1
+#   PAPERDESK_PASSCODE='at least 8 characters, not used anywhere else'
+#   PAPERDESK_BIND=0.0.0.0
+# PAPERDESK_BIND alone is refused at start-up: the server will not run on the network without LAN mode
+# and a passcode. LAN mode is plain HTTP for a trusted home network only; see README.md.
 services:
   paperdesk:
     build: .
     image: paperdesk:local
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}"
+      - "${PAPERDESK_BIND:-127.0.0.1}:${PORT:-8000}:${PORT:-8000}"
     env_file:
       - path: .env        # optional: copy .env.example to .env to change settings
         required: false
@@ -18,6 +23,10 @@ services:
       HOST: 0.0.0.0        # inside the container only; the published port above is host-local
       PORT: "${PORT:-8000}"
       PAPERDESK_DATA: /data
+      PAPERDESK_BIND: "${PAPERDESK_BIND:-127.0.0.1}"   # tells the server where the port is published
+      # Requests reach the container through Docker's network, so "from this computer" cannot be told apart
+      # from "from the network" here: every browser signs in.
+      PAPERDESK_LOOPBACK_BYPASS: "0"
     volumes:
       - paperdesk-data:/data
     read_only: true
