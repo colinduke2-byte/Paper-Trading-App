@@ -221,3 +221,17 @@ owner's go.
   asset table on every call; plus low items. Merge PR 14 only after these are fixed.
 - Pre-existing nondeterminism noted by that reviewer: `exchange.py` ~1190 iterates a set of symbols,
   so same-tick option fill order varies with the hash seed. Make it sorted (deterministic engine rule).
+- PR 17 (provider actions): all 8 checks green at db574d0 (against main before alerts). Independent
+  review started in session_01ByytwaR9ENg7JRY7d7YiUJ. Needs main merged in.
+- PR 19 (backup): independent review started in session_01ByytwbsKMUxhNjqt2iRG1y.
+- PR 20 (stream/discovery -> main, head 0f93dce) opened: multiple watchlists with columns, screener
+  with saved screens, Markets view with movers and a sector heatmap, symbol search, compare. Author
+  reports 419 backend tests; e2e 86 passed with one intermittent failure outside its area.
+- Flaky e2e tests to fix (fix the waits; do not add retries): "option chain: buy one call" (seen by
+  three different agents: the toast says "Order placed" and no position appears, i.e. the limit order
+  taken from the chain's ask sometimes rests because the model price moved; make the test robust or
+  make the chain click use a marketable price) and the chart-tools test "drawing tools create, select,
+  move and delete shapes" (fails 1-2 runs in 4 on main).
+- Several cloud sessions had `git commit` refused by the automatic permission check at first and it
+  worked on a later attempt (alerts, simulated research, discovery). If a session reports being
+  blocked on commit, it is that; it has resolved itself each time so far.
