@@ -31,7 +31,7 @@ def price_history(ex, symbol: str) -> list:
            if b["time"] + 86399 < first_minute]
     out += [(b["time"] + 59, model_to_price(b["close"])) for b in minutes]
     q = ex.feed.quote(symbol)
-    if q is not None:
+    if q is not None and q.last > 0:
         now = ex.now()
         out = [p for p in out if p[0] < now] + [(now, q.last)]
     return out
@@ -62,7 +62,8 @@ def register(app, ctx):
         if bench and not e.is_stock(bench):
             raise KeyError(f"unknown benchmark symbol {bench}")
         summ = e.summary(aid)
-        series = equity_points(a, e.now(), summ["equity"])
+        # With a position that has no price yet, the live equity is not known: leave it off the curve.
+        series = equity_points(a, e.now(), None if summ["prices_unavailable"] else summ["equity"])
         hist = price_history(e, bench) if bench else None
         r = returns_report(series, external_flows(a), hist, rf)
         index = r.pop("index")
@@ -122,11 +123,12 @@ def register(app, ctx):
             if sym in marks or f.ts >= end:
                 continue
             if current:
-                marks[sym] = e.mark(sym)
+                marks[sym] = e.price(sym)
             elif parse_option(sym) is None and e.is_stock(sym):
                 marks[sym] = price_at(price_history(e, sym), end - 1)
         marks = {s: p for s, p in marks.items() if p is not None}
-        live = e.summary(aid)["equity"] if current else None
+        summ = e.summary(aid) if current else None
+        live = summ["equity"] if current and not summ["prices_unavailable"] else None
         return monthly_statement(a, year, mon, now, live, marks)
 
     @app.get("/api/accounts/{aid}/statements")

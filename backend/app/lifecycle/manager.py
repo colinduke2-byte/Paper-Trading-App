@@ -148,7 +148,10 @@ class LifecycleManager:
         self._event(account, kind, message)
 
     def _missing_prices(self, pos: dict, marks: dict) -> list:
-        return sorted(s for s, v in marks.items() if v <= 0)
+        """Symbols that cannot be valued: a stock (or option underlying) without a positive price, or an
+        option without any quote. A quoted option may be worth 0.00 (far out of the money)."""
+        return sorted(s for s, v in marks.items()
+                      if (v <= 0 and parse(s) is None) or (parse(s) is not None and self.ex.quote(s) is None))
 
     def _state(self, account):
         """Positions, marks, equity (with dividends receivable or payable) and maintenance requirement."""

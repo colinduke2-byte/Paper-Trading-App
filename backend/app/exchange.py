@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time as _time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -30,6 +31,8 @@ MAX_LINKED = 5  # orders in one one-cancels-other or one-triggers-other request
 MAX_GTD_DAYS = 366
 MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be larger than this
 CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its intrinsic value, not exercised
+RUNNING_GAP = 120  # seconds: a longer gap between two ticks means the simulator was not running (or was paused)
+CLOSE_WAIT = 120  # seconds to wait for the provider's daily close before settling at an approximate price
 
 
 def _in_range(*values) -> None:
@@ -68,6 +71,15 @@ class Exchange:
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
         self.dirty = False
+        # Expiry settlement prices: (underlying, expiry ISO) -> (price, exact, note); fetches of the provider's
+        # daily close in progress or finished: key -> {"started": ts, "done": bool}.
+        self._settle_prices: dict = {}
+        self._close_fetches: dict = {}
+        self.background = lambda fn: threading.Thread(target=fn, daemon=True, name="expiry-close").start()
+        self._expiry_waiting: set = set()  # (account id, option) expired but waiting for a price
+        # account id -> "now" (the day rolled while running) or "restart" (it rolled while the simulator was
+        # closed): the day start equity is set once every position has a price
+        self._day_start_wanted: dict = {}
         self.lifecycle = LifecycleManager(self)  # corporate actions, settlement, interest, PDT, margin calls
 
     # ---- time and market state -----------------------------------------
@@ -107,6 +119,13 @@ class Exchange:
         if q is None:
             return ZERO
         return q.last if self.is_stock(symbol) else cents(q.mid)
+
+    def price(self, symbol: str) -> Optional[Decimal]:
+        """The mark, or None when there is no price (never a zero standing in for a missing price)."""
+        q = self.quote(symbol)
+        if q is None or (self.is_stock(symbol) and q.last <= 0):
+            return None
+        return self.mark(symbol)
 
     def _marks(self, symbols) -> dict:
         marks = {}
@@ -189,19 +208,24 @@ class Exchange:
         rows = []
         for sym, qty in sorted(a.positions().items()):
             mult = multiplier(sym)
-            mark = self.mark(sym)
-            cost = a.cost_basis(sym)
-            mv = cents(qty * mark * mult)
-            row = {"symbol": sym, "description": describe(sym), "qty": qty, "avg_cost": a.avg_cost(sym), "mark": mark,
-                   "market_value": mv, "cost_basis": cost, "unrealized_pnl": mv - cost,
-                   "unrealized_pct": float((mv - cost) / abs(cost) * 100) if cost else 0.0,
-                   "multiplier": mult, "kind": "option" if mult == 100 else "stock", "day_pnl": None}
             c = parse_option(sym)
+            u = self.feed.quote(c.underlying if c else sym)
+            # No price yet (a live feed right after a start): show the position without a value, never at zero.
+            q = self.quote(sym)
+            priced = q is not None and (q.last > 0 if not c else q.mid > 0 or u is not None and u.last > 0)
+            mark = self.mark(sym) if priced else None
+            cost = a.cost_basis(sym)
+            mv = cents(qty * mark * mult) if priced else None
+            row = {"symbol": sym, "description": describe(sym), "qty": qty, "avg_cost": a.avg_cost(sym), "mark": mark,
+                   "market_value": mv, "cost_basis": cost, "unrealized_pnl": mv - cost if priced else None,
+                   "unrealized_pct": (float((mv - cost) / abs(cost) * 100) if cost else 0.0) if priced else None,
+                   "multiplier": mult, "kind": "option" if mult == 100 else "stock", "day_pnl": None,
+                   "price_unavailable": not priced}
             if c:
-                u = self.feed.quote(c.underlying)
-                snap = optchain.option_snapshot(c, float(u.last), self.feed.base_vol(c.underlying), self.now())
-                row.update(delta=snap["delta"] * float(qty) * 100, theta=snap["theta"] * float(qty) * 100,
-                           underlying=c.underlying, expiry=c.expiry.isoformat())
+                row.update(delta=None, theta=None, underlying=c.underlying, expiry=c.expiry.isoformat())
+                if u is not None and u.last > 0:
+                    snap = optchain.option_snapshot(c, float(u.last), self.feed.base_vol(c.underlying), self.now())
+                    row.update(delta=snap["delta"] * float(qty) * 100, theta=snap["theta"] * float(qty) * 100)
             else:
                 q = self.feed.quote(sym)
                 if q and q.prev_close:
@@ -622,6 +646,14 @@ class Exchange:
             closing = all(self._reduces_risk(account, o) for o in orders)
         worst = self._worst_case(account, counted)
         worst.closing = closing
+        if not closing and worst.ok:
+            # A position without a price would count at zero, which hides the risk of a short one.
+            held = set(account.positions()) | {s for o in counted for s in ([l["symbol"] for l in o.legs] if o.legs else [o.symbol])}
+            missing = self.lifecycle._missing_prices(held, self._marks(held))
+            if missing:
+                worst.ok = False
+                worst.reason = (f"no price is available yet for {', '.join(missing)}, so the account cannot be "
+                                f"valued; orders that only reduce positions are still accepted")
         return worst
 
     def _rule_check(self, account: Account, orders: list, worst: "_Worst") -> Optional[str]:
@@ -1038,6 +1070,8 @@ class Exchange:
         """Advance the market one step and process everything that depends on it."""
         now = self.now()
         sess = self.session(now)
+        prev_tick = self._last_tick  # None on the first tick after a start
+        self._after_restart(now, prev_tick)
         self._orders_before_feed(now, sess)
         self._roll_sessions(now, sess)
         self.lifecycle.before_step(now)  # day roll: accruals, settlement, corporate actions, dividends
@@ -1052,13 +1086,17 @@ class Exchange:
             c = parse_option(sym)
             if c and c.underlying in changed and c.expiry_ts > now:
                 self._handle(self.engine.on_quote(self.quote(sym), now, sess))
-        self._process_expirations(now)
+        self._process_expirations(now, prev_tick)
+        self._settle_day_start(now)
         self.lifecycle.after_step(now)  # margin calls and liquidation
         self._check_alerts(quotes, now)
         if now - self._last_equity_sample >= 60:
             self._last_equity_sample = now
             for a in self.accounts.values():
-                eq = self.summary(a.id)["equity"]
+                s = self.summary(a.id)
+                if s["prices_unavailable"]:  # a position cannot be valued: a sample now would value it at zero
+                    continue
+                eq = s["equity"]
                 a.equity_history.append([int(now), str(eq)])
                 if len(a.equity_history) > 6000:
                     a.equity_history = a.equity_history[::2]
@@ -1069,7 +1107,8 @@ class Exchange:
         day = int(now // 86400)
         if self._last_day is not None and day != self._last_day:
             for a in self.accounts.values():
-                a.day_start_equity = self.summary(a.id)["equity"]
+                self._day_start_wanted[a.id] = "now"
+            self._settle_day_start(now)
             if self.session_mode == "always":
                 self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None))
             self.dirty = True
@@ -1081,21 +1120,170 @@ class Exchange:
                 self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None))
         self._last_session = sess
 
-    def _process_expirations(self, now: float) -> None:
+    # ---- the first tick after a start or a pause ------------------------------------------------
+    def _day_order_end(self, o: Order) -> float:
+        """When a day order's own session ends, by its creation time and the session calendar.
+
+        This is when the live roll (_roll_sessions) expires it: in session mode 'always' at the next UTC
+        midnight; with real sessions at the regular close of the day it was placed for, or at the end of
+        the extended session (20:00 New York) for an extended-hours order or one placed after the close.
+        An order placed while the market is closed is for the next trading day.
+        """
+        t = o.created_at
+        if self.session_mode == "always":
+            return (t // 86400 + 1) * 86400
+        d, sess = cal.ny_date(t), cal.session(t)
+        post_end = lambda day: datetime.combine(day, cal.POST_CLOSE, tzinfo=cal.NY).timestamp()
+        if sess == "closed":
+            if not (cal.is_trading_day(d) and cal.ny_datetime(t).time() < cal.PRE_OPEN):
+                d += timedelta(days=1)
+                while not cal.is_trading_day(d):
+                    d += timedelta(days=1)
+            return post_end(d) if o.extended_hours else cal.close_ts(d)
+        if o.extended_hours or sess == "post":
+            return post_end(d)
+        return cal.close_ts(d)
+
+    def _after_restart(self, now: float, prev_tick: Optional[float]) -> None:
+        """Catch up, on the first tick after a start or a pause, on what the live roll would have done.
+
+        - Day orders whose own session ended meanwhile expire (good-till-date orders and on-open or
+          on-close orders already carry their end time and expire in _orders_before_feed).
+        - After a start on a later trading day, the day start equity is reset (see _settle_day_start).
+        """
+        if prev_tick is not None and now - prev_tick <= RUNNING_GAP:
+            return
+        for o in sorted(self.engine.active_orders(), key=lambda o: o.id):
+            if o.active and o.tif == m.DAY and o.parent_id is None and self._day_order_end(o) <= now:
+                self._handle(self.engine.cancel(o.id, now, "the trading day it was placed for ended while the "
+                                                           "simulator was not running", status=m.EXPIRED))
+        last = self.lifecycle.last_date  # the trading day of the last tick before the start (saved)
+        if prev_tick is None and last is not None and last < self.lifecycle.days.today(now):
+            for a in self.accounts.values():
+                self._day_start_wanted[a.id] = "restart"
+
+    def _settle_day_start(self, now: float) -> None:
+        """Set the day start equity of accounts that wait for it, once all their positions have prices.
+
+        After a restart on a later day it is the last equity sample taken before today began, if that
+        sample is from the previous business day or later (nothing happened in between); otherwise the
+        current equity, with a note.
+        """
+        days = self.lifecycle.days
+        today = days.today(now)
+        start = (datetime.combine(today, datetime.min.time(), tzinfo=cal.NY).timestamp()
+                 if self.session_mode == "us" else (now // 86400) * 86400)
+        prev_day = days.current_or_previous(today - timedelta(days=1))
+        for aid, how in list(self._day_start_wanted.items()):
+            a = self.accounts.get(aid)
+            if a is None:
+                self._day_start_wanted.pop(aid)
+                continue
+            s = self.summary(aid)
+            if s["prices_unavailable"]:
+                continue
+            self._day_start_wanted.pop(aid)
+            self.dirty = True
+            if how == "restart":
+                before = [r for r in a.equity_history if r[0] < start]
+                if before and days.today(before[-1][0]) >= prev_day:
+                    a.day_start_equity = D(before[-1][1])
+                    continue
+                self.lifecycle._event(a, "day_start", "Day P&L is measured from the equity when prices first "
+                                                      "arrived after the start, because no equity was recorded at "
+                                                      "the end of the previous trading day.")
+            a.day_start_equity = s["equity"]
+
+    def _settlement_price(self, c, now: float, prev_tick: Optional[float]):
+        """(price, exact, note) to settle contracts of c's underlying and expiry with, or None to wait.
+
+        The settlement price is the underlying's closing price on the expiry date:
+        - the simulator was running at the close: the last regular-session price it saw;
+        - otherwise the daily bar for that date in the feed's bar store (synthetic and replay feeds);
+        - otherwise, for a live feed, the provider's daily bar for that date, fetched in the background
+          (never on the tick path) for up to CLOSE_WAIT seconds;
+        - otherwise the first price available now, marked as approximate.
+        Never a missing or zero price: while there is none, the contracts wait.
+        """
+        u, iso = c.underlying, c.expiry.isoformat()
+        key = (u, iso)
+        if key in self._settle_prices:
+            return self._settle_prices[key]
+        result = None
+        if prev_tick is not None and prev_tick < c.expiry_ts and c.expiry_ts - prev_tick <= RUNNING_GAP:
+            q = self._session_quotes.get(u) or self.feed.quote(u)
+            if q is not None and q.last > 0:
+                result = (q.last, True, f"{u} closed at {q.last:f} on {iso}")
+        if result is None:
+            day_ts = int((c.expiry - date(1970, 1, 1)).total_seconds())
+            for r in reversed(self.feed.store.daily.get(u) or ()):
+                if r[0] == day_ts and r[4] > 0:
+                    px = cents(D(repr(r[4])))
+                    result = (px, True, f"{u} closed at {px:f} on {iso}")
+                    break
+        if result is None and not self.feed.simulated:
+            fetch = self._close_fetches.get(key)
+            if fetch is None:
+                fetch = self._close_fetches[key] = {"started": now, "done": False}
+                self._fetch_close(key, c.expiry, now)
+            if key in self._settle_prices:  # the fetch finished at once
+                return self._settle_prices[key]
+            if not fetch["done"] and now - fetch["started"] < CLOSE_WAIT:
+                return None
+        if result is None:
+            q = self.feed.quote(u)
+            if q is None or q.last <= 0:
+                return None
+            result = (q.last, False, f"approximate price: {u}'s closing price on {iso} was not available, so the "
+                                     f"first price after the expiry ({q.last:f}) was used")
+        self._settle_prices[key] = result
+        return result
+
+    def _fetch_close(self, key: tuple, expiry: date, now: float) -> None:
+        """Ask the provider, off the tick path, for the underlying's daily bar on the expiry date."""
+        u, iso = key
+        day_ts = int((expiry - date(1970, 1, 1)).total_seconds())
+        limit = max(5, int((now - day_ts) // 86400) + 5)
+        fetch = self._close_fetches[key]
+
+        def run():
+            try:
+                for b in self.feed.bars(u, "1d", limit):
+                    if int(b["time"]) == day_ts and b["close"] > 0:
+                        px = cents(D(repr(b["close"])))
+                        self._settle_prices[key] = (px, True, f"{u} closed at {px:f} on {iso} (provider daily bar)")
+                        break
+            except Exception:  # a provider fault: fall back to the first available price
+                pass
+            finally:
+                fetch["done"] = True
+
+        self.background(run)
+
+    def _process_expirations(self, now: float, prev_tick: Optional[float] = None) -> None:
         for o in self.engine.active_orders():
             c = parse_option(o.symbol)
             if c is not None and c.expiry_ts <= now:
                 self._handle(self.engine.cancel(o.id, now, "option expired", status=m.EXPIRED))
         for a in self.accounts.values():
-            expiring = [(sym, qty, c) for sym, qty in a.positions().items()
-                        if (c := parse_option(sym)) is not None and c.expiry_ts <= now]
+            expiring = []
+            for sym, qty in a.positions().items():
+                c = parse_option(sym)
+                if c is None or c.expiry_ts > now:
+                    continue
+                price = self._settlement_price(c, now, prev_tick)
+                if price is None:  # no price for the underlying yet: settle when one arrives
+                    if (a.id, sym) not in self._expiry_waiting:
+                        self._expiry_waiting.add((a.id, sym))
+                        self.lifecycle._event(a, "expiration", f"{describe(sym)} has expired and will be settled "
+                                                               f"when a price for {c.underlying} arrives.")
+                    continue
+                expiring.append((sym, qty, c, price))
             if a.type == "cash":
                 # Obligations first, then whatever brings cash in before whatever needs it:
                 # short calls (deliver shares), short puts (pay), long puts (deliver), long calls (pay).
                 expiring.sort(key=lambda r: ((r[1] > 0) * 2 + ((r[2].kind == "P") != (r[1] > 0)), r[0]))
-            for sym, qty, c in expiring:
-                u = self.feed.quote(c.underlying)
-                spot = u.last if u else ZERO
+            for sym, qty, c, (spot, exact, note) in expiring:
                 itm = (spot - c.strike) if c.kind == "C" else (c.strike - spot)
                 long = qty > 0
                 n = abs(qty)
@@ -1104,6 +1292,7 @@ class Exchange:
                     f = Fill(id=f"X{next(self._expiry_seq):08d}", order_id=None, account_id=a.id, symbol=symbol,
                              side=side, qty=q, price=price, ts=now, kind=kind)
                     a.apply_fill(f, multiplier(symbol))
+                    a.ledger.transactions[-1].memo += f" (settlement: {note})"
                     self.lifecycle.on_fill(a, f)  # exercise and assignment proceeds settle T+1
                     self.events.append({"type": "fill", "account_id": a.id, "fill": f})
 
@@ -1125,6 +1314,9 @@ class Exchange:
                         book(sym, m.SELL if long else m.BUY, n - settle, itm, CLOSED_AT_EXPIRY)
                 else:
                     book(sym, m.SELL if long else m.BUY, n, ZERO, "expiration")
+                if not exact:
+                    self.lifecycle._log(a, now, "expiration", f"{describe(sym)} was settled at an {note}.")
+                self._expiry_waiting.discard((a.id, sym))
                 self.dirty = True
 
     # ---- alerts and watchlists ----------------------------------------------
@@ -1212,6 +1404,39 @@ class Exchange:
             if snap:
                 self._write(self._path("market.json"), snap)
 
+    @staticmethod
+    def _drop_unpriced_samples(a: Account) -> int:
+        """Remove equity samples that earlier versions recorded before any price had arrived after a start.
+
+        Such a sample valued every position at zero, so it equals the ledger cash at that moment. It is
+        removed only when all of these hold, which a real sample cannot satisfy short of an exact-to-the-
+        cent coincidence: it is the first sample after a gap of more than RUNNING_GAP seconds (a start),
+        the account held at least one stock position then (a stock always has a positive price), and the
+        sample equals the cash at that moment exactly. Returns the number removed.
+        """
+        hist = a.equity_history
+        if not hist:
+            return 0
+        txns = sorted(a.ledger.transactions, key=lambda t: t.ts)
+        keep, cash, held, i, prev_ts, dropped = [], ZERO, {}, 0, float(a.created_at), 0
+        for row in hist:
+            ts = float(row[0])
+            while i < len(txns) and txns[i].ts < ts + 1:
+                for acct, v in txns[i].postings:
+                    if acct == "cash":
+                        cash += v
+                    elif acct.startswith("pos:"):
+                        held[acct[4:]] = held.get(acct[4:], ZERO) + v
+                i += 1
+            stock_held = any(v != 0 and parse_option(sym) is None for sym, v in held.items())
+            if ts - prev_ts > RUNNING_GAP and stock_held and D(row[1]) == cash:
+                dropped += 1
+            else:
+                keep.append(row)
+            prev_ts = ts
+        a.equity_history = keep
+        return dropped
+
     def _peek_sequences(self) -> dict:
         """Read the next id of each counter without using it up."""
         out = {}
@@ -1237,6 +1462,8 @@ class Exchange:
         except (OSError, ValueError):
             return False
         self.accounts = {a["id"]: Account.from_plain(a) for a in data["accounts"]}
+        for a in self.accounts.values():
+            self._drop_unpriced_samples(a)
         seq = data["seq"]
         self.engine.restore([from_plain(Order, o) for o in data["orders"]], seq["fill"])
         self.watchlists, self.alerts = data.get("watchlists", {}), data.get("alerts", [])

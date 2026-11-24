@@ -246,7 +246,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         ex = ctx.ex
         symbol = _stock(symbol)
         info, q = ex.feed.symbols()[symbol], ex.feed.quote(symbol)
-        if q is None:
+        if q is None or q.last <= 0:
             raise KeyError(f"no quote has arrived for {symbol} yet")
         last = float(q.last)
         daily = ex.feed.bars(symbol, "1d", 252)
@@ -280,7 +280,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         out = []
         for s, info in ex.feed.symbols().items():
             r = quote_row(ex, s)
-            if not r:
+            if not r or r["last"] <= 0:  # no trade price yet
                 continue
             eps, div = info.get("eps", 0), info.get("dividend", 0)
             pe = r["last"] / eps if eps and eps > 0 else None
@@ -328,7 +328,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         if provided is not None:
             return plain(provided)
         q = ex.feed.quote(symbol)
-        if q is None:
+        if q is None or q.last <= 0:
             raise KeyError(f"no quote has arrived for {symbol} yet")
         return {"underlying": symbol, "expiry": expiry, "spot": float(q.last), "simulated": True,
                 "source": "model", "source_label": "model prices, not market data",
