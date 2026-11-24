@@ -256,19 +256,24 @@ def test_uncovered_remainder_and_straddles():
 
 
 def test_cash_account_spread_rules():
+    """In a cash account a long option is not cover: assignment settles in shares."""
     ok = lambda cash, pos: margin.evaluate("cash", D(cash), {s: D(n) for s, n in pos.items()}, MARKS)
-    assert ok("0", {C100: 1, C105: -1}).ok  # debit spread, already paid for
-    assert ok("0", {C95: 1, C100: -2, C105: 1}).ok  # butterfly
-    assert ok("0", {C100: -1, opt("C", 100, FAR): 1}).ok  # calendar
-    ev = ok("499.99", {P95: -1, P90: 1})  # credit spread: the 5.00 width must be in cash
-    assert not ev.ok and ev.requirement == D("500") and "secure short options" in ev.reason and not ev.structural
-    assert ok("500", {P95: -1, P90: 1}).ok and ok("500", {C100: -1, C105: 1}).ok
-    assert ok("500", {P90: 1, P95: -1, C105: -1, C110: 1}).ok and not ok("499", {P90: 1, P95: -1, C105: -1, C110: 1}).ok
-    assert ok("9500", {P95: -1}).ok and not ok("9499", {P95: -1}).ok
-    for pos in ({C105: -1}, {C105: -2, C100: 1}, {opt("C", 100, FAR): -1, C100: 1}, {C105: -1, P95: -1}):
+    # short calls need the shares, whatever long calls are held
+    for pos in ({C105: -1}, {C100: 1, C105: -1}, {C100: -1, C105: 1}, {C95: 1, C100: -2, C105: 1},
+                {C100: -1, opt("C", 100, FAR): 1}, {opt("C", 100, FAR): -1, C100: 1}, {C105: -1, P95: -1},
+                {P90: 1, P95: -1, C105: -1, C110: 1}, {"ABC": 100, C105: -2, C100: 1}):
         ev = ok("1000000", pos)
         assert not ev.ok and ev.structural and "uncovered calls" in ev.reason
-    assert ok("0", {"ABC": 100, C105: -1}).ok and ok("9500", {"ABC": 100, C105: -1, P95: -1}).ok
+    # short puts need strike x 100 in cash, whatever long puts are held
+    ev = ok("9499.99", {P95: -1, P90: 1})
+    assert not ev.ok and ev.requirement == D("9500") and "secure short options" in ev.reason and not ev.structural
+    assert ok("9500", {P95: -1, P90: 1}).ok and ok("9500", {P95: -1, P100: 1}).ok
+    assert ok("9500", {P95: -1}).ok and not ok("9499", {P95: -1}).ok
+    assert not ok("9499", {P95: -1, opt("P", 95, FAR): 1}).ok  # a calendar is no different
+    assert ok("19000", {P95: -2, P90: 1}).ok and not ok("18999", {P95: -2, P90: 2}).ok
+    # long options alone, covered calls and cash-secured puts are unchanged
+    assert ok("0", {C100: 1, P95: 2}).ok and ok("0", {"ABC": 100, C105: -1}).ok
+    assert ok("9500", {"ABC": 100, C105: -1, P95: -1}).ok and ok("0", {"ABC": 100, C105: -1, C110: 1}).ok
 
 
 # ---- strategy margin: properties ------------------------------------------------------------
@@ -367,7 +372,12 @@ def test_covered_groups_hold_enough_for_any_price_at_expiry(book, price):
 
 @settings(max_examples=300, deadline=None)
 @given(random_legs(stock=False), st.integers(1, 5), st.data())
-def test_fully_covered_structures_need_exactly_their_maximum_loss(legs, qty, data):
+def test_fully_covered_structures_need_at_most_their_maximum_loss(legs, qty, data):
+    """A structure whose shorts can all be covered never needs more than its maximum loss.
+
+    (It can need less: each short is charged the cheaper of its spread and the uncovered
+    formula. test_requirement_is_the_minimum_over_all_valid_pairings pins the exact value.)
+    """
     marks = {l["symbol"]: data.draw(cents_px) for l in legs}
     marks["ABC"] = Decimal(data.draw(st.integers(6000, 14000))) / 100
     pos = {l["symbol"]: Decimal(qty * l["ratio"] * (1 if l["side"] == "buy" else -1)) for l in legs}
@@ -376,57 +386,78 @@ def test_fully_covered_structures_need_exactly_their_maximum_loss(legs, qty, dat
         return  # (a long option that covers nothing is simply paid in full, on top of the spread)
     shape = payoff(legs, signed_net(legs, marks))
     assert not shape["max_loss_unlimited"]
-    expected = min(shape["max_loss"] * qty, legacy_requirement(pos, marks))
     got = margin.requirement(pos, marks)
-    assert got >= expected - Decimal("0.01") * qty
+    assert got <= legacy_requirement(pos, marks)
     [group] = groups.values()
     if sum((n * marks[s] for s, n in group.items()), Decimal(0)) * 100 >= margin.worst_value(group):
         # (marks that price a spread below its own floor are impossible; there the rule only rounds up)
-        assert got <= expected + Decimal("0.01") * qty
+        assert got <= shape["max_loss"] * qty + Decimal("0.01") * qty
 
 
 # ---- exchange: order entry --------------------------------------------------------------------
-def test_spread_is_checked_as_one_unit_in_a_cash_account():
+def test_spread_is_checked_as_one_unit_in_a_margin_account():
     ex, feed, clock = make_exchange()
-    a = acct(ex, "cash", "5000")
-    with pytest.raises(OrderRejected, match="uncovered calls need a margin account"):
-        ex.submit(a, {"symbol": C100, "side": "sell", "qty": 1})
+    a = acct(ex, "margin", "1500")
+    with pytest.raises(OrderRejected, match="insufficient buying power"):
+        ex.submit(a, {"symbol": C100, "side": "sell", "qty": 1})  # alone it is an uncovered call
     credit = -market_net(ex, [leg(C100, "sell"), leg(C105, "buy")])
     [o] = ex.submit(a, {"legs": [leg(C100, "sell"), leg(C105, "buy")], "qty": 2})
     assert o.status == "filled" and o.type == "multileg" and o.symbol == "ABC" and o.fees == D("2.60")
     assert o.avg_fill_price == -credit and credit > 0
-    assert ex.summary(a)["cash"] == D("5000") + credit * 200 - D("2.60")
+    assert ex.summary(a)["cash"] == D("1500") + credit * 200 - D("2.60")
     assert {p["symbol"]: p["qty"] for p in ex.positions(a)} == {C100: -2, C105: 2}
     two = [f for f in ex.account(a).fills if f.order_id == o.id]
     assert [(f.symbol, f.side, f.qty) for f in two] == [(C100, "sell", 2), (C105, "buy", 2)]
     assert two[0].price == ex.quote(C100).bid and two[1].price == ex.quote(C105).ask
-    # 1,000 of the cash now secures the two spreads
-    assert ex.summary(a)["buying_power"] == D("5000") + credit * 200 - D("2.60") - D("1000")
-    with pytest.raises(OrderRejected, match="insufficient cash to secure short options"):
-        ex.submit(a, {"legs": [leg(C100, "sell"), leg(C105, "buy")], "qty": 20})
+    # the requirement is the two spreads' maximum loss, not two uncovered calls
+    marks = {s: ex.mark(s) for s in (C100, C105)}
+    assert ex.summary(a)["initial_requirement"] == D("1000") + (marks[C105] - marks[C100]) * 200 <= D("1000")
+    with pytest.raises(OrderRejected, match="insufficient buying power"):
+        ex.submit(a, {"legs": [leg(C100, "sell"), leg(C105, "buy")], "qty": 3})
     # selling only the long leg would leave the short calls uncovered
-    with pytest.raises(OrderRejected, match="uncovered calls"):
+    with pytest.raises(OrderRejected, match="insufficient buying power"):
         ex.submit(a, {"symbol": C105, "side": "sell", "qty": 2})
-    with pytest.raises(OrderRejected, match="uncovered calls"):
+    with pytest.raises(OrderRejected, match="insufficient buying power"):
         ex.submit(a, {"legs": [leg(C105, "sell"), leg(P95, "buy")], "qty": 2})
     # closing the whole spread as one order is always allowed
     [c] = ex.submit(a, {"legs": [leg(C100, "buy"), leg(C105, "sell")], "qty": 2})
     assert c.status == "filled" and not ex.positions(a)
 
 
+def test_cash_account_spreads_need_the_short_leg_secured():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "5000")
+    for legs in ([leg(C100, "sell"), leg(C105, "buy")], BULL_CALL, BUTTERFLY, CONDOR,
+                 [leg(C100, "sell"), leg(opt("C", 100, FAR), "buy")]):
+        with pytest.raises(OrderRejected, match="uncovered calls need a margin account"):
+            ex.submit(a, {"legs": legs})
+    with pytest.raises(OrderRejected, match="insufficient cash to secure short options"):
+        ex.submit(a, {"legs": BULL_PUT})  # the short 95 put needs 9,500 whatever the long put is
+    assert not ex.orders(a) and not ex.positions(a)
+    rich = acct(ex, "cash", "9600")
+    [o] = ex.submit(rich, {"legs": BULL_PUT})
+    assert o.status == "filled" and ex.summary(rich)["buying_power"] == ex.summary(rich)["cash"] - D("9500")
+    with pytest.raises(OrderRejected, match="insufficient cash"):
+        ex.submit(rich, {"legs": BULL_PUT})
+    # with the shares in the account, a call spread's short leg is a covered call
+    holder = acct(ex, "cash", "20000")
+    ex.submit(holder, {"symbol": "ABC", "side": "buy", "qty": 100})
+    assert ex.submit(holder, {"legs": BULL_CALL})[0].status == "filled"
+
+
 def test_limit_spread_waits_and_then_fills_every_leg_at_or_better_than_the_limit():
     ex, feed, clock = make_exchange()
-    a = acct(ex, "cash", "1000")
+    a = acct(ex, "margin", "1000")
     now_net = market_net(ex, BULL_CALL)
     limit = (now_net - D("0.40")).quantize(D("0.01"))
     [o] = ex.submit(a, {"legs": BULL_CALL, "qty": 2, "type": "limit", "limit_price": str(limit), "price_effect": "debit",
                         "tif": "gtc"})
     assert o.status == "working" and o.limit_price == limit and not ex.positions(a) and not ex.account(a).fills
     assert ex.summary(a)["cash"] == D("1000")
-    assert ex.summary(a)["buying_power"] == D("1000") - limit * 200 - D("2.60")  # reserved while it works
+    assert ex.summary(a)["option_buying_power"] == D("1000") - limit * 200 - D("2.60")  # reserved while it works
     move(ex, feed, clock, "ABC", "99.50")
     assert o.status == "working" and not ex.account(a).fills
-    move(ex, feed, clock, "ABC", "93")
+    move(ex, feed, clock, "ABC", "99")
     assert o.status == "filled"
     f = {x.symbol: x for x in ex.account(a).fills}
     assert set(f) == {C100, C105} and f[C100].qty == f[C105].qty == 2
@@ -487,7 +518,7 @@ def test_working_multileg_order_expires_with_its_options_and_survives_a_restart(
     move(ex2, feed2, clock2, "ABC", "100", seconds=10)
     assert ex2.engine.orders[o.id].status == "expired" and ex2.engine.orders[o.id].reason == "option expired"
     assert restored.status == "working"
-    move(ex2, feed2, clock2, "ABC", "90")
+    move(ex2, feed2, clock2, "ABC", "95")
     assert restored.status == "filled" and len(ex2.account(a).fills) == 2
 
 
@@ -520,7 +551,9 @@ def test_multileg_validation_messages():
            ({"legs": [leg(C100, "buy"), leg("ABC", "sell", "0.5")]}, "stock leg ratio"),
            ({"legs": [leg(C100, "buy"), leg(opt("C", 100, cal.previous_trading_day(cal.ny_date(T0))), "sell")]}, "expired"),
            (dict(base, oco=[{}, {}]), "cannot be linked"),
-           ({"oco": [base, base]}, "unknown symbol")]
+           ({"oco": [base, base]}, "a linked order cannot itself be multi-leg or linked"),
+           ({"symbol": "ABC", "side": "buy", "qty": 1, "triggers": [base]}, "cannot itself be multi-leg or linked"),
+           ({"symbol": "ABC", "side": "buy", "qty": 1, "triggers": [{"oco": [base]}]}, "cannot itself be multi-leg or linked")]
     for req_, msg in bad:
         with pytest.raises(OrderRejected, match=msg):
             ex.submit(a, req_)
@@ -660,7 +693,7 @@ def test_vertical_pinned_between_strikes_leaves_stock():
 
 
 def test_vertical_out_of_the_money_expires_worthless():
-    ex, feed, clock, a, cash = open_spread(BULL_CALL, type="cash", cash="1000")
+    ex, feed, clock, a, cash = open_spread(BULL_CALL, cash="1000")
     at_expiry(ex, feed, clock, "99")
     assert held(ex, a) == {} and ex.summary(a)["cash"] == cash
     assert [f.kind for f in ex.account(a).fills[-2:]] == ["expiration", "expiration"]
@@ -737,8 +770,9 @@ def test_random_multileg_trading_keeps_ledger_and_fills_consistent(steps, accoun
             move(ex, feed, clock, "ABC", step_[1])
             continue
         _, req_, offset = step_
-        if offset is not None:
-            limit = (market_net(ex, req_["legs"]) + Decimal(offset) / 100).quantize(D("0.01"))
+        priced = net_price(req_["legs"], {l["symbol"]: ex.quote(l["symbol"]) for l in req_["legs"]})
+        if offset is not None and priced is not None:
+            limit = (priced[0] + Decimal(offset) / 100).quantize(D("0.01"))
             req_ = dict(req_, type="limit", limit_price=str(abs(limit)), price_effect="debit" if limit > 0 else "credit")
         try:
             ex.submit(a, req_)

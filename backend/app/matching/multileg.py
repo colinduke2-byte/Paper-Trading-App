@@ -19,14 +19,17 @@ def net_price(legs: list, quotes: dict) -> Optional[tuple]:
     """(net price per unit, [price of each leg]) buying at the ask and selling at the bid.
 
     None when any leg has no usable quote: a multi-leg order never trades unless every
-    leg can trade at the same moment.
+    leg can trade at the same moment. A leg to be sold needs a bid above zero: nothing is
+    ever sold for nothing, so an order with such a leg waits (or is refused at market).
     """
     net, prices = ZERO, []
     for leg in legs:
         q = quotes.get(leg["symbol"])
-        if q is None or q.ask <= 0 or q.bid < 0:
+        if q is None or q.ask <= 0:
             return None
         px = q.ask if leg["side"] == BUY else q.bid
+        if px <= 0:
+            return None
         sign = 1 if leg["side"] == BUY else -1
         net += sign * leg["ratio"] * multiplier(leg["symbol"]) * px
         prices.append(px)

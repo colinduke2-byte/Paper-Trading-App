@@ -119,15 +119,16 @@ class MatchingEngine:
             self._process_multileg(o, quotes, now, session, events, initial=False)
         return events
 
-    def on_auction(self, kind: str, quote_for, now: float) -> list:
+    def on_auction(self, kind: str, quote_for, now: float, only=None) -> list:
         """Run the opening ('open') or closing ('close') auction.
 
         `quote_for(symbol)` returns the quote whose last price is the auction price.
+        `only`, when given, is the set of order ids that take part.
         """
         types = OPEN_TYPES if kind == "open" else CLOSE_TYPES
         events = []
         for o in list(self.orders.values()):
-            if o.status != WORKING or o.type not in types:
+            if o.status != WORKING or o.type not in types or (only is not None and o.id not in only):
                 continue
             q = quote_for(o.symbol)
             if q is None or q.last <= 0:
