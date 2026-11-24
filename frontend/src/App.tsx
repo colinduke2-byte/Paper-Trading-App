@@ -146,7 +146,7 @@ export default function App() {
 
   const closePosition = (p: any) => {
     setSymbol(p.underlying || p.symbol);
-    setTimeout(() => setSeed({ symbol: p.symbol, side: p.qty > 0 ? "sell" : "buy", qty: Math.abs(p.qty), nonce: Date.now() }), 0);
+    setTimeout(() => setSeed({ symbol: p.symbol, side: p.qty > 0 ? "sell" : "buy", qty: Math.abs(p.qty), lots: p.lots, nonce: Date.now() }), 0);
     setScreen("Trade");
   };
   const pickSymbol = (s: string) => { setSymbol(s); setScreen("Chart"); };

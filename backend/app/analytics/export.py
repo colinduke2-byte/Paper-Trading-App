@@ -69,10 +69,17 @@ def positions_csv(rows: list) -> str:
 
 def gains_csv(report: dict) -> str:
     cols = ["lot_id", "symbol", "description", "direction", "asset", "qty", "open_date", "close_date", "opened_at",
-            "closed_at", "proceeds", "cost", "gain", "term", "wash_sale_flag", "lot_method", "close_kind", "order_id"]
+            "closed_at", "proceeds", "cost", "gain", "term", "wash_sale_flag", "lot_method", "close_kind", "order_id",
+            # tax lots and informational wash-sale detail (see analytics/wash.py)
+            "tax_lot_id", "lot_fallback", "wash_sale_disallowed", "wash_sale_replacements", "basis_adjustment",
+            "adjusted_cost", "adjusted_gain", "adjusted_open_date", "adjusted_term"]
+    reps = lambda r: ";".join(f"{x['lot_id'] or x['fill_id']}:{x['qty']:f}:{x['disallowed']:f}" for x in r["wash_sale_with"])
     return to_csv(cols, [[r["id"], r["symbol"], r["description"], r["direction"], r["asset"], r["qty"], r["open_date"],
                           r["close_date"], r["opened_iso"], r["closed_iso"], r["proceeds"], r["cost"], r["gain"], r["term"],
-                          r["wash_sale"], r["lot_method"], r["kind"], r["order_id"]] for r in report["rows"]])
+                          r["wash_sale"], r["lot_method"], r["kind"], r["order_id"],
+                          r["lot_id"], r["lot_fallback"], r["wash_sale_disallowed"], reps(r), r["basis_adjustment"],
+                          r["adjusted_cost"], r["adjusted_gain"], r["adjusted_open_date"], r["adjusted_term"]]
+                         for r in report["rows"]])
 
 
 def journal_csv(entries: list) -> str:
