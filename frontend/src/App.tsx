@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chart } from "./Chart";
+import { Shortcuts } from "./chart/Shortcuts";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
 import { Ticket, TicketSeed } from "./Ticket";
@@ -163,7 +164,8 @@ export default function App() {
               ))}
             </div>
             <div className="view">
-              {view === "Chart" && <Chart symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
+              {view === "Chart" && <Chart symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} accountId={accountId}
+                notify={notify} onOrdersChanged={() => setRefreshKey((k) => k + 1)} onTradeAtPrice={(s) => setSeed({ ...s, nonce: Date.now() })} />}
               {view === "Options" && <OptionChain symbol={symbol} onTrade={(s, side, price) => setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() })} />}
               {view === "Company" && <Company info={info} />}
             </div>
@@ -181,6 +183,8 @@ export default function App() {
           <DepthTape symbol={underlyingOf(symbol)} />
         </div>
       </main>
+      <Shortcuts symbols={watch} symbol={symbol} onSelect={setSymbol} accountId={accountId} orders={orders} notify={notify}
+        onChanged={() => setRefreshKey((k) => k + 1)} />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
