@@ -145,6 +145,22 @@ def test_ledger_balances_through_any_lifecycle_sequence(ops, drip, kind):
 EXPIRIES = chain.expirations(date(2026, 11, 24))
 
 
+def no_helpful_close(ex, pos, marks) -> bool:
+    """True when no position with a usable quote could be closed to lower the maintenance
+    requirement without leaving a short option less covered than it is."""
+    maint = margin.requirement(pos, marks, maintenance=True)
+    unc = uncovered(pos)
+    for s, q in pos.items():
+        quote = ex.quote(s)
+        if (quote.bid if q > 0 else quote.ask) <= 0:
+            continue
+        without = {k: v for k, v in pos.items() if k != s}
+        safe = all(v <= unc.get(k, 0) for k, v in uncovered(without).items())
+        if safe and margin.requirement(without, marks, maintenance=True) < maint:
+            return False
+    return True
+
+
 @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(cash=st.integers(-200000, 200000),
        stocks=st.lists(st.tuples(st.sampled_from(["ABC", "XYZ", "QRS"]), st.integers(-800, 800).filter(bool),
@@ -177,8 +193,11 @@ def test_liquidation_never_increases_the_requirement_or_uncovers_a_short(cash, s
         assert all(v <= before.get(k, 0) for k, v in uncovered(st_["positions"]).items())
     pos = a.positions()
     marks = ex._marks(pos)
-    stuck = all((ex.quote(s).bid if q > 0 else ex.quote(s).ask) <= 0 for s, q in pos.items())
-    assert not pos or stuck or margin.equity(a.cash, pos, marks) >= margin.requirement(pos, marks, maintenance=True)
+    # The call is met, or nothing that can still be traded would lower the requirement. (The second
+    # case includes an account that is simply insolvent: a worthless spread with a zero requirement
+    # and equity a few dollars below zero after fees cannot be helped by any trade.)
+    assert (not pos or margin.equity(a.cash, pos, marks) >= margin.requirement(pos, marks, maintenance=True)
+            or no_helpful_close(ex, pos, marks))
     ledger_ok(a)
 
 
@@ -207,3 +226,107 @@ def test_account_lifecycle_state_round_trips_through_json(life, rate, flags):
                                          "pattern_day_trader": flags[1], "settlement": flags[2]})
     b = Account.from_plain(json.loads(json.dumps(a.to_plain())))
     assert b.life == a.life and b.settings == a.settings
+
+
+# ---- liquidation of option strategies (spreads, calendars, butterflies, condors, covered calls) -------
+@st.composite
+def strategy_book(draw):
+    """Positions as (symbol, signed quantity): a few whole strategies on one or two underlyings."""
+    prices = {"ABC": D("60"), "XYZ": D("25")}
+    legs = []
+    for _ in range(draw(st.integers(1, 4))):
+        u = draw(st.sampled_from(["ABC", "ABC", "XYZ"]))
+        step = D("5") if u == "ABC" else D("2.5")
+        k = lambda n: prices[u] + step * n
+        near = draw(st.integers(1, len(EXPIRIES) - 2))
+        far = draw(st.integers(near + 1, len(EXPIRIES) - 1))
+        n = draw(st.integers(1, 4))
+        kind = draw(st.sampled_from("CP"))
+        o = lambda kind_, strike_n, exp: build(u, EXPIRIES[exp], kind_, k(strike_n))
+        shape = draw(st.sampled_from(["vertical", "vertical", "calendar", "diagonal", "butterfly", "condor",
+                                      "covered_call", "ratio", "straddle"]))
+        a_, b_ = sorted(draw(st.lists(st.integers(-2, 2), min_size=2, max_size=2, unique=True)))
+        sign = draw(st.sampled_from([1, -1]))
+        if shape == "vertical":
+            legs += [(o(kind, a_, near), sign * n), (o(kind, b_, near), -sign * n)]
+        elif shape == "calendar":
+            legs += [(o(kind, a_, near), -sign * n), (o(kind, a_, far), sign * n)]
+        elif shape == "diagonal":
+            legs += [(o(kind, a_, near), -sign * n), (o(kind, b_, far), sign * n)]
+        elif shape == "butterfly":
+            legs += [(o(kind, -1, near), sign * n), (o(kind, 0, near), -2 * sign * n), (o(kind, 1, near), sign * n)]
+        elif shape == "condor":
+            legs += [(o("P", -2, near), sign * n), (o("P", -1, near), -sign * n),
+                     (o("C", 1, near), -sign * n), (o("C", 2, near), sign * n)]
+        elif shape == "covered_call":
+            legs += [(u, 100 * n), (o("C", b_, near), -n)]
+        elif shape == "ratio":
+            legs += [(o(kind, a_, near), n), (o(kind, b_, near), -2 * n)]
+        else:
+            legs += [(o("C", a_, near), sign * n), (o("P", a_, near), sign * n)]
+    extra_stock = draw(st.lists(st.tuples(st.sampled_from(["ABC", "XYZ", "QRS"]), st.integers(-300, 600).filter(bool)), max_size=2))
+    return legs + extra_stock
+
+
+@settings(max_examples=300, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(cash=st.integers(-150000, 20000), book=strategy_book(),
+       shock=st.sampled_from([None, None, ("ABC", "45"), ("ABC", "80"), ("XYZ", "15"), ("XYZ", "36")]))
+def test_liquidation_of_option_strategies_never_increases_the_requirement_or_uncovers_a_short(cash, book, shock):
+    prices = {"ABC": D("60"), "XYZ": D("25"), "QRS": D("140")}
+    ex, feed, clock = make_exchange(**{s: p for s, p in prices.items()})
+    for s, p in prices.items():
+        feed.set_quote(s, p - D("0.01"), p, p, bid_size=100000, ask_size=100000)
+    a = ex.create_account("t", "margin", D("1000"))
+    a.settings.update(margin_call_grace_hours="720")
+    a.ledger.post(0, "deposit", "test", [("cash", D(cash)), ("equity:capital", -D(cash))])
+    for i, (sym, qty) in enumerate(book):
+        mult = 100 if parse(sym) else 1
+        mark = ex.mark(sym)
+        if mark > 0:
+            a.apply_fill(_fill(i, "buy" if qty > 0 else "sell", Decimal(abs(qty)), mark, sym), mult)
+    if shock:  # the market moves against (or for) the book before the call is enforced
+        p = D(shock[1])
+        feed.set_quote(shock[0], p - D("0.01"), p, p, bid_size=100000, ask_size=100000)
+    ex.tick()
+    before = uncovered(a.positions())
+    steps = ex.lifecycle.liquidate(a, clock.now())
+    for st_ in steps:
+        assert st_["requirement_after"] <= st_["requirement_before"]
+        assert st_["status"] == "filled"
+        # a short option that was covered before liquidation is never left uncovered
+        assert all(v <= before.get(k, 0) for k, v in uncovered(st_["positions"]).items()), st_
+    assert len(steps) < 50  # it finishes; it does not grind against the step limit
+    # every multi-leg liquidation order filled all of its legs or none (never legged in)
+    for o in ex.engine.orders.values():
+        if o.legs:
+            mine = [f for f in a.fills if f.order_id == o.id]
+            assert [(f.symbol, f.side, f.qty) for f in mine] == [(l["symbol"], l["side"], o.qty * l["ratio"]) for l in o.legs]
+    ledger_ok(a)
+    pos = a.positions()
+    marks = ex._marks(pos)
+    met = not pos or margin.equity(a.cash, pos, marks) >= margin.requirement(pos, marks, maintenance=True)
+    # Liquidation never stops short of the call while a close that helps still exists.
+    assert met or no_helpful_close(ex, pos, marks), pos
+
+
+def test_pair_liquidation_does_not_take_cover_another_short_relies_on():
+    """Found by the property above: 200 shares cover a later-dated call; long calls cover the near ones."""
+    prices = {"ABC": D("60")}
+    ex, feed, clock = make_exchange(**prices)
+    feed.set_quote("ABC", D("59.99"), D("60"), D("60"), bid_size=100000, ask_size=100000)
+    a = ex.create_account("t", "margin", D("1000"))
+    a.settings.update(margin_call_grace_hours="720")
+    a.ledger.post(0, "deposit", "test", [("cash", D("-1000")), ("equity:capital", D("1000"))])
+    near, far = EXPIRIES[1], EXPIRIES[2]
+    book = [(build("ABC", near, "C", D("60")), 2), (build("ABC", far, "C", D("60")), -1),
+            (build("ABC", near, "C", D("65")), -3), ("ABC", 200)]
+    for i, (sym, qty) in enumerate(book):
+        a.apply_fill(_fill(i, "buy" if qty > 0 else "sell", Decimal(abs(qty)), ex.mark(sym), sym), 100 if parse(sym) else 1)
+    ex.tick()
+    before = uncovered(a.positions())
+    assert all(v == 0 for v in before.values())
+    steps = ex.lifecycle.liquidate(a, clock.now())
+    assert steps
+    for st_ in steps:
+        assert st_["requirement_after"] <= st_["requirement_before"] and st_["status"] == "filled"
+        assert all(v == 0 for v in uncovered(st_["positions"]).values()), st_
