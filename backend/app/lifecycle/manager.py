@@ -74,7 +74,8 @@ FOUR = Decimal("0.0001")
 CLEAR_BUFFER = Decimal("0.02")  # a call clears at once when equity is 2% above maintenance
 CLEAR_SECONDS = 300  # ... or after equity has stayed at or above maintenance this long
 LOG_LIMIT = 200
-SETTLING_KINDS = ("trade", "exercise", "assignment", "split_settlement")
+# "closed at expiry" (orders branch): a cash account's option closed for intrinsic value at expiry settles like a sale.
+SETTLING_KINDS = ("trade", "exercise", "assignment", "split_settlement", "closed at expiry")
 
 
 def _ordinal(n: int) -> str:
@@ -596,16 +597,27 @@ class LifecycleManager:
                         fallback = (req_after, sym, q, abs(q))
             choice = best or fallback
             if choice is None:
+                pair = self._pair_to_close(pos, marks, maint)
+                if pair is not None:  # a spread or calendar whose legs only help when closed together
+                    choice = pair
+            if choice is None:
                 if not a.life.liquidation_paused:
                     a.life.liquidation_paused = True
                     self._log(a, now, "liquidation", "Margin call liquidation paused: no position can be closed to "
                                                      "reduce the requirement right now (no usable quote).")
                 break
             _, sym, q, qty = choice
-            side = m.SELL if q > 0 else m.BUY
-            o = Order(id=f"O{next(ex._order_seq):08d}", account_id=a.id, symbol=sym, side=side, qty=qty,
-                      type=m.MARKET, tif=m.DAY, role="liquidation")
-            ex._handle(ex.engine.submit(o, ex.quote(sym), now, ex.session(now)))
+            if isinstance(q, list):  # (requirement, underlying, legs, units): close a covered pair as one order
+                side = "close"  # buys back the short leg and sells the long leg
+                o = Order(id=f"O{next(ex._order_seq):08d}", account_id=a.id, symbol=sym, side=m.BUY, qty=qty,
+                          type=m.MULTILEG, tif=m.DAY, role="liquidation", legs=q)
+                ex._handle(ex.engine.submit_multileg(o, ex._leg_quotes(q), now, ex.session(now)))
+                sym = " / ".join(l["symbol"] for l in q)
+            else:
+                side = m.SELL if q > 0 else m.BUY
+                o = Order(id=f"O{next(ex._order_seq):08d}", account_id=a.id, symbol=sym, side=side, qty=qty,
+                          type=m.MARKET, tif=m.DAY, role="liquidation")
+                ex._handle(ex.engine.submit(o, ex.quote(sym), now, ex.session(now)))
             a.life.liquidation_paused = False
             _, _, eq_after, maint_after = self._state(a)
             steps.append({"symbol": sym, "side": side, "qty": qty, "requirement_before": maint,
@@ -619,6 +631,29 @@ class LifecycleManager:
                 ex._handle(ex.engine.cancel(o.id, now, "Unfilled part of a liquidation order; retried next tick"))
                 break
         return steps
+
+    def _pair_to_close(self, pos: dict, marks: dict, maint: Decimal):
+        """A short option and a long option that covers it (same underlying and kind, expiring no earlier),
+        closed together, when closing either leg alone frees nothing. With strategy margin a long option
+        needs its full value, so neither leg of a spread or calendar helps alone. Returns the choice tuple
+        (requirement after, underlying, legs, units) with the lowest requirement after, or None."""
+        best = None
+        for s_sym, s_q in pos.items():
+            sc = parse(s_sym)
+            if sc is None or s_q >= 0 or (self.ex.quote(s_sym) is None or self.ex.quote(s_sym).ask <= 0):
+                continue
+            for l_sym, l_q in pos.items():
+                lc = parse(l_sym)
+                if (lc is None or l_q <= 0 or lc.underlying != sc.underlying or lc.kind != sc.kind
+                        or lc.expiry < sc.expiry or self.ex.quote(l_sym) is None or self.ex.quote(l_sym).bid <= 0):
+                    continue
+                n = min(-s_q, l_q)
+                after = self._reduced(self._reduced(pos, s_sym, s_q, n), l_sym, l_q, n)
+                req = margin.requirement(after, marks, maintenance=True)
+                if req < maint and (best is None or req < best[0]):
+                    legs = [{"symbol": s_sym, "side": m.BUY, "ratio": 1}, {"symbol": l_sym, "side": m.SELL, "ratio": 1}]
+                    best = (req, sc.underlying, legs, n)
+        return best
 
     @staticmethod
     def _reduced(pos: dict, sym: str, q: Decimal, qty: Decimal) -> dict:

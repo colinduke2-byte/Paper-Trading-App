@@ -136,8 +136,8 @@ def test_a_settled_cash_rule_runs_for_oco_and_multileg_orders():
     with pytest.raises(OrderRejected, match=settled):
         ex.submit(a, oco)
     assert settled in ex.preview(a, oco)["reason"]
-    # a buy-write (100 shares and one covered call) costs about 9,900: under total cash, over settled cash
-    buy_write = {"legs": [leg("ABC", "buy", 100), leg(C110, "sell")], "qty": 1}
+    # a buy-write (100 shares and one covered call) costs about 9,700: under total cash, over settled cash
+    buy_write = {"legs": [leg("ABC", "buy", 100), leg(C100, "sell")], "qty": 1}
     with pytest.raises(OrderRejected, match=settled):
         ex.submit(a, buy_write)
     assert settled in ex.preview_multileg(a, buy_write)["reason"]
@@ -162,17 +162,20 @@ def test_a_margin_call_liquidation_can_close_what_covers_a_short_option():
     ex.tick()
     acc = ex.account(a)
     s = ex.summary(a)
-    assert not s["margin_call"] and s["margin_call_since"] is None
-    assert acc.position("ABC") < 1900
-    liq = [t for t in acc.ledger.transactions if t.kind == "liquidation"]
-    assert liq and all(ex.engine.orders[t.ref].role == "liquidation" for t in liq)
+    assert not s["margin_call"] and s["equity"] >= s["maintenance_requirement"]
+    assert acc.position("ABC") < 1900 and acc.position(call) == 0  # calls bought back, then shares sold
+    liq = [o for o in ex.engine.orders.values() if o.role == "liquidation"]
+    assert {o.symbol for o in liq} == {"ABC", call} and all(o.status == "filled" for o in liq)
+    assert any(e[1] == "liquidation" for e in acc.life.log)
+    # lifecycle review rule: the call clears once equity has stayed above maintenance for a while
+    for _ in range(2):  # the first tick starts the timer, the second (300 s later) clears the call
+        clock.advance(300)
+        feed.set_quote("ABC", D("59.99"), D("60"), D("60"), bid_size=100000, ask_size=100000)
+        ex.tick()
+    assert ex.summary(a)["margin_call_since"] is None
     ledger_ok(acc)
 
 
-@pytest.mark.xfail(strict=True, reason="Known on the merged heads: margin-call liquidation can sell the shares behind "
-                                       "covered calls and leave them uncovered. The lifecycle branch's review fix "
-                                       "(liquidation never leaves a previously covered short option uncovered) "
-                                       "resolves it; remove this marker when that fix is merged.")
 def test_a_margin_call_liquidation_never_leaves_covered_calls_uncovered():
     ex, feed, clock = make_exchange()
     move(ex, feed, clock, "ABC", "100", bid_size=100000, ask_size=100000)
@@ -277,9 +280,9 @@ def test_d_settlement_and_day_trades_count_each_multileg_leg():
     assert ex.summary(m)["day_trades"] == 0
     [close] = ex.submit(m, {"legs": SPREAD_OPEN, "qty": 1})
     assert close.status == "filled" and not ex.account(m).positions()
-    # both legs closed positions opened today; one closing order is one day trade
-    assert ex.summary(m)["day_trades"] == 1
-    assert [e[2] for e in ex.account(m).life.day_trades] == [close.id]
+    # both legs closed positions opened today. Lifecycle review rule: day trades are counted per opening
+    # lot, so the two legs (two lots opened by one order, each a fill) are two day trades.
+    assert ex.summary(m)["day_trades"] == 2
 
 
 # ---- (e) replay sandboxes -----------------------------------------------------------------------------
@@ -373,9 +376,8 @@ def test_e_entering_and_leaving_replay_leaves_live_state_byte_identical(tmp_path
     assert r.status_code == 200 and r.json()[0]["status"] == "working"
     exp = c.get("/api/options/expirations/NVLX").json()[0]["date"]
     rows = c.get("/api/options/chain/NVLX", params={"expiry": exp}).json()["rows"]
-    mid = rows[len(rows) // 2]
-    up = rows[len(rows) // 2 + 1]
-    r = c.post(f"/api/accounts/{sid}/multileg", json={"legs": [leg(mid["call"]["symbol"], "buy"), leg(up["call"]["symbol"], "sell")], "qty": 1})
+    low, mid = rows[len(rows) // 2 - 1], rows[len(rows) // 2]  # sell the at-the-money call: it has a bid
+    r = c.post(f"/api/accounts/{sid}/multileg", json={"legs": [leg(low["call"]["symbol"], "buy"), leg(mid["call"]["symbol"], "sell")], "qty": 1})
     assert r.status_code == 200 and r.json()["status"] == "filled", r.text
     assert c.put(f"/api/accounts/{sid}/lot-method", json={"method": "highest_cost"}).status_code == 200
     c.post("/api/replay/seek", json={"offset": 1800})
@@ -419,10 +421,11 @@ def test_f_multileg_pricing_and_preview_use_provider_option_quotes_when_present(
     assert not any("model prices" in w for w in pre["warnings"])
     assert ex.preview(a, {"symbol": C100, "side": "buy", "qty": 1})["estimated_price"] == D("7.30")
 
-    mixed = ex.preview_multileg(a, {"legs": [leg(C100, "buy"), leg(C110, "sell")], "qty": 1})
+    c105_far = opt("C", 105, FAR)  # no provider quote, and a model bid above zero
+    mixed = ex.preview_multileg(a, {"legs": [leg(C100, "buy"), leg(c105_far, "sell")], "qty": 1})
     assert [l["source"] for l in mixed["legs"]] == ["testprovider", "model"] and mixed["simulated"]
     assert any("Some legs use simulated model prices" in w for w in mixed["warnings"])
-    assert mixed["legs"][1]["estimated_price"] == model[C110].bid
+    assert mixed["legs"][1]["estimated_price"] == ex.quote(c105_far).bid > 0
 
     [o] = ex.submit(a, {"legs": SPREAD_OPEN, "qty": 2})
     assert o.status == "filled" and o.avg_fill_price == D("3.30")

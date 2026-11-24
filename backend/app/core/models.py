@@ -77,6 +77,7 @@ class Order:
     fees: Decimal = ZERO
     expire_at: Optional[float] = None  # good-till-date: the order expires at this time
     good_till: Optional[str] = None  # good-till-date: the date as entered (YYYY-MM-DD)
+    auction_at: Optional[float] = None  # on-open / on-close orders: the time of the one auction they wait for
     # Multi-leg orders: [{"symbol", "side", "ratio"}]. `symbol` is then the underlying, `qty` the
     # number of units, `side` is always buy and `limit_price` is the signed net price per unit
     # (positive = net debit, negative = net credit, None = at market).
@@ -102,7 +103,7 @@ class Fill:
     price: Decimal
     ts: float
     fee: Decimal = ZERO
-    kind: str = "trade"  # trade / exercise / assignment / expiration
+    kind: str = "trade"  # trade / exercise / assignment / expiration / closed at expiry
 
 
 def to_plain(obj) -> dict:

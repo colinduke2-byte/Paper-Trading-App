@@ -1,6 +1,7 @@
 """The simulated broker: wires market data, matching, accounts, risk and options."""
 import json
 import os
+import re
 import tempfile
 import time as _time
 from datetime import date, datetime, timedelta, timezone
@@ -27,6 +28,15 @@ STOCK_FEE = ZERO  # per share
 MAX_QTY = Decimal(1_000_000)
 MAX_LINKED = 5  # orders in one one-cancels-other or one-triggers-other request
 MAX_GTD_DAYS = 366
+MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be larger than this
+CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its intrinsic value, not exercised
+
+
+def _in_range(*values) -> None:
+    """Refuse absurd numbers before any arithmetic is done with them."""
+    for v in values:
+        if v is not None and abs(v) > MAX_NUMBER:
+            raise OrderRejected("invalid number in order: a value is too large")
 
 
 class OrderRejected(ValueError):
@@ -41,8 +51,9 @@ class Exchange:
         self.data_dir = data_dir
         self.session_mode = session_mode  # 'always' or 'us'
         self.engine = MatchingEngine(fill_config)
-        self._auction_key = None  # session (or UTC day in 'always' mode) seen by the last tick
-        self._auction_open = False  # the current tick is the first of a regular session
+        self._last_tick = None  # time of the previous tick in this run (None right after a start)
+        self._due_open = set()  # on-open orders whose auction is this tick, once the feed has stepped
+        self._session_quotes: dict[str, Quote] = {}  # last quote each symbol had in a regular session
         self.accounts: dict[str, Account] = {}
         self.watchlists: dict[str, list] = {}
         self.alerts: list[dict] = []
@@ -262,6 +273,8 @@ class Exchange:
         if raw in (None, ""):
             raise OrderRejected("good-till date is required for a good-till-date order")
         try:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(raw)):
+                raise ValueError(raw)
             day = date.fromisoformat(str(raw))
         except ValueError:
             raise OrderRejected("good-till date must look like 2026-12-31")
@@ -355,6 +368,8 @@ class Exchange:
 
     def _validate_one(self, account: Account, req: dict, linked: Optional[str] = None) -> list:
         """One order, plus its bracket children when take_profit or stop_loss is given."""
+        if linked and any(req.get(k) is not None for k in ("legs", "oco", "triggers")):
+            raise OrderRejected("a linked order cannot itself be multi-leg or linked")
         try:
             symbol = str(req.get("symbol", "")).upper().strip()
             side, typ = req.get("side"), req.get("type", m.MARKET)
@@ -366,6 +381,7 @@ class Exchange:
             take_profit, stop_loss = num("take_profit"), num("stop_loss")
         except (ValueError, ArithmeticError) as e:
             raise OrderRejected(f"invalid number in order: {e}")
+        _in_range(qty, limit, stop, trail_amt, trail_pct, take_profit, stop_loss)
         contract = self._check_symbol(account, symbol)
         if side not in (m.BUY, m.SELL):
             raise OrderRejected("side must be buy or sell")
@@ -423,7 +439,8 @@ class Exchange:
                       stop_price=stop, trail_amount=trail_amt if typ == m.TRAILING_STOP else None,
                       trail_percent=trail_pct if typ == m.TRAILING_STOP else None, extended_hours=ext,
                       tif=(m.OPG if typ in m.OPEN_TYPES else m.CLS) if auction else tif,
-                      client_id=client_id, expire_at=expire_at, good_till=good_till)
+                      client_id=client_id, expire_at=expire_at, good_till=good_till,
+                      auction_at=self._next_auction(typ) if auction else None)
         orders = [entry]
         if take_profit is not None or stop_loss is not None:
             if typ not in (m.MARKET, m.LIMIT) or tif in (m.IOC, m.FOK) or qty != qty.to_integral_value():
@@ -476,6 +493,11 @@ class Exchange:
         before it. A multi-leg order is all-or-none, so it is applied as one unit: each
         scenario is checked with no multi-leg order filled, with all of them filled and
         with each one filled alone.
+
+        A cash account cannot borrow, so it gets one more scenario: buys and sells all fill,
+        but the money from the sells has not arrived. That stops a resting purchase from
+        spending the cash that secures a resting short put. (A sale that must fill before
+        the order it triggers is the exception: its money is there by then.)
         """
         live = [o for o in self.engine.orders.values() if o.account_id == account.id
                 and (o.status in (m.WORKING, m.PARTIAL) or (o.status == m.HELD and o.role == m.TRIGGERED))]
@@ -483,10 +505,11 @@ class Exchange:
         singles = [o for o in live if not o.legs]
         combos = [o for o in live if o.legs]
         by_id = {o.id: o for o in singles}
+        triggering = {o.parent_id for o in singles if o.status == m.HELD}
         combo_sets = [[]] + ([combos] if combos else []) + ([[c] for c in combos] if len(combos) > 1 else [])
         base = account.positions()
         result = None
-        for side in (None, m.BUY, m.SELL):
+        for side in (None, m.BUY, m.SELL) + (("both",) if account.type == "cash" else ()):
             for combo_set in combo_sets:
                 pos, cash, seen, applied = dict(base), account.cash, {}, set()
 
@@ -501,10 +524,12 @@ class Exchange:
                         seen[(o.oco_group, o.symbol)], qty = qty, qty - prior
                     sign = 1 if o.side == m.BUY else -1
                     pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * qty
-                    cash -= sign * cents(qty * self._estimate_price(o) * multiplier(o.symbol)) + self._fee(o.symbol, qty)
+                    cash -= self._fee(o.symbol, qty)
+                    if sign > 0 or side != "both" or o.id in triggering:
+                        cash -= sign * cents(qty * self._estimate_price(o) * multiplier(o.symbol))
 
                 for o in singles if side is not None else ():
-                    if o.side != side or o.id in applied:
+                    if (o.side != side and side != "both") or o.id in applied:
                         continue
                     if o.status == m.HELD:  # it can only fill after its entry has filled completely
                         parent = by_id.get(o.parent_id)
@@ -524,26 +549,41 @@ class Exchange:
                     result = w
         return result
 
-    def _not_riskier(self, account: Account, deltas: dict) -> bool:
-        """True when applying these position changes does not raise the account's requirement.
+    def _not_riskier(self, account: Account, deltas: dict, cash_delta: Decimal) -> bool:
+        """True when applying these position changes (and paying cash_delta) adds no risk.
 
         Closing a position is normally always allowed, but not when it is what covers
         another one: selling the long leg of a spread, or the shares behind a covered call,
-        leaves an uncovered short option and has to pass the full check.
+        leaves an uncovered short option and has to pass the full check. Everything that
+        other open orders are already selling counts as sold, so two orders cannot each
+        lean on the cover the other one removes.
         """
         before = account.positions()
+        for x in self.engine.orders.values():
+            if x.account_id == account.id and x.status in (m.WORKING, m.PARTIAL):
+                pending = self._leg_deltas(x) if x.legs else {x.symbol: x.remaining if x.side == m.BUY else -x.remaining}
+                for symbol, delta in pending.items():
+                    if delta < 0:
+                        before[symbol] = before.get(symbol, ZERO) + delta
         after = dict(before)
         for symbol, delta in deltas.items():
             after[symbol] = after.get(symbol, ZERO) + delta
+        before = {s: q for s, q in before.items() if q != 0}
         after = {s: q for s, q in after.items() if q != 0}
         marks = self._marks(set(before) | set(after))
         if account.type == "margin":
+            # Buying back a short position never uncovers anything, whatever it does to the numbers.
+            if all(d > 0 and account.position(s) < 0 and d <= -account.position(s) for s, d in deltas.items()):
+                return True
             return margin.requirement(after, marks) <= margin.requirement(before, marks)
+        # Cash account: nothing may become uncovered, and the cash that secures short puts must
+        # still be there after paying for the trade (or at least be no further short than it was).
         ev_before = margin.evaluate("cash", account.cash, before, marks)
-        ev_after = margin.evaluate("cash", account.cash, after, marks)
-        if ev_after.structural:
+        ev_after = margin.evaluate("cash", account.cash + cash_delta, after, marks)
+        if ev_after.structural or ev_before.structural:
             return ev_before.structural
-        return ev_before.structural or ev_after.requirement <= ev_before.requirement
+        spare_before, spare_after = account.cash - ev_before.requirement, account.cash + cash_delta - ev_after.requirement
+        return spare_after >= 0 or spare_after >= spare_before
 
     def _closes(self, account: Account, symbol: str, side: str, qty: Decimal) -> bool:
         """True when trading qty of symbol only reduces the position held, open orders included."""
@@ -559,9 +599,12 @@ class Exchange:
         """True when the order only closes part of an existing position and uncovers nothing."""
         if o.legs:
             return (all(self._closes(account, l["symbol"], l["side"], o.qty * l["ratio"]) for l in o.legs)
-                    and self._not_riskier(account, self._leg_deltas(o)))
-        return (self._closes(account, o.symbol, o.side, o.qty)
-                and self._not_riskier(account, {o.symbol: o.qty if o.side == m.BUY else -o.qty}))
+                    and self._not_riskier(account, self._leg_deltas(o), -self._multileg_cost(o) - self._multileg_fee(o)))
+        if not self._closes(account, o.symbol, o.side, o.qty):
+            return False
+        sign = 1 if o.side == m.BUY else -1
+        paid = sign * cents(o.qty * self._estimate_price(o) * multiplier(o.symbol)) + self._fee(o.symbol, o.qty)
+        return self._not_riskier(account, {o.symbol: sign * o.qty}, -paid)
 
     def _risk_check(self, account: Account, orders: list) -> "_Worst":
         """Pre-trade check for one request (a single order, a linked set or a multi-leg order).
@@ -715,14 +758,22 @@ class Exchange:
             qty, limit, stop = num("qty"), num("limit_price"), num("stop_price")
         except (ValueError, ArithmeticError) as e:
             raise ValueError(f"invalid number: {e}")
+        _in_range(qty, limit, stop)
         for v in (qty, limit, stop):
             if v is not None and v <= 0:
                 raise ValueError("values must be positive")
+        if qty is not None and qty > o.qty and o.oco_group:
+            # the group's size is what its orders had when it was entered; fills on one have
+            # already been taken off the others, and raising one would let the group over-fill
+            raise OrderRejected("the quantity of a one-cancels-other order cannot be raised")
         if qty is not None and (qty > MAX_QTY or qty != qty.quantize(Decimal("0.0001"))):
             raise ValueError("invalid quantity")
         old = (o.qty, o.limit_price, o.stop_price)
         self._handle(self.engine.replace(order_id, self.now(), qty, limit, stop))
-        if o.status != m.HELD and not self._worst_case(a, []).ok and not self._reduces_risk_after(a, o):
+        # Held bracket and exit children are re-sized to what their entry filled when they are
+        # released, so editing them cannot add risk; a held triggered order keeps its own size.
+        if (o.status != m.HELD or o.role == m.TRIGGERED) and not self._worst_case(a, []).ok \
+                and not self._reduces_risk_after(a, o):
             o.qty, o.limit_price, o.stop_price = old
             raise OrderRejected("insufficient buying power for the change")
         if o.status != m.HELD:  # pattern day trader and settled-cash rules, as on submit
@@ -753,6 +804,7 @@ class Exchange:
             ratios = [parse_num(l.get("ratio", 1)) for l in raw]
         except (ValueError, ArithmeticError) as e:
             raise OrderRejected(f"invalid number in order: {e}")
+        _in_range(qty, limit, *ratios)
         typ, tif, effect = req.get("type", m.MARKET), req.get("tif", m.DAY), req.get("price_effect")
         if typ not in (m.MARKET, m.LIMIT):
             raise OrderRejected("multi-leg orders are market or limit orders")
@@ -811,7 +863,7 @@ class Exchange:
             return o.limit_price
         priced = net_price(o.legs, self._leg_quotes(o.legs))
         if priced is None:
-            raise OrderRejected(f"no quote available for every leg of the {o.symbol} order")
+            raise OrderRejected(f"every leg of the {o.symbol} order needs a quote, and a leg to be sold needs a bid above zero")
         return priced[0]
 
     def _multileg_cost(self, o: Order) -> Decimal:
@@ -827,7 +879,7 @@ class Exchange:
         quotes = self._leg_quotes(o.legs)
         priced = net_price(o.legs, quotes)
         if priced is None:
-            raise OrderRejected(f"no quote available for every leg of the {o.symbol} order")
+            raise OrderRejected(f"every leg of the {o.symbol} order needs a quote, and a leg to be sold needs a bid above zero")
         market_net, prices = priced
         net = o.limit_price if o.limit_price is not None else market_net  # the price the payoff is based on
         effect = lambda x: "debit" if x > 0 else "credit" if x < 0 else "even"
@@ -896,31 +948,66 @@ class Exchange:
                 "simulated": simulated, "warnings": warnings}
 
     # ---- auctions, good-till-date and multi-leg matching (called from tick) ----
-    def _orders_before_feed(self, now: float, sess: str) -> None:
-        """Run the closing auction against the last quotes of the session and expire good-till-date orders.
+    def _next_auction(self, typ: str) -> float:
+        """Time of the next open (for on-open orders) or close (on-close) after now.
 
-        With real sessions the close is the moment the regular session ends and the open the
-        moment it starts. In session mode 'always' the market never closes, so the UTC day
-        rollover is both: the close on the last prices of the old day, then the open on the
-        first prices of the new one.
+        With real sessions that is the start or the end of the next regular session. In
+        session mode 'always' the market never closes, so the next UTC midnight is both:
+        the close on the last prices of the old day, then the open on the first prices of
+        the new one.
         """
-        key = int(now // 86400) if self.session_mode == "always" else sess
-        prev, self._auction_key = self._auction_key, key
-        closed = self._auction_open = False
-        if prev is not None and key != prev:
-            if self.session_mode == "always":
-                closed = self._auction_open = True
-            else:
-                closed, self._auction_open = prev == "regular", key == "regular"
-        if closed:
-            self._handle(self.engine.on_auction("close", self.quote, now))
+        now = self.now()
+        if self.session_mode == "always":
+            return (now // 86400 + 1) * 86400
+        day = cal.ny_date(now)
+        for _ in range(30):
+            if cal.is_trading_day(day):
+                at = (datetime.combine(day, cal.OPEN, tzinfo=cal.NY).timestamp() if typ in m.OPEN_TYPES
+                      else cal.close_ts(day))
+                if at > now:
+                    return at
+            day += timedelta(days=1)
+        raise OrderRejected("no trading session was found in the next 30 days")
+
+    def _auction_price(self, symbol: str) -> Optional[Quote]:
+        """Closing price: the last quote the symbol had in a regular session, else its current quote."""
+        return self._session_quotes.get(symbol) or self.quote(symbol)
+
+    def _orders_before_feed(self, now: float, sess: str) -> None:
+        """Run the closing auction and expire good-till-date orders, before the feed moves on.
+
+        Every on-open or on-close order carries the time of the one auction it waits for
+        (`auction_at`, saved with the order). It trades on the first tick at or after that
+        time. If the simulator was not running when the time passed (the first tick after a
+        start finds it already in the past), the auction was missed and the order expires
+        unfilled instead of silently waiting for another day's auction.
+        """
+        due = [o for o in self.engine.orders.values() if o.type in m.AUCTION_TYPES and o.status == m.WORKING
+               and (o.auction_at is None or o.auction_at <= now)]
+        self._due_open = set()
+        for o in due:
+            which = "open" if o.type in m.OPEN_TYPES else "close"
+            if o.auction_at is None:  # saved before auction times existed: wait for the next one
+                o.auction_at = self._next_auction(o.type)
+            elif self._last_tick is None or self._last_tick >= o.auction_at:
+                self._handle(self.engine.cancel(o.id, now, f"the {which} passed while the simulator was not running",
+                                                status=m.EXPIRED))
+            elif which == "open":
+                self._due_open.add(o.id)
+        closing = {o.id for o in due if o.status == m.WORKING and o.type in m.CLOSE_TYPES and o.auction_at <= now}
+        if closing:
+            self._handle(self.engine.on_auction("close", self._auction_price, now, only=closing))
         self._handle(self.engine.expire(now, lambda o: o.tif == m.GTD and o.expire_at is not None and o.expire_at <= now))
 
     def _orders_after_feed(self, quotes: list, now: float, sess: str) -> None:
         """Run the opening auction on the first quotes of the session, then re-price multi-leg orders."""
-        if self._auction_open:
-            self._auction_open = False
-            self._handle(self.engine.on_auction("open", self.quote, now))
+        if self._due_open:
+            due, self._due_open = self._due_open, set()
+            self._handle(self.engine.on_auction("open", self.quote, now, only=due))
+        if sess == "regular":
+            for q in quotes:
+                self._session_quotes[q.symbol] = q
+        self._last_tick = now
         changed = {q.symbol for q in quotes}
         for o in [o for o in self.engine.orders.values() if o.legs and o.status == m.WORKING]:
             if any(c is not None and c.expiry_ts <= now for c in (parse_option(l["symbol"]) for l in o.legs)):
@@ -1000,10 +1087,13 @@ class Exchange:
             if c is not None and c.expiry_ts <= now:
                 self._handle(self.engine.cancel(o.id, now, "option expired", status=m.EXPIRED))
         for a in self.accounts.values():
-            for sym, qty in list(a.positions().items()):
-                c = parse_option(sym)
-                if c is None or c.expiry_ts > now:
-                    continue
+            expiring = [(sym, qty, c) for sym, qty in a.positions().items()
+                        if (c := parse_option(sym)) is not None and c.expiry_ts <= now]
+            if a.type == "cash":
+                # Obligations first, then whatever brings cash in before whatever needs it:
+                # short calls (deliver shares), short puts (pay), long puts (deliver), long calls (pay).
+                expiring.sort(key=lambda r: ((r[1] > 0) * 2 + ((r[2].kind == "P") != (r[1] > 0)), r[0]))
+            for sym, qty, c in expiring:
                 u = self.feed.quote(c.underlying)
                 spot = u.last if u else ZERO
                 itm = (spot - c.strike) if c.kind == "C" else (c.strike - spot)
@@ -1019,10 +1109,20 @@ class Exchange:
 
                 if itm >= CENT:
                     kind = "exercise" if long else "assignment"
-                    book(sym, m.SELL if long else m.BUY, n, ZERO, kind)
                     # A call holder buys the stock; a put holder sells it. The writer takes the other side.
                     buys_stock = (c.kind == "C") == long
-                    book(c.underlying, m.BUY if buys_stock else m.SELL, n * 100, c.strike, kind)
+                    settle = n
+                    if a.type == "cash":
+                        # A cash account cannot borrow money or shares. Contracts it cannot settle
+                        # in shares are closed for their intrinsic value in cash instead, as a
+                        # broker would close them just before the last bell.
+                        settle = min(n, (max(a.cash, ZERO) // (c.strike * 100)) if buys_stock
+                                     else (max(a.position(c.underlying), ZERO) // 100))
+                    if settle > 0:
+                        book(sym, m.SELL if long else m.BUY, settle, ZERO, kind)
+                        book(c.underlying, m.BUY if buys_stock else m.SELL, settle * 100, c.strike, kind)
+                    if n > settle:
+                        book(sym, m.SELL if long else m.BUY, n - settle, itm, CLOSED_AT_EXPIRY)
                 else:
                     book(sym, m.SELL if long else m.BUY, n, ZERO, "expiration")
                 self.dirty = True

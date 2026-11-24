@@ -213,9 +213,7 @@ def test_always_mode_on_close_and_on_open_fill_at_the_utc_day_rollover():
     clock.advance(10)
     feed.set_quote("ABC", "102.99", "103.00", "103.00")  # first price of the new day
     ex.tick()
-    # the scripted test feed shows a new quote as soon as it is set, so the close sees it too;
-    # test_always_mode_close_uses_the_last_price_of_the_old_day pins the closing price itself
-    assert moc.status == "filled" and moc.avg_fill_price == D("103.00")
+    assert moc.status == "filled" and moc.avg_fill_price == D("101")  # the close: last price of the old day
     assert moo.status == "filled" and moo.avg_fill_price == D("103.00")
     assert loc.status == "expired"
     # an on-open order entered now waits a whole day

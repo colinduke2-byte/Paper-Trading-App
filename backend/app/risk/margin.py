@@ -17,15 +17,22 @@ Margin account (Regulation T style):
      A short call and a short put with the same expiry (straddle, strangle) cannot both
      lose, so a pair costs the greater of the two requirements plus the other premium.
   The covered treatment is used only when it is not more expensive than treating every
-  short option as uncovered, so pairing can never raise a requirement.
-Cash account: no short stock, no uncovered calls. Short options must be covered by stock,
-by a long option as above with the worst loss held in cash, or (puts) fully cash-secured.
+  short option as uncovered, so pairing can never raise a requirement. When longs can
+  cover shorts in more than one way, every way of pairing them is tried (for all but very
+  large books) and the cheapest is used; each one is a valid cover, so a covered group
+  always holds its worst loss.
+Cash account: no short stock. A long option is NOT cover in a cash account, because
+assignment settles in shares and the account must be able to take or deliver them: a
+short call needs the shares, a short put needs strike x 100 in cash. Spreads whose short
+leg is not secured that way need a margin account.
 
 Positions are {symbol: signed quantity}. `marks` gives a price per symbol and must
 include the underlying of every option held.
 """
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
+from math import gcd
 from typing import Optional
 
 from ..core.money import ZERO, cents
@@ -67,15 +74,8 @@ def _books(positions: dict) -> dict:
     return books
 
 
-def _cover(shares: Decimal, opts: dict) -> tuple:
-    """Decide what covers each short option of one underlying.
-
-    Returns (after_stock, groups, naked, free):
-    - after_stock: {symbol: short contracts left once long stock has covered calls}
-    - groups: {expiry of the shorts: {symbol: signed contracts}}, each short with its long cover
-    - naked: {symbol: short contracts with no cover at all}
-    - free: {symbol: long contracts not used as cover}
-    """
+def _after_stock(shares: Decimal, opts: dict) -> dict:
+    """{symbol: short contracts} left once long stock has covered calls (lowest strikes first)."""
     shares_free = max(shares, ZERO)
     after_stock = {}
     for sym in sorted((s for s, q in opts.items() if q < 0), key=lambda s: parse(s).strike):
@@ -86,32 +86,136 @@ def _cover(shares: Decimal, opts: dict) -> tuple:
             n -= covered
         if n > 0:
             after_stock[sym] = n
+    return after_stock
+
+
+def _preference(long_sym: str, short) -> tuple:
+    lc = parse(long_sym)
+    gap = (short.strike - lc.strike) if short.kind == "C" else (lc.strike - short.strike)
+    # First a long that is at least as good as the short (closest first), then the narrowest loss.
+    return (0, gap, lc.expiry, long_sym) if gap >= 0 else (1, -gap, lc.expiry, long_sym)
+
+
+def _pair(shorts: dict, longs: dict, short_order, long_order=None) -> dict:
+    """Greedy pairing {(short, long): contracts}: shorts in the given order take longs in the given
+    order (or by preference), only ever a long of the same kind that expires on or after the short."""
+    left = dict(longs)
+    pairs = {}
+    for sym in short_order:
+        c, n = parse(sym), shorts[sym]
+        usable = [l for l in left if parse(l).kind == c.kind and parse(l).expiry >= c.expiry]
+        for l in (sorted(usable, key=lambda l: _preference(l, c)) if long_order is None
+                  else [l for l in long_order if l in usable]):
+            take = min(n, left[l])
+            if take > 0:
+                pairs[(sym, l)] = take
+                left[l] -= take
+                n -= take
+    return pairs
+
+
+_MAX_EXACT = 256  # books with at most this many possible pairings are searched completely
+
+
+def _danger(sym: str) -> tuple:
+    c = parse(sym)
+    return (c.strike if c.kind == "C" else -c.strike, sym)  # lowest-strike calls, highest-strike puts first
+
+
+def _cells(shorts: dict, longs: dict) -> list:
+    """(short, long) pairs where the long may cover the short: same kind, expiring on or after it."""
+    return [(s, l) for s in sorted(shorts) for l in sorted(longs)
+            if parse(s).kind == parse(l).kind and parse(l).expiry >= parse(s).expiry]
+
+
+def _pairing_count(shorts: dict, longs: dict) -> int:
+    """Upper bound on the number of distinct pairings, after dividing out a common lot size."""
+    lot = gcd(*(int(n) for n in list(shorts.values()) + list(longs.values())))
+    count = 1
+    for s, l in _cells(shorts, longs):
+        count *= int(min(shorts[s], longs[l])) // lot + 1
+    return count
+
+
+@lru_cache(maxsize=2048)
+def _pairings(shorts_items: tuple, longs_items: tuple) -> tuple:
+    """Ways of pairing uncovered shorts with long options, as tuples of ((short, long), contracts).
+
+    Small books (nearly all real ones) are searched completely: every split of every short
+    between the longs that may cover it, including leaving it uncovered. A 10-lot butterfly
+    is searched as a 1-lot one. Larger books fall back to a handful of greedy orders. The
+    result depends on the positions only, so it is cached.
+    """
+    shorts, longs = dict(shorts_items), dict(longs_items)
+    found = {}
+    if _pairing_count(shorts, longs) <= _MAX_EXACT:
+        lot = gcd(*(int(n) for n in list(shorts.values()) + list(longs.values())))
+        cells = _cells(shorts, longs)
+        left_s = {s: int(n) // lot for s, n in shorts.items()}
+        left_l = {l: int(n) // lot for l, n in longs.items()}
+
+        def walk(i: int, acc: list) -> None:
+            if i == len(cells):
+                found.setdefault(tuple(acc), None)
+                return
+            sym, l = cells[i]
+            for n in range(min(left_s[sym], left_l[l]) + 1):
+                left_s[sym] -= n
+                left_l[l] -= n
+                walk(i + 1, acc + [((sym, l), Decimal(n * lot))] if n else acc)
+                left_s[sym] += n
+                left_l[l] += n
+
+        walk(0, [])
+        return tuple(found)
+    by_danger = sorted(shorts, key=lambda s: (parse(s).kind,) + _danger(s))
+    by_expiry = sorted(by_danger, key=lambda s: parse(s).expiry)
+    long_orders = [None, sorted(longs), sorted(longs, reverse=True), sorted(longs, key=lambda l: parse(l).expiry),
+                   sorted(longs, key=lambda l: parse(l).expiry, reverse=True)]
+    for short_order in (by_danger, by_danger[::-1], by_expiry, by_expiry[::-1]):
+        for long_order in long_orders:
+            found.setdefault(tuple(sorted(_pair(shorts, longs, short_order, long_order).items())), None)
+    found.setdefault((), None)
+    return tuple(found)
+
+
+def _split(after_stock: dict, opts: dict, pairs) -> tuple:
+    """(groups, naked, free) for one pairing: see _cover."""
     free = {s: q for s, q in opts.items() if q > 0}
-    groups, naked = {}, {}
+    naked = dict(after_stock)
+    groups: dict = {}
+    for (short, long_), n in pairs:
+        g = groups.setdefault(parse(short).expiry, {})
+        g[short] = g.get(short, ZERO) - n
+        g[long_] = g.get(long_, ZERO) + n
+        naked[short] -= n
+        free[long_] -= n
+    return groups, {s: n for s, n in naked.items() if n > 0}, {s: q for s, q in free.items() if q > 0}
 
-    def preference(long_sym: str, short) -> tuple:
-        lc = parse(long_sym)
-        gap = (short.strike - lc.strike) if short.kind == "C" else (lc.strike - short.strike)
-        # First a long that is at least as good as the short (closest first), then the narrowest loss.
-        return (0, gap, lc.expiry, long_sym) if gap >= 0 else (1, -gap, lc.expiry, long_sym)
 
-    # Most dangerous shorts first: lowest-strike calls, highest-strike puts.
-    for sym in sorted(after_stock, key=lambda s: (parse(s).kind, parse(s).strike if parse(s).kind == "C" else -parse(s).strike, s)):
-        c, n = parse(sym), after_stock[sym]
-        while n > 0:
-            candidates = [l for l, q in free.items() if q > 0 and parse(l).kind == c.kind and parse(l).expiry >= c.expiry]
-            if not candidates:
-                break
-            best = min(candidates, key=lambda l: preference(l, c))
-            take = min(n, free[best])
-            free[best] -= take
-            n -= take
-            g = groups.setdefault(c.expiry, {})
-            g[sym] = g.get(sym, ZERO) - take
-            g[best] = g.get(best, ZERO) + take
-        if n > 0:
-            naked[sym] = n
-    return after_stock, groups, naked, {s: q for s, q in free.items() if q > 0}
+def _covers(shares: Decimal, opts: dict) -> tuple:
+    """(after_stock, [every (groups, naked, free) worth pricing]) for the options of one underlying."""
+    after_stock = _after_stock(shares, opts)
+    longs = {s: q for s, q in opts.items() if q > 0}
+    if not after_stock or not longs:
+        return after_stock, [({}, after_stock, longs)]
+    pairings = _pairings(tuple(sorted(after_stock.items())), tuple(sorted(longs.items())))
+    return after_stock, [_split(after_stock, opts, pairs) for pairs in pairings]
+
+
+def _cover(shares: Decimal, opts: dict) -> tuple:
+    """Decide what covers each short option of one underlying (the first, greedy, pairing).
+
+    Returns (after_stock, groups, naked, free):
+    - after_stock: {symbol: short contracts left once long stock has covered calls}
+    - groups: {expiry of the shorts: {symbol: signed contracts}}, each short with its long cover
+    - naked: {symbol: short contracts with no cover at all}
+    - free: {symbol: long contracts not used as cover}
+    """
+    after_stock = _after_stock(shares, opts)
+    longs = {s: q for s, q in opts.items() if q > 0}
+    order = sorted(after_stock, key=lambda s: (parse(s).kind,) + _danger(s))
+    return (after_stock,) + _split(after_stock, opts, _pair(after_stock, longs, order).items())
 
 
 def worst_value(group: dict) -> Decimal:
@@ -170,15 +274,15 @@ def _uncovered_requirement(naked: dict, marks: dict) -> Decimal:
 
 def _option_requirement(shares: Decimal, opts: dict, marks: dict) -> Decimal:
     """Requirement for all options of one underlying (long options included)."""
-    after_stock, groups, naked, free = _cover(shares, opts)
+    after_stock, candidates = _covers(shares, opts)
     longs = sum((q * marks[s] for s, q in opts.items() if q > 0), ZERO) * H
-    all_uncovered = longs + _uncovered_requirement(after_stock, marks)
-    if not groups:
-        return all_uncovered
-    covered = (sum((q * marks[s] for s, q in free.items()), ZERO) * H
-               + sum((_group_requirement(g, marks) for g in groups.values()), ZERO)
-               + _uncovered_requirement(naked, marks))
-    return min(covered, all_uncovered)
+    best = longs + _uncovered_requirement(after_stock, marks)  # every short treated as uncovered
+    for groups, naked, free in candidates:
+        if groups:
+            best = min(best, sum((q * marks[s] for s, q in free.items()), ZERO) * H
+                       + sum((_group_requirement(g, marks) for g in groups.values()), ZERO)
+                       + _uncovered_requirement(naked, marks))
+    return best
 
 
 def requirement(positions: dict, marks: dict, maintenance: bool = False) -> Decimal:
@@ -208,14 +312,13 @@ def evaluate(account_type: str, cash: Decimal, positions: dict, marks: dict) -> 
         return Evaluation(False, "short selling needs a margin account", eq, ZERO, structural=True)
     secured = ZERO
     for underlying, opts in _books(positions).items():
-        _, groups, naked, _ = _cover(positions.get(underlying, ZERO), opts)
-        for sym, n in naked.items():
+        # Assignment settles in shares, so a long option covers nothing here: a short call
+        # needs the shares to deliver and a short put needs the cash to pay for them.
+        for sym, n in _after_stock(positions.get(underlying, ZERO), opts).items():
             c = parse(sym)
             if c.kind == "C":
                 return Evaluation(False, "uncovered calls need a margin account", eq, ZERO, structural=True)
             secured += n * c.strike * H
-        # A spread is secured by holding its worst possible loss in cash.
-        secured += sum((max(-worst_value(g), ZERO) for g in groups.values()), ZERO)
     secured = cents(secured)
     if cash < secured:
         reason = "insufficient cash" if secured == 0 else "insufficient cash to secure short options"
