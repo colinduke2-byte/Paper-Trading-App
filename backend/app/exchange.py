@@ -306,7 +306,7 @@ class Exchange:
         if not isinstance(req, dict):
             raise OrderRejected("an order must be a JSON object")
         if req.get("legs") is not None:
-            if req.get("lots"):
+            if req.get("lots") is not None:
                 raise OrderRejected("tax lots can be chosen on single closing orders only, not on multi-leg orders")
             return [self._validate_multileg(account, req)]
         if req.get("oco") is not None:
@@ -377,7 +377,7 @@ class Exchange:
         """One order, plus its bracket children when take_profit or stop_loss is given."""
         if linked and any(req.get(k) is not None for k in ("legs", "oco", "triggers")):
             raise OrderRejected("a linked order cannot itself be multi-leg or linked")
-        if linked and req.get("lots"):
+        if linked and req.get("lots") is not None:
             raise OrderRejected(f"tax lots can be chosen on single closing orders only, not on {linked} orders")
         try:
             symbol = str(req.get("symbol", "")).upper().strip()
@@ -451,7 +451,7 @@ class Exchange:
                       client_id=client_id, expire_at=expire_at, good_till=good_till,
                       auction_at=self._next_auction(typ) if auction else None)
         orders = [entry]
-        if req.get("lots"):
+        if req.get("lots") is not None:
             if take_profit is not None or stop_loss is not None:
                 raise OrderRejected("tax lots can be chosen on single closing orders only, not on bracket orders")
             entry.lots = self.validate_lots(account, symbol, side, qty, req["lots"])
@@ -533,8 +533,10 @@ class Exchange:
 
     def validate_lots(self, account: Account, symbol: str, side: str, qty: Decimal, raw) -> list:
         """Check a closing order's chosen lots. Returns the plan stored on the order."""
-        if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw) or not raw:
+        if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
             raise OrderRejected("lots must be a list like [{\"lot_id\": \"L1\", \"qty\": 5}]")
+        if not raw:
+            raise OrderRejected("lots is empty: name at least one lot, or leave lots out to use the account's lot method")
         if len(raw) > MAX_ORDER_LOTS:
             raise OrderRejected(f"an order can name at most {MAX_ORDER_LOTS} lots")
         held = {l.id: l for l in account.lots.get(symbol, ())}
@@ -557,8 +559,9 @@ class Exchange:
             if (lot.qty > 0) == (side == m.BUY):
                 raise OrderRejected(f"lot {lot_id} is a {'long' if lot.qty > 0 else 'short'} lot; "
                                     f"{'sell' if lot.qty > 0 else 'buy'} to close it")
-            if q <= 0 or q != q.quantize(Decimal("0.0001")):
-                raise OrderRejected(f"lot {lot_id}: quantity must be positive with at most 4 decimal places")
+            if q <= 0 or q > MAX_QTY or q != q.quantize(Decimal("0.0001")):
+                raise OrderRejected(f"lot {lot_id}: quantity must be positive, at most 1,000,000, with at most "
+                                    f"4 decimal places")
             free = abs(lot.qty) - reserved.get(lot_id, ZERO)
             if q > free:
                 taken = reserved.get(lot_id, ZERO)

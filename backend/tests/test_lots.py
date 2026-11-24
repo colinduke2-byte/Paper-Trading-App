@@ -763,3 +763,28 @@ def test_wash_sale_analysis_scales_and_is_cached():
     assert wash.analyse(a, rows) is first  # nothing changed: the cached result
     a.apply_fill(fill(99999, "buy", 1, "100", t=t0 + 30000), 1)
     assert wash.analyse(a, closed_lots(a)) is not first  # a new lot: worked out again
+
+
+def test_huge_or_malformed_lot_quantities_are_rejected_not_server_errors():
+    ex, feed, clock, a = exchange_with_lots("100")
+    c = TestClient(create_app(ex, run_loop=False))
+    for q in ("1e30", "1e999", 1e30, "NaN", "Infinity", "-1"):
+        r = c.post(f"/api/accounts/{a}/orders", json={**sell(10), "lots": [{"lot_id": "L1", "qty": q}]})
+        assert r.status_code == 422, (q, r.status_code, r.text)
+        assert "lot L1" in r.json()["detail"]
+
+
+def test_empty_or_wrongly_typed_lots_are_rejected_not_ignored():
+    ex, feed, clock, a = exchange_with_lots("100")
+    for bad, msg in (([], "lots is empty"), (0, "lots must be a list"), ({}, "lots must be a list"),
+                     ("", "lots must be a list"), (False, "lots must be a list"), ([5], "lots must be a list")):
+        with pytest.raises(OrderRejected, match=msg):
+            ex.submit(a, {**sell(5), "lots": bad})
+    with pytest.raises(OrderRejected, match="not on bracket orders"):
+        ex.submit(a, {**sell(5), "lots": [], "take_profit": "200"})
+    with pytest.raises(OrderRejected, match="not on one-cancels-other orders"):
+        ex.submit(a, {"oco": [{**sell(5, type="limit", limit_price="200", tif="gtc"), "lots": []},
+                              sell(5, type="stop", stop_price="50", tif="gtc")]})
+    # null still means "no choice": the account's method closes the lot
+    assert ex.submit(a, {**sell(5), "lots": None})[0].status == "filled"
+    assert [(c["lot_id"], c["qty"], c["lot_method"]) for c in ex.account(a).closed] == [("L1", "5", "fifo")]
