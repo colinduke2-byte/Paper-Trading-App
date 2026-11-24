@@ -13,7 +13,7 @@ from .core import calendar as cal
 from .core import models as m
 from .core.clock import Clock
 from .core.models import Fill, Order, Quote, from_plain, to_plain
-from .core.money import CENT, ZERO, D, cents, parse as parse_num
+from .core.money import CENT, ZERO, D, cents, parse as parse_num, px4
 from .ledger.account import Account, is_long_term
 from .lifecycle.manager import LifecycleManager
 from .marketdata.feed import MarketDataProvider
@@ -1144,20 +1144,61 @@ class Exchange:
                 self._handle(self.engine.on_multileg(o.id, self._leg_quotes(o.legs), now, sess))
 
     # ---- event handling ----------------------------------------------------
+    def _names_lots(self, fill) -> Optional[Order]:
+        order = self.engine.orders.get(fill.order_id)
+        return order if order is not None and order.lots and order.symbol == fill.symbol else None
+
+    def _clip_lot_fill(self, acct: Account, order: Order, fill: Fill) -> list:
+        """Limit a lot order's fill to what its named lots still hold. Returns the lots that fell short.
+
+        The engine has already counted the whole fill on the order; the part the named lots cannot
+        cover is taken off again, so the order never closes a lot it did not name or opens a short.
+        """
+        closing_long = fill.side == m.SELL
+        held = {l.id: abs(l.qty) for l in acct.lots.get(fill.symbol, ()) if (l.qty > 0) == closing_long}
+        can, short = ZERO, []
+        for e in order.lots:
+            want = max(D(e["qty"]) - D(e.get("filled", "0")), ZERO)
+            have = held.get(e["lot_id"], ZERO)
+            can += min(want, have)
+            if want > have:
+                short.append(e["lot_id"])
+        if fill.qty <= can:
+            return []
+        order.filled_qty -= fill.qty - can
+        order.status = m.PARTIAL if order.filled_qty > 0 else m.WORKING
+        fill.qty = can
+        return short or [e["lot_id"] for e in order.lots]
+
     def _handle(self, events: list) -> None:
+        # Within one batch, fills of orders that name lots are booked first, so a plain order filling
+        # in the same step cannot take lots another order named before that order's fill is booked.
+        first = [ev for ev in events if ev[0] == "fill" and self._names_lots(ev[1]) is not None]
+        if first:
+            ids = {id(ev) for ev in first}
+            events = first + [ev for ev in events if id(ev) not in ids]
         for kind, obj in events:
             if kind == "fill":
                 acct = self.accounts.get(obj.account_id)
                 if acct is None:
                     continue
-                obj.fee = self._fee(obj.symbol, obj.qty)
                 order = self.engine.orders.get(obj.order_id)
-                plan = order.lots if order is not None and order.lots and order.symbol == obj.symbol else None
-                acct.apply_fill(obj, multiplier(obj.symbol), plan, self.reserved_lots(acct.id, exclude=obj.order_id))
-                self.lifecycle.on_fill(acct, obj)
-                if order:
-                    order.fees += obj.fee
-                self.events.append({"type": "fill", "account_id": obj.account_id, "fill": obj})
+                lot_order = self._names_lots(obj)
+                cut = self._clip_lot_fill(acct, lot_order, obj) if lot_order is not None else []
+                if obj.qty > 0:
+                    obj.fee = self._fee(obj.symbol, obj.qty)
+                    acct.apply_fill(obj, multiplier(obj.symbol), lot_order.lots if lot_order else None,
+                                    self.reserved_lots(acct.id, exclude=obj.order_id))
+                    self.lifecycle.on_fill(acct, obj)
+                    if order:
+                        order.fees += obj.fee
+                    self.events.append({"type": "fill", "account_id": obj.account_id, "fill": obj})
+                if cut:
+                    booked = [f for f in acct.fills if f.order_id == lot_order.id]
+                    q = sum((f.qty for f in booked), ZERO)
+                    lot_order.avg_fill_price = px4(sum((f.price * f.qty for f in booked), ZERO) / q) if q else None
+                    self._handle(self.engine.cancel(lot_order.id, obj.ts, f"Canceled: lot {', '.join(cut)} named by this "
+                                                                          f"order was closed by another trade"))
                 self._cancel_broken_lot_orders(acct, obj.ts)
             else:
                 self.events.append({"type": "order", "account_id": obj.account_id, "order": obj})

@@ -631,3 +631,89 @@ def test_reservations_of_several_orders_on_one_lot_are_checked_together():
     assert o1.status == "filled" and acc.position("ABC") == 4 and [l.qty for l in acc.lots["ABC"]] == [4]
     assert all(c["lot_method"] == "specific" for c in acc.closed if c["order_id"] == o1.id)
     ledger_ok(acc)
+
+
+def test_in_one_step_lot_orders_book_first_and_never_go_short():
+    # Buy 8 (L1). A plain sell of 6 is entered first, then a sell of 8 naming L1:8; both fill on one quote.
+    # The lot order books first and closes exactly L1; the plain order's 6 is the short sale it asked for.
+    ex, feed, clock, a = exchange_with_lots()
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 8})
+    [plain] = ex.submit(a, sell(6, type="limit", limit_price="150", tif="gtc"))
+    [lot] = ex.submit(a, sell(8, ("L1", 8), type="limit", limit_price="150", tif="gtc"))
+    move(ex, feed, clock, "ABC", "151", bid_size=1000)
+    acc = ex.account(a)
+    assert [(c["lot_id"], c["qty"], c["lot_method"]) for c in acc.closed if c["order_id"] == lot.id] == [("L1", "8", "specific")]
+    assert lot.status == "filled" and plain.status == "filled"
+    [short] = acc.lots["ABC"]
+    assert short.qty == -6 and short.fill_id in {f.id for f in acc.fills if f.order_id == plain.id}
+    ledger_ok(acc)
+
+
+def test_a_lot_order_fill_is_clipped_to_what_its_lots_hold():
+    # If a named lot is smaller at booking time than the order still needs (here shrunk behind the
+    # exchange's back), the fill is cut to what the lot holds and the rest of the order is canceled.
+    ex, feed, clock, a = exchange_with_lots("100")
+    [o] = ex.submit(a, sell(10, ("L1", 10), type="limit", limit_price="150", tif="gtc"))
+    acc = ex.account(a)
+    acc.apply_fill(fill(99, "sell", 3, "100", t=ex.now()), 1)  # L1 down to 7
+    move(ex, feed, clock, "ABC", "151", bid_size=1000)
+    rows = [c for c in acc.closed if c["order_id"] == o.id]
+    assert [(c["lot_id"], c["qty"]) for c in rows] == [("L1", "7")]
+    assert o.status == "canceled" and o.filled_qty == 7 and o.avg_fill_price == D("150.99")
+    assert o.reason == "Canceled: lot L1 named by this order was closed by another trade"
+    assert acc.position("ABC") == 0 and "ABC" not in acc.lots
+    assert sum(f.qty for f in acc.fills if f.order_id == o.id) == 7
+    ledger_ok(acc)
+
+
+@st.composite
+def one_step_script(draw):
+    buys = draw(st.lists(st.integers(1, 10), min_size=1, max_size=4))
+    orders = []
+    for _ in range(draw(st.integers(1, 6))):
+        orders.append((draw(st.integers(0, 2)), draw(st.integers(1, 12)), draw(st.integers(0, 2 ** 8))))
+    return buys, orders, draw(st.integers(1, 40)), draw(st.booleans())
+
+
+@settings(max_examples=150, deadline=None)
+@given(one_step_script(), st.sampled_from(LOT_METHODS))
+def test_lot_orders_filling_in_one_step_never_short_and_never_close_unnamed_lots(script, method):
+    buys, orders, size, shrink = script
+    ex, feed, clock = make_exchange()
+    a = ex.create_account("t", "margin", D("1000000")).id
+    acc = ex.account(a)
+    acc.lot_method = method
+    for q in buys:
+        ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": q})
+    lot_orders = []
+    for kind, qty, seed in orders:
+        req = {"symbol": "ABC", "side": "sell", "qty": qty, "type": "limit", "limit_price": "150", "tif": "gtc"}
+        if kind:  # name lots
+            pick, left = [], D(qty)
+            for i, l in enumerate(acc.lots.get("ABC", [])):
+                free = abs(l.qty) - ex.reserved_lots(a).get(l.id, D(0))
+                if l.qty > 0 and (seed >> i) & 1 and left > 0 and free > 0:
+                    q = min(left, free)
+                    pick.append({"lot_id": l.id, "qty": str(q)})
+                    left -= q
+            if not pick:
+                continue
+            req.update(lots=pick, qty=str(sum(D(p["qty"]) for p in pick)))
+        try:
+            [o] = ex.submit(a, req)
+        except OrderRejected:
+            continue
+        if kind:
+            lot_orders.append(o)
+    if shrink:
+        ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 1})
+    move(ex, feed, clock, "ABC", "151", bid_size=size, ask_size=1000)
+    for o in lot_orders:
+        named = {e["lot_id"] for e in o.lots}
+        rows = [c for c in acc.closed if c["order_id"] == o.id]
+        assert all(c["lot_id"] in named and c["lot_method"] == "specific" for c in rows)
+        filled = sum((f.qty for f in acc.fills if f.order_id == o.id), D(0))
+        assert filled == sum((abs(D(c["qty"])) for c in rows), D(0)) == o.filled_qty  # never opened a lot
+        fill_ids = {f.id for f in acc.fills if f.order_id == o.id}
+        assert not any(l.fill_id in fill_ids for l in acc.lots.get("ABC", []))
+    ledger_ok(acc)
