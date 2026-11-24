@@ -11,12 +11,11 @@
 - Tests: `backend/tests/test_discovery.py` (22 pass), `e2e/tests/discovery.spec.ts` and `discovery.mobile.spec.ts`
   (6 pass on desktop, iPhone 13 and Pixel 7).
 
-## In progress
-- A full backend and e2e run on this commit. The earlier e2e run was invalid: frontend/dist was restored mid-run.
-- Merge origin/main (9 commits ahead; App.tsx and mobile.spec.ts changed there), then open the PR to main.
-
-## Next
-- Rerun everything after the merge, open the PR, report to the lead.
+## State
+- origin/main merged (App.tsx conflict resolved). Backend 419 passed. Full e2e: 86 passed and 2 failed on the first run.
+  The Screener failure was fixed: a Sector picker is back in the screener toolbar. "option chain: buy one call" then passed twice;
+  it looks intermittent and is outside this stream. After the fix: desktop app+discovery 17/17 (twice), phones 44/44.
+- PR to main opened; see the lead message.
 
 ## Known failing
 - tests/test_orders_review.py::test_requirement_is_the_minimum_over_all_valid_pairings (known, fixed elsewhere).

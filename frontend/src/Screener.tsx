@@ -101,12 +101,13 @@ export function Screener({ onSelect, notify }: { onSelect: (s: string) => void; 
   const [lists, setLists] = useState<string[]>([]);
   const [target, setTarget] = useState("");
   const [n, setN] = useState(0);
+  const [sector, setSector] = useState("");
 
   const loadSaved = () => api("/screens").then((j) => setSaved(j.saved)).catch(() => {});
   useEffect(() => { api("/screener/fields").then(setMeta).catch((e) => setError(e.message)); loadSaved(); }, []);
   useEffect(() => { api("/watchlist-sets").then((j) => setLists(j.lists.map((l: any) => l.name))).catch(() => {}); }, []);
 
-  const filters = useMemo(() => toFilters(rows), [rows]);
+  const filters = useMemo(() => [...toFilters(rows), ...(sector ? [{ field: "sector", in: [sector] }] : [])], [rows, sector]);
   const key = JSON.stringify([filters, sort]);
   useEffect(() => {
     let alive = true;
@@ -126,6 +127,7 @@ export function Screener({ onSelect, notify }: { onSelect: (s: string) => void; 
     const s = all.find((x) => x.id === id);
     if (!s) return;
     setRows(fromFilters(s.filters));
+    setSector("");
     if (s.sort) setSort({ key: s.sort, desc: s.desc !== false });
     if (s.columns?.length) setCols(s.columns);
     setSaveName(s.preset ? "" : s.name);
@@ -237,6 +239,10 @@ export function Screener({ onSelect, notify }: { onSelect: (s: string) => void; 
           <option value="">Choose a saved screen…</option>
           <optgroup label="Built in">{presets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>
           {saved.length > 0 && <optgroup label="Saved">{saved.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</optgroup>}
+        </select>
+        <select aria-label="Sector" value={sector} onChange={(e) => setSector(e.target.value)} disabled={unavailable("sector")}>
+          <option value="">{unavailable("sector") ? "Sectors not provided by this feed" : "All sectors"}</option>
+          {(fields.sector?.choices || []).map((x) => <option key={x} value={x}>{x}</option>)}
         </select>
         <input value={saveName} aria-label="Screen name" placeholder="Screen name" maxLength={30} onChange={(e) => setSaveName(e.target.value)} />
         <button className="ghost sm" disabled={!saveName.trim()} onClick={save}>{current && current.name === saveName.trim() ? "Update screen" : "Save screen"}</button>
