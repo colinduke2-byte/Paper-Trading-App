@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, isOption, money, numText, ORDER_TYPES, qty as fmtQty, TIFS, usd } from "./util";
 
-export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; nonce?: number };
+export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; stop_price?: number; nonce?: number };
 
 export function Ticket({ seed, accountId, quote, description, position, onPlaced }: {
   seed: TicketSeed; accountId: string; quote: any; description: string; position: any; onPlaced: (msg: string) => void;
@@ -28,7 +28,7 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
     setQty(seed.qty ? String(seed.qty) : option ? "1" : "");
     setType(seed.type || "market");
     setLimit(seed.limit_price != null ? String(seed.limit_price) : "");
-    setStop(""); setTrail(""); setTp(""); setSl(""); setBracket(false); setExt(false); setTif("day");
+    setStop(seed.stop_price != null ? String(seed.stop_price) : ""); setTrail(""); setTp(""); setSl(""); setBracket(false); setExt(false); setTif("day");
     setPreview(null); setError("");
   }, [seed.symbol, seed.nonce]);
 

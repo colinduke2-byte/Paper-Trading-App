@@ -199,3 +199,20 @@ test("the Replay button starts a replay and Exit returns to live", async ({ page
     await request.post("/api/replay/exit").catch(() => {});
   }
 });
+
+test("the Help button opens the in-app help and Escape closes it", async ({ page, open }) => {
+  await open();
+  await page.getByRole("button", { name: "Help", exact: true }).click();
+  const help = page.getByRole("dialog", { name: "Help" });
+  await expect(help).toBeVisible();
+  await expect(help).toContainText("Getting started");
+  await expect(help).toContainText("Paper trading · no real money");
+  await help.getByText("Order types", { exact: true }).click();
+  await expect(help).toContainText("Trailing stop");
+  await expect(help).toContainText("Fill or kill");
+  await page.keyboard.press("Escape");
+  await expect(help).toHaveCount(0);
+  await page.getByRole("button", { name: "Help", exact: true }).click();
+  await help.getByRole("button", { name: "Close help" }).click();
+  await expect(help).toHaveCount(0);
+});
