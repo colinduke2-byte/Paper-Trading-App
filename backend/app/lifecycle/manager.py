@@ -351,14 +351,7 @@ class LifecycleManager:
                     self.on_fill(a, note["fill"])
                     self.ex.events.append({"type": "fill", "account_id": a.id, "fill": note["fill"]})
                 self._event(a, "split", note["message"])
-        ratio = Decimal(act.old) / Decimal(act.new)
-        for al in self.ex.alerts:
-            if al.get("symbol") == sym and al.get("triggered_at") is None:
-                old = D(al["price"])
-                new = (old * ratio).quantize(FOUR)
-                al["price"] = str(new.normalize() if new != new.to_integral_value() else new.quantize(Decimal(1)))
-                al["note"] = f"Adjusted from {old.normalize():f} for the {act.describe()} on {act.ex_date.isoformat()}"
-                self.ex.dirty = True
+        self.ex.alerting.on_split(act)  # alert levels are split-adjusted (app/alerts/model.py)
 
     # ---- fills -----------------------------------------------------------------------
     def on_fill(self, a, fill: Fill) -> None:

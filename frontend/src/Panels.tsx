@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AlertsTab } from "./AlertsTab";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
 import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, price, qty, signed, STATUS, TIFS, tone, usd } from "./util";
@@ -26,7 +27,7 @@ export function BottomPanel(p: {
         {tab === "Fills" && <Fills {...p} />}
         {tab === "Activity" && <Activity {...p} />}
         {tab === "Reports" && <Reports accountId={p.accountId} refreshKey={p.refreshKey} notify={p.notify} orders={p.orders} />}
-        {tab === "Alerts" && <Alerts {...p} />}
+        {tab === "Alerts" && <AlertsTab {...p} />}
         {tab === "Screener" && <Screener {...p} />}
       </div>
     </section>
@@ -153,39 +154,6 @@ function Activity({ accountId, refreshKey }: any) {
         })}
       </tbody>
     </table>
-  );
-}
-
-function Alerts({ notify, refreshKey }: any) {
-  const [alerts, , reload] = usePoll<any[]>(`/alerts`, 5000, [refreshKey]);
-  const [symbol, setSymbol] = useState("");
-  const [op, setOp] = useState("above");
-  const [price, setPrice] = useState("");
-  const add = async () => {
-    try { await api("/alerts", { method: "POST", body: { symbol, op, price } }); setPrice(""); reload(); }
-    catch (e: any) { notify(`Could not add the alert: ${e.message}`, true); }
-  };
-  return (
-    <>
-      <div className="toolbar">
-        <input value={symbol} placeholder="Symbol" aria-label="Alert symbol" onChange={(e) => setSymbol(e.target.value.toUpperCase())} style={{ width: 130 }} />
-        <select value={op} aria-label="Condition" onChange={(e) => setOp(e.target.value)}><option value="above">rises to</option><option value="below">falls to</option></select>
-        <input value={price} placeholder="Price" aria-label="Alert price" inputMode="decimal" onChange={(e) => setPrice(e.target.value)} style={{ width: 90 }} />
-        <button className="ghost sm" onClick={add} disabled={!symbol || !price}>Add alert</button>
-      </div>
-      {!alerts || alerts.length === 0 ? <p className="muted pad">No price alerts. Add one above; it shows a notice here when the price is reached.</p> : (
-        <table>
-          <thead><tr><th>Symbol</th><th>Condition</th><th>Status</th><th /></tr></thead>
-          <tbody>
-            {alerts.map((a) => (
-              <tr key={a.id}><td><b>{a.symbol}</b></td><td>{a.op === "above" ? "Rises to" : "Falls to"} {a.price}</td>
-                <td>{a.triggered_at ? `Triggered ${dateTime(a.triggered_at)}` : "Waiting"}</td>
-                <td className="num"><button className="ghost sm" onClick={async () => { await api(`/alerts/${a.id}`, { method: "DELETE" }).catch(() => {}); reload(); }}>Remove</button></td></tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </>
   );
 }
 
