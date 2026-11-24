@@ -597,7 +597,7 @@ class LifecycleManager:
                         fallback = (req_after, sym, q, abs(q))
             choice = best or fallback
             if choice is None:
-                pair = self._pair_to_close(pos, marks, maint)
+                pair = self._pair_to_close(pos, marks, eq, maint)
                 if pair is not None:  # a spread or calendar whose legs only help when closed together
                     choice = pair
             if choice is None:
@@ -632,28 +632,47 @@ class LifecycleManager:
                 break
         return steps
 
-    def _pair_to_close(self, pos: dict, marks: dict, maint: Decimal):
-        """A short option and a long option that covers it (same underlying and kind, expiring no earlier),
-        closed together, when closing either leg alone frees nothing. With strategy margin a long option
-        needs its full value, so neither leg of a spread or calendar helps alone. Returns the choice tuple
-        (requirement after, underlying, legs, units) with the lowest requirement after, or None."""
+    def _pair_to_close(self, pos: dict, marks: dict, eq: Decimal, maint: Decimal):
+        """A short option closed together with what covers it, as one all-or-none multi-leg order.
+
+        Used when no single position can be closed: with strategy margin a long option needs its full
+        value, so neither leg of a spread or calendar frees requirement alone, and the shares behind a
+        covered call cannot be sold while the call is open. The cover is a long option of the same
+        kind expiring no earlier, or 100 shares per contract (long for calls, short for puts). Returns
+        (requirement after, underlying, legs, units) for the smallest close that meets the call, else
+        the one leaving the lowest requirement below the current one, or None."""
+        ex = self.ex
+        usable = lambda sym, side: (q := ex.quote(sym)) is not None and (q.ask if side == m.BUY else q.bid) > 0
         best = None
         for s_sym, s_q in pos.items():
             sc = parse(s_sym)
-            if sc is None or s_q >= 0 or (self.ex.quote(s_sym) is None or self.ex.quote(s_sym).ask <= 0):
+            if sc is None or s_q >= 0 or not usable(s_sym, m.BUY):
                 continue
-            for l_sym, l_q in pos.items():
-                lc = parse(l_sym)
-                if (lc is None or l_q <= 0 or lc.underlying != sc.underlying or lc.kind != sc.kind
-                        or lc.expiry < sc.expiry or self.ex.quote(l_sym) is None or self.ex.quote(l_sym).bid <= 0):
+            covers = [(l_sym, l_q, 1) for l_sym, l_q in pos.items()
+                      if (lc := parse(l_sym)) is not None and l_q > 0 and lc.underlying == sc.underlying
+                      and lc.kind == sc.kind and lc.expiry >= sc.expiry]
+            stock = pos.get(sc.underlying, ZERO)
+            if (stock >= 100 and sc.kind == "C") or (stock <= -100 and sc.kind == "P"):
+                covers.append((sc.underlying, stock, 100))
+            for c_sym, c_q, ratio in covers:
+                c_side = m.SELL if c_q > 0 else m.BUY
+                if not usable(c_sym, c_side):
                     continue
-                n = min(-s_q, l_q)
-                after = self._reduced(self._reduced(pos, s_sym, s_q, n), l_sym, l_q, n)
-                req = margin.requirement(after, marks, maintenance=True)
-                if req < maint and (best is None or req < best[0]):
-                    legs = [{"symbol": s_sym, "side": m.BUY, "ratio": 1}, {"symbol": l_sym, "side": m.SELL, "ratio": 1}]
-                    best = (req, sc.underlying, legs, n)
-        return best
+                legs = [{"symbol": s_sym, "side": m.BUY, "ratio": 1}, {"symbol": c_sym, "side": c_side, "ratio": ratio}]
+                top = int(min(-s_q, abs(c_q) // ratio))
+                for n in range(1, top + 1):
+                    after = self._reduced(self._reduced(pos, s_sym, s_q, Decimal(n)), c_sym, c_q, Decimal(n * ratio))
+                    req = margin.requirement(after, marks, maintenance=True)
+                    q_s, q_c = ex.quote(s_sym), ex.quote(c_sym)
+                    c_slip = max((marks[c_sym] - q_c.bid) if c_q > 0 else (q_c.ask - marks[c_sym]), ZERO)
+                    slip = n * (max(q_s.ask - marks[s_sym], ZERO) * 100 + c_slip * ratio * multiplier(c_sym))
+                    meets = eq - slip >= req
+                    if req < maint and (meets or n == top):
+                        cand = (not meets, req, sc.underlying, legs, Decimal(n))
+                        if best is None or cand[:2] < best[:2]:
+                            best = cand
+                        break
+        return best[1:] if best else None
 
     @staticmethod
     def _reduced(pos: dict, sym: str, q: Decimal, qty: Decimal) -> dict:

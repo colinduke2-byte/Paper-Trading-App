@@ -525,3 +525,97 @@ def test_g_state_file_written_by_origin_main_still_loads(tmp_path):
     ledger_ok(ex.account(m))
     ex.save(force=True)
     assert json.loads((tmp_path / "state.json").read_text())["lifecycle"]["applied"]
+
+
+# ---- review-fix interactions (lifecycle 0b6e5ed x orders bf6bba8) ------------------------------------------
+def test_replace_runs_the_checks_from_both_branches():
+    ex, feed, clock = make_exchange(ABC="100.00", XYZ="50.00")
+    m = acct(ex, "margin", "100000")
+    oco = ex.submit(m, {"oco": [{"symbol": "ABC", "side": "buy", "qty": 5, "type": "limit", "limit_price": "80", "tif": "gtc"},
+                                {"symbol": "XYZ", "side": "buy", "qty": 5, "type": "limit", "limit_price": "40", "tif": "gtc"}]})
+    with pytest.raises(OrderRejected, match="one-cancels-other order cannot be raised"):  # orders
+        ex.replace(m, oco[0].id, {"qty": 6})
+    with pytest.raises(ValueError):  # orders: values above 1e9
+        ex.replace(m, oco[0].id, {"limit_price": "2000000000"})
+    # orders: a held triggered child is risk-checked when changed
+    c = acct(ex, "cash", "10000")
+    chain_ = ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": 10, "type": "limit", "limit_price": "80", "tif": "gtc",
+                           "triggers": [{"symbol": "XYZ", "side": "buy", "qty": 10, "type": "limit", "limit_price": "40"}]})
+    assert chain_[1].status == "held"
+    with pytest.raises(OrderRejected, match="insufficient buying power"):
+        ex.replace(c, chain_[1].id, {"qty": 500})
+    assert chain_[1].qty == 10
+    ex.cancel(c, chain_[0].id)
+    # lifecycle: the settled-cash rule runs on replace and rolls the change back
+    ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": 40})
+    ex.submit(c, {"symbol": "ABC", "side": "sell", "qty": 40})  # 3,999.60 unsettled
+    [rest] = ex.submit(c, {"symbol": "XYZ", "side": "buy", "qty": 10, "type": "limit", "limit_price": "40", "tif": "gtc"})
+    with pytest.raises(OrderRejected, match="Cash accounts can only buy with settled cash"):
+        ex.replace(c, rest.id, {"qty": 200})  # 8,000: within total cash, over settled cash
+    assert rest.qty == 10 and rest.status == "working"
+    # lifecycle: the pattern day trader rule runs on replace for an opening order
+    p = acct(ex, "margin", "20000")
+    [opening] = ex.submit(p, {"symbol": "XYZ", "side": "buy", "qty": 1, "type": "limit", "limit_price": "40", "tif": "gtc"})
+    for _ in range(3):
+        round_trip(ex, p)
+    with pytest.raises(OrderRejected, match="Pattern day trader rule"):
+        ex.replace(p, opening.id, {"qty": 2})
+    assert opening.qty == 1
+
+
+def test_cash_account_settled_cash_and_pending_sale_proceeds_do_not_double_count():
+    ex, feed, clock = make_exchange()
+    c = acct(ex, "cash", "10000")
+    ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": 70})
+    ex.submit(c, {"symbol": "ABC", "side": "sell", "qty": 50})  # 4,999.50 unsettled; settled 3,000.00
+    # a resting sale is not money yet (orders' extra cash scenario) and is not unsettled money either
+    [sell] = ex.submit(c, {"symbol": "ABC", "side": "sell", "qty": 20, "type": "limit", "limit_price": "150", "tif": "gtc"})
+    s = ex.summary(c)
+    assert s["settled_cash"] == D("3000.00") and s["unsettled_cash"] == D("4999.50")
+    assert ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": 25})[0].status == "filled"  # 2,500 of settled cash
+    with pytest.raises(OrderRejected, match="Cash accounts can only buy with settled cash"):
+        ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": 10})  # 1,000 > 500 settled left
+    next_day(ex, clock)  # proceeds settle
+    assert ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": 10})[0].status == "filled"
+    assert sell.status == "working"
+
+
+def test_closed_at_expiry_proceeds_settle_t_plus_1():
+    ex, feed, clock = make_exchange()
+    c = acct(ex, "cash", "1000")
+    ex.submit(c, {"symbol": opt("P", 100), "side": "buy", "qty": 1})  # no shares to deliver
+    clock.set(cal.close_ts(NEAR) - 5)
+    move(ex, feed, clock, "ABC", "91", seconds=10)
+    acc = ex.account(c)
+    f = acc.fills[-1]
+    assert f.kind == "closed at expiry" and f.price == D("9")
+    assert acc.life.unsettled[-1][2] == f.id and acc.life.unsettled[-1][1] == D("900")
+    assert ex.summary(c)["settled_cash"] == acc.cash - D("900")
+
+
+def test_liquidation_of_spread_covered_call_and_calendar_never_raises_requirement_or_uncovers():
+    from app.lifecycle.manager import uncovered
+    from app.risk import margin
+    ex, feed, clock = make_exchange()
+    move(ex, feed, clock, "ABC", "100", bid_size=100000, ask_size=100000)
+    a = acct(ex, "margin", "30000")
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 500})  # cash -20,000; the shares all cover calls
+    ex.submit(a, {"symbol": opt("C", 110, FAR), "side": "sell", "qty": 5})  # covered calls
+    ex.submit(a, {"legs": [leg(opt("C", 100, FAR), "buy"), leg(opt("C", 105, FAR), "sell")], "qty": 3})  # spread
+    ex.submit(a, {"legs": [leg(opt("P", 100, FAR), "buy"), leg(opt("P", 100, NEAR), "sell")], "qty": 2})  # calendar
+    acc = ex.account(a)
+    move(ex, feed, clock, "ABC", "45", bid_size=100000, ask_size=100000)
+    s = ex.summary(a)
+    assert s["margin_call"]
+    before = uncovered(acc.positions())
+    steps = ex.lifecycle.liquidate(acc, clock.now())
+    # Selling shares alone would uncover the calls and buying back a call alone frees nothing, so the
+    # first step closes covered calls together with their shares (one all-or-none order).
+    assert steps and steps[0]["side"] == "close"
+    for st_ in steps:
+        assert st_["requirement_after"] <= st_["requirement_before"] and st_["status"] == "filled"
+        assert all(v <= before.get(k, 0) for k, v in uncovered(st_["positions"]).items())
+    pos = acc.positions()
+    marks = ex._marks(pos)
+    assert not pos or margin.equity(acc.cash, pos, marks) >= margin.requirement(pos, marks, maintenance=True)
+    ledger_ok(acc)
