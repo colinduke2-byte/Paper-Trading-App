@@ -183,9 +183,11 @@ export default function App() {
       {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
     </select>
   );
-  const marginNotice = (summary?.margin_call || status?.ui_stale) ? (
+  const unpriced: string[] = summary?.prices_unavailable ?? [];
+  const marginNotice = (summary?.margin_call || status?.ui_stale || unpriced.length > 0) ? (
     <>
       {summary?.margin_call && <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.{summary.liquidation_at ? ` Positions are closed after the grace period, counting only time while the market is open and PaperDesk is running (at about ${dateTime(summary.liquidation_at)} if it keeps running).` : ""}</div>}
+      {unpriced.length > 0 && <div className="notice wide" role="status">Waiting for prices for {unpriced.join(", ")}: until they arrive the account value leaves those positions out, margin checks are paused and orders that add risk are not accepted.</div>}
       {status?.ui_stale && <div className="notice wide" role="status">This page was built from older sources than the ones in frontend/src. Run "npm run build" in the frontend folder and reload to see the current version.</div>}
     </>
   ) : null;
