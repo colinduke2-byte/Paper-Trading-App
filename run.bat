@@ -1,11 +1,10 @@
 @echo off
 setlocal EnableExtensions
 rem Start PaperDesk on http://127.0.0.1:8000 (Python 3.11+ required; Node is not needed).
-rem PORT can be set beforehand. To use PaperDesk from a phone on the same Wi-Fi, set PAPERDESK_LAN=1 and
+rem HOST and PORT can be set in .env or beforehand. To use PaperDesk from a phone on the same Wi-Fi, set PAPERDESK_LAN=1 and
 rem PAPERDESK_PASSCODE (in .env next to this file, or the environment; see README.md).
 rem Set PAPERDESK_NO_BROWSER=1 to skip opening the browser, PAPERDESK_NO_PAUSE=1 to skip the final pause.
 cd /d "%~dp0backend" || goto :fail
-if not defined PORT set "PORT=8000"
 
 set "PY="
 py -3 -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 11) else 1)" >nul 2>&1
@@ -34,14 +33,22 @@ if "%NEED%"=="1" (
   echo done> ".venv\.installed"
 )
 
-rem Check the access settings (also read from .env) and choose the bind address: 127.0.0.1, or 0.0.0.0 in
-rem LAN mode. The check prints the phone addresses and reminders itself (on stderr) and prints only the
-rem bind address on stdout; it prints nothing there when the settings are unsafe.
+rem Check the access settings and choose the bind address and port. HOST, PORT and the access settings come
+rem from the environment or .env (the environment wins); the bind address is 127.0.0.1, or 0.0.0.0 in LAN mode.
+rem The check prints the phone addresses and reminders itself (on stderr) and prints only "<host> <port>" on
+rem stdout, both validated (digits, letters, dots, colons, hyphens), so nothing from .env reaches this parser
+rem unchecked. It prints nothing there when the settings are unsafe.
 if not defined PAPERDESK_ENV_FILE set "PAPERDESK_ENV_FILE=%~dp0.env"
 set "BINDHOST="
-for /f "usebackq delims=" %%h in (`.venv\Scripts\python.exe -m app.api.auth preflight`) do set "BINDHOST=%%h"
+set "BINDPORT="
+for /f "usebackq tokens=1,2" %%h in (`.venv\Scripts\python.exe -m app.api.auth preflight`) do (
+  set "BINDHOST=%%h"
+  set "BINDPORT=%%i"
+)
 if not defined BINDHOST goto :fail
+if not defined BINDPORT goto :fail
 set "HOST=%BINDHOST%"
+set "PORT=%BINDPORT%"
 set "OPENHOST=%HOST%"
 if "%HOST%"=="0.0.0.0" set "OPENHOST=127.0.0.1"
 if "%HOST%"=="::" set "OPENHOST=127.0.0.1"

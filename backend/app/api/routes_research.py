@@ -10,6 +10,7 @@ from fastapi import Query
 
 from ..marketdata.config import wanted_symbols
 from ..marketdata.research import ResearchHub
+from ..core.errors import NotFound
 
 
 def register(app, ctx):
@@ -31,7 +32,7 @@ def register(app, ctx):
     def symbol_of(symbol: str) -> str:
         symbol = symbol.upper().strip()
         if not ctx.ex.is_stock(symbol):
-            raise KeyError(f"unknown symbol {symbol}")
+            raise NotFound(f"unknown symbol {symbol}")
         return symbol
 
     def parse_day(v: Optional[str], name: str) -> Optional[date]:

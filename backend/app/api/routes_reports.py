@@ -13,6 +13,7 @@ from ..analytics.trades import closed_lots, exposure, gains_report, trade_stats
 from ..core.money import model_to_price, parse as parse_num
 from ..ledger.account import LOT_METHODS
 from ..options.symbology import parse as parse_option
+from ..core.errors import NotFound
 
 DEFAULT_BENCHMARK = "MKTX"
 CSV_KINDS = ("fills", "orders", "ledger", "positions", "gains", "journal")
@@ -60,7 +61,7 @@ def register(app, ctx):
             raise ValueError("risk_free is an annual rate written as a fraction, for example 0.04")
         bench = (benchmark or "").upper().strip() or (DEFAULT_BENCHMARK if e.is_stock(DEFAULT_BENCHMARK) else "")
         if bench and not e.is_stock(bench):
-            raise KeyError(f"unknown benchmark symbol {bench}")
+            raise NotFound(f"unknown benchmark symbol {bench}")
         summ = e.summary(aid)
         series = equity_points(a, e.now(), summ["equity"])
         hist = price_history(e, bench) if bench else None
@@ -150,7 +151,7 @@ def register(app, ctx):
         a = e.account(aid)
         kind = kind.removesuffix(".csv")
         if kind not in CSV_KINDS:
-            raise KeyError(f"no export named {kind}; choose one of {', '.join(CSV_KINDS)}")
+            raise NotFound(f"no export named {kind}; choose one of {', '.join(CSV_KINDS)}")
         if kind == "fills":
             body = export.fills_csv(a)
         elif kind == "orders":
@@ -173,10 +174,10 @@ def register(app, ctx):
         if target_type == "order":
             o = e.engine.orders.get(target_id)
             if o is None or o.account_id != a.id:
-                raise KeyError(f"no order {target_id} in this account")
+                raise NotFound(f"no order {target_id} in this account")
         elif target_type == "trade":
             if target_id not in {c["id"] for c in closed_lots(a)}:
-                raise KeyError(f"no closed trade {target_id} in this account")
+                raise NotFound(f"no closed trade {target_id} in this account")
 
     @app.get("/api/accounts/{aid}/journal")
     def list_journal(aid: str, target_type: Optional[str] = None, target_id: Optional[str] = None,

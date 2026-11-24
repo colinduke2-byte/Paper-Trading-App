@@ -42,7 +42,8 @@ account). State is saved in `backend/data/` and survives restarts.
 | `PAPERDESK_ALLOWED_HOSTS` | unset | Extra host names to answer to besides `localhost` (for example `mypc.local`); in LAN mode IP addresses always work |
 | `PAPERDESK_BIND` | `127.0.0.1` | Docker only: where compose publishes the port. `0.0.0.0` is refused without LAN mode |
 
-`.env.example` lists every setting, including reserved names for the market data work.
+`.env.example` lists every setting. Each can go in the environment or in `.env` next to `run.sh` (read first, at
+start-up, by the server and by `run.sh`/`run.bat`; a variable already set in the environment wins).
 
 ### Use it from your phone (LAN mode)
 

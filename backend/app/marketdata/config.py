@@ -16,41 +16,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from ..core import envfile
+
 log = logging.getLogger("paperdesk.config")
 
 LIVE_WATCHLIST = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA"]
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    return envfile.project_root()
 
 
 def load_dotenv(path: Path, environ=None) -> list:
     """Read KEY=VALUE lines into the environment without overriding variables already set.
 
-    Returns the names it set (never the values). Missing file: does nothing.
+    Returns the names it set (never the values). Missing file: does nothing. See app.core.envfile.
     """
-    environ = os.environ if environ is None else environ
-    path = Path(path)
-    if not path.is_file():
-        return []
-    names = []
-    for raw in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        name, value = line.split("=", 1)
-        name, value = name.strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        elif " #" in value:
-            value = value.split(" #", 1)[0].rstrip()
-        if name and name not in environ:
-            environ[name] = value
-            names.append(name)
-    return names
+    return envfile.load_into(path, environ)
 
 
 @dataclass
@@ -82,7 +64,7 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
     """Pick the feed. Never raises for configuration problems: it falls back to synthetic and says why."""
     from .synthetic import SyntheticFeed
     environ = os.environ if environ is None else environ
-    load_dotenv(dotenv if dotenv is not None else project_root() / ".env", environ)
+    load_dotenv(dotenv if dotenv is not None else envfile.env_file_path(environ), environ)
     choice = (environ.get("PAPERDESK_FEED") or "auto").strip().lower()
     key, secret = environ.get("APCA_API_KEY_ID", "").strip(), environ.get("APCA_API_SECRET_KEY", "").strip()
     reason = None
