@@ -53,3 +53,21 @@ test("a lot named by an open order cannot be named again", async ({ page, open, 
   await expect(lots).toContainText("5 named by an open order");
   await expect(lots.getByLabel("Select lot L1")).toBeDisabled();
 });
+
+test("lot quantities add up exactly in the ticket", async ({ page, open, account, request }) => {
+  await threeLots(request, account.id);
+  await open();
+  await bottomTab(page, "Lots").click();
+  const lots = page.getByRole("region", { name: /Lots of MKTX/ });
+  await lots.getByLabel("Select lot L1").check();
+  await lots.getByLabel("Select lot L2").check();
+  await lots.getByRole("button", { name: "Sell selected lots (2)" }).click();
+  const t = ticket(page);
+  await t.getByLabel("Quantity from lot L1").fill("0.1");
+  await t.getByLabel("Quantity from lot L2").fill("0.2");
+  await expect(t.getByLabel("Shares")).toHaveValue("0.3");
+  await t.getByRole("button", { name: /^Review/ }).click();
+  await expect(t.getByRole("button", { name: "Place paper order" })).toBeVisible();
+  await t.getByRole("button", { name: "Place paper order" }).click();
+  await expect(page.getByText(/Filled: sell 0\.3 MKTX/)).toBeVisible();
+});

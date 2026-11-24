@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { usePoll } from "./Market";
 import { api, money, qty, signed, tone, usd } from "./util";
 import "./lots.css";
+import { sameQty, sumQty } from "./lotmath";
 
 // Tax lots. Two pieces:
 // - Lots: the "Lots" tab of the bottom panel. Open lots per position; tick lots and press "Sell selected
@@ -9,7 +10,7 @@ import "./lots.css";
 // - LotChoice: the optional, collapsed "Choose tax lots" section of the order ticket. It sends
 //   lots: [{ lot_id, qty }] with the order; without it the account's lot method chooses.
 
-export type LotChoiceItem = { lot_id: string; qty: number };
+export type LotChoiceItem = { lot_id: string; qty: number | string }; // qty as typed; the server parses it exactly
 
 const METHODS: Record<string, string> = {
   fifo: "first in, first out", lifo: "last in, first out", highest_cost: "highest cost first",
@@ -61,7 +62,7 @@ export function Lots({ accountId, refreshKey, onSell }: { accountId: string; ref
   const sell = (p: any) => {
     const chosen = p.lots.filter((l: any) => picked[l.id] && l.available > 0);
     const lots: LotChoiceItem[] = chosen.map((l: any) => ({ lot_id: l.id, qty: l.available }));
-    const total = lots.reduce((a, x) => a + x.qty, 0);
+    const total = Number(sumQty(lots.map((x) => x.qty)));
     onSell({ symbol: p.symbol, underlying: p.kind === "option" ? p.underlying : undefined, qty: p.qty > 0 ? total : -total, lots });
   };
   return (
@@ -120,15 +121,15 @@ export function LotChoice({ accountId, symbol, side, position, orderQty, value, 
   const pos = data?.positions?.[0];
   const chosen = value || [];
   const get = (id: string) => chosen.find((c) => c.lot_id === id);
-  const set = (id: string, q: number | null) => {
+  const set = (id: string, q: number | string | null) => {
     const rest = chosen.filter((c) => c.lot_id !== id);
     const next = q == null ? rest : [...rest, { lot_id: id, qty: q }];
     const order = (pos?.lots || []).map((l: any) => l.id);
     next.sort((a, b) => order.indexOf(a.lot_id) - order.indexOf(b.lot_id));
     onChange(next.length ? next : null);
   };
-  const total = chosen.reduce((a, c) => a + (Number(c.qty) || 0), 0);
-  const mismatch = chosen.length > 0 && Number(orderQty) !== total;
+  const total = sumQty(chosen.map((c) => c.qty));
+  const mismatch = chosen.length > 0 && !sameQty(orderQty, total);
   const est: Record<string, any> = {};
   for (const r of preview?.lots || []) est[r.lot_id] = r;
   return (
@@ -150,14 +151,14 @@ export function LotChoice({ accountId, symbol, side, position, orderQty, value, 
             {c && (
               <label className="lot-qty">Quantity from {l.id}
                 <input inputMode="decimal" value={String(c.qty)} aria-label={`Quantity from lot ${l.id}`}
-                  onChange={(e) => set(l.id, e.target.value === "" ? 0 : Number(e.target.value))} />
+                  onChange={(e) => set(l.id, e.target.value)} />
               </label>
             )}
             {c && est[l.id] && <span className="muted">Estimated gain {signed(est[l.id].estimated_gain)} ({est[l.id].term}-term)</span>}
           </div>
         );
       })}
-      {mismatch && <div className="notice warn">The chosen lots add up to {qty(total)}; the order is for {orderQty || 0}. Make them match.</div>}
+      {mismatch && <div className="notice warn">The chosen lots add up to {qty(Number(total))}; the order is for {orderQty || 0}. Make them match.</div>}
       {chosen.length > 0 && <button className="ghost sm" onClick={() => onChange(null)}>Use the account's method instead</button>}
     </details>
   );

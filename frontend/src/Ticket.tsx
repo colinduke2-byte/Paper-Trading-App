@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, isOption, money, ORDER_TYPES, qty as fmtQty, TIFS, usd } from "./util";
 import { LotChoice, LotChoiceItem } from "./Lots";
+import { sumQty } from "./lotmath";
 
 export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; stop_price?: number; nonce?: number; lots?: LotChoiceItem[] };
 
@@ -101,7 +102,7 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
         <input inputMode="decimal" value={qty} placeholder="0" onChange={(e) => edit(() => setQty(e.target.value))} />
       </label>
       {position && <LotChoice accountId={accountId} symbol={seed.symbol} side={side} position={position} orderQty={qty} value={lots} preview={preview}
-        onChange={(v) => edit(() => { setLots(v); if (v) setQty(String(v.reduce((a, x) => a + (Number(x.qty) || 0), 0))); })} />}
+        onChange={(v) => edit(() => { setLots(v); if (v) setQty(sumQty(v.map((x) => x.qty))); })} />}
       <label>Order type
         <select value={type} onChange={(e) => edit(() => { setType(e.target.value); if (e.target.value !== "market" && e.target.value !== "limit" && (tif === "ioc" || tif === "fok")) setTif("day"); })}>
           {Object.entries(ORDER_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
