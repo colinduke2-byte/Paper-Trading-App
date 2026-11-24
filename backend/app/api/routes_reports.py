@@ -8,7 +8,8 @@ from fastapi.responses import HTMLResponse, Response
 from ..analytics import export, journal
 from ..analytics.common import equity_points, external_flows, iso, month_bounds, months_between, parse_month
 from ..analytics.returns import price_at, report as returns_report
-from ..analytics.statement import monthly_statement, statement_html
+from ..analytics.statement import monthly_statement, positions_at, statement_html
+from ..lifecycle.actions import CorporateAction
 from ..analytics.trades import closed_lots, exposure, gains_report, trade_stats
 from ..core.money import model_to_price, parse as parse_num
 from ..ledger.account import LOT_METHODS
@@ -117,11 +118,9 @@ def register(app, ctx):
         start, end = month_bounds(year, mon)
         now = e.now()
         current = end > now
+        splits = {k: CorporateAction.from_plain(r) for k, r in e.lifecycle.split_records.items()}
         marks = {}
-        for f in a.fills:
-            sym = f.symbol
-            if sym in marks or f.ts >= end:
-                continue
+        for sym in positions_at(a, end, splits):
             if current:
                 marks[sym] = e.price(sym)
             elif parse_option(sym) is None and e.is_stock(sym):
@@ -129,7 +128,7 @@ def register(app, ctx):
         marks = {s: p for s, p in marks.items() if p is not None}
         summ = e.summary(aid) if current else None
         live = summ["equity"] if current and not summ["prices_unavailable"] else None
-        return monthly_statement(a, year, mon, now, live, marks)
+        return monthly_statement(a, year, mon, now, live, marks, splits)
 
     @app.get("/api/accounts/{aid}/statements")
     def statements(aid: str):
