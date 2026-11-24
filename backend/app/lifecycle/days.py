@@ -15,9 +15,7 @@ class Days:
         self.mode = mode
 
     def today(self, ts: float) -> date:
-        if self.mode == "us":
-            return cal.ny_date(ts)
-        return date(1970, 1, 1) + timedelta(days=int(ts // 86400))
+        return cal.trading_day(ts, "us" if self.mode == "us" else "always")
 
     def is_business_day(self, d: date) -> bool:
         return True if self.mode != "us" else cal.is_trading_day(d)

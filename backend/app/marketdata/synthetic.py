@@ -71,7 +71,7 @@ class SyntheticFeed(MarketDataProvider):
 
     # ---- history -------------------------------------------------------
     def _generate_history(self, now: float, days: int) -> None:
-        today = cal.ny_date(now)
+        today = self._trading_day(now)
         dates = []
         d = today - timedelta(days=1)
         while len(dates) < days:
@@ -100,7 +100,7 @@ class SyntheticFeed(MarketDataProvider):
             self.store.daily[sym] = rows
             prev_close = cents(Decimal(repr(round(price, 2))))
             # Intraday minutes for today so charts are not empty at start-up.
-            midnight = int(now // 86400) * 86400
+            midnight = int(cal.trading_day_start(today, self._mode))
             minute_sigma = vol * math.sqrt(60 / self.year_seconds)
             p = price * math.exp(daily_sigma * 0.3 * rng.gauss(0, 1))
             day_open = p
@@ -116,11 +116,15 @@ class SyntheticFeed(MarketDataProvider):
             self.quotes[sym] = self._make_quote(sym, last, now, prev_close, cents(Decimal(repr(round(day_open, 2)))),
                                                 cents(Decimal(repr(round(hi, 2)))), cents(Decimal(repr(round(lo, 2)))),
                                                 Decimal(vol_sum), trade=False)
-            self._day[sym] = self._utc_date(now)
+            self._day[sym] = self._trading_day(now)
 
-    @staticmethod
-    def _utc_date(ts: float) -> date:
-        return date(1970, 1, 1) + timedelta(seconds=int(ts // 86400) * 86400)
+    @property
+    def _mode(self) -> str:
+        return "always" if self.always_open else "us"
+
+    def _trading_day(self, ts: float) -> date:
+        """The day the daily bar and previous close belong to (core.calendar.trading_day)."""
+        return cal.trading_day(ts, self._mode)
 
     def _make_quote(self, sym, last, now, prev_close, open_, high, low, volume, trade, last_size=ZERO) -> Quote:
         half = max(CENT, cents(last * Decimal("0.00015") * self.rng.randint(1, 3)))
@@ -142,7 +146,7 @@ class SyntheticFeed(MarketDataProvider):
         if not self.always_open and cal.session(now) == "closed":
             return []
         out = []
-        today = self._utc_date(now)
+        today = self._trading_day(now)
         market = self.rng.gauss(0, 1)
         for sym, info in self.info.items():
             prev = self.quotes[sym]

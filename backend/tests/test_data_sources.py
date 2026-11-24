@@ -91,9 +91,10 @@ def test_manual_check_without_keys_prints_fail_and_no_secrets(monkeypatch, capsy
     from app.marketdata import alpaca
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
-    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
+    monkeypatch.setenv("PAPERDESK_ENV_FILE", str(tmp_path / "none"))
     assert alpaca._check() == 1
-    assert capsys.readouterr().out.startswith("FAIL keys:")
+    out = capsys.readouterr().out
+    assert out.startswith("FAIL keys:") and out.splitlines()[-1] == "SUMMARY: 0 of 1 checks passed"
 
 
 # ---- research parsing ------------------------------------------------------------------------------

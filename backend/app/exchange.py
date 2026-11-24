@@ -1128,7 +1128,9 @@ class Exchange:
         return quotes
 
     def _roll_sessions(self, now: float, sess: str) -> None:
-        day = int(now // 86400)
+        # Day P&L restarts with the trading day: the New York date in "us" mode, the UTC day in "always"
+        # mode (where day orders also expire at that boundary, the next on-open/on-close auction time).
+        day = (cal.trading_day(now, "us" if self.session_mode == "us" else "always") - cal.EPOCH).days
         if self._last_day is not None and day != self._last_day:
             for a in self.accounts.values():
                 a.day_start_equity = self.summary(a.id)["equity"]
