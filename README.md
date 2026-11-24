@@ -148,7 +148,17 @@ requests reach the container through Docker's network rather than from `127.0.0.
 - **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO,
   LIFO or highest-cost matching, realised gains report with holding period and
   wash-sale flag, monthly statements, CSV export, trade journal, performance analytics
-  (Reports tab), price alerts.
+  (Reports tab).
+- **Alerts and notifications:** alerts on price, percent change, volume, indicators (moving-average
+  crosses, RSI, MACD on any bar size), option implied volatility and delta, position and account
+  gain/loss, account value, buying power and margin excess, reminders, and dividend or split dates of
+  symbols you hold; one-shot or re-arming with a cool-down, optional expiry and note (Alerts tab,
+  New alert). A bell lists every alert and system event (fills, canceled and expired orders, margin
+  calls, liquidation, dividends, splits, option exercise and expiry, data feed problems) with read
+  and unread state; it is kept per account and survives restarts. Browser notifications and a sound
+  are optional and asked for with a click. Browsers allow notifications only over HTTPS or on the
+  computer itself, so on a phone in LAN mode (plain HTTP) they stay inside the app. Earnings dates
+  are not available from the data feed, so there is no earnings alert.
 - **Historical replay:** replay a recorded or bundled session in a sandbox account with a
   simulated clock (`docs/REPLAY.md`); live state is never touched.
 
