@@ -10,7 +10,7 @@ const MARGIN_ONLY = new Set([
 const CASH_ONLY = new Set(["settled_cash_only"]);
 // A number setting belongs to the toggle above it; it is disabled while that rule is off.
 const S = {
-  modal: { width: 520, maxHeight: "90vh", overflowY: "auto" as const },
+  modal: { width: 520, maxWidth: "calc(100vw - 24px)", maxHeight: "90vh", overflowY: "auto" as const },
   stats: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 },
   stat: { display: "flex", flexDirection: "column" as const, fontSize: 11 },
   list: { display: "flex", flexDirection: "column" as const, gap: 10 },

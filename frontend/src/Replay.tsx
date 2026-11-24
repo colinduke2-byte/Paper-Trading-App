@@ -34,7 +34,9 @@ export function jumpKey(status: any): string {
 /** Calls onSwitch after the app moves between live and replay (not on the first status). */
 export function useModeSwitch(status: any, onSwitch: () => void) {
   const key = modeKey(status);
-  const prev = useRef("");
+  // Start from "live": if a replay starts (or is already running) before the first status arrives,
+  // the switch is still seen and the accounts are reloaded.
+  const prev = useRef("live");
   const cb = useRef(onSwitch);
   cb.current = onSwitch;
   useEffect(() => {

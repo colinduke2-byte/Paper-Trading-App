@@ -157,19 +157,45 @@ test("every bottom tab renders", async ({ page, open }) => {
 });
 
 test("no horizontal overflow at 420 px width", async ({ page, open }) => {
+  // Below 900 px the phone layout takes over: one view at a time with a tab bar at the bottom.
   await page.setViewportSize({ width: 420, height: 900 });
   await open();
   await expect(page.getByRole("note")).toBeVisible();
   const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  const nav = (name: string) => page.getByRole("navigation", { name: "Views" }).getByRole("button", { name, exact: true });
   expect(await overflow(), "overflow on load").toBeLessThanOrEqual(0);
-  // dispatchEvent: at this width the chart currently overlaps the bottom tabs (see mobile.spec.ts), so a real click is blocked.
+  await nav("Account").click();
   for (const tab of [/^Positions/, /^Orders/, "Fills", "Activity", "Reports", "Alerts", "Screener"]) {
-    await bottomTab(page, tab).dispatchEvent("click");
+    await bottomTab(page, tab).click();
     await expect(bottomTab(page, tab)).toHaveAttribute("aria-selected", "true");
     expect(await overflow(), `horizontal overflow on tab ${tab}`).toBeLessThanOrEqual(0);
   }
+  await nav("Chart").click();
   for (const view of ["Options", "Company", "Research", "Chart"]) {
     await page.getByRole("tab", { name: view }).click();
+    await expect(page.getByRole("tab", { name: view })).toHaveAttribute("aria-selected", "true");
     expect(await overflow(), `horizontal overflow on view ${view}`).toBeLessThanOrEqual(0);
+  }
+  for (const view of ["Watchlist", "Trade"]) {
+    await nav(view).click();
+    expect(await overflow(), `horizontal overflow on view ${view}`).toBeLessThanOrEqual(0);
+  }
+});
+
+test("the Replay button starts a replay and Exit returns to live", async ({ page, open, request }) => {
+  await open();
+  try {
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "Replay a trading session" });
+    await picker.getByRole("button", { name: /^Start with/ }).click();
+    await expect(page.getByRole("note")).toContainText("Replay of");
+    const bar = page.getByRole("region", { name: "Replay controls" });
+    await bar.getByRole("button", { name: "+1 min" }).click();
+    await bar.getByRole("button", { name: "Exit replay" }).click();
+    await expect(bar).toHaveCount(0);
+    await expect(page.getByRole("note")).toContainText("Paper trading · no real money");
+    await expect(page.getByRole("button", { name: "Replay", exact: true })).toBeVisible();
+  } finally {
+    await request.post("/api/replay/exit").catch(() => {});
   }
 });

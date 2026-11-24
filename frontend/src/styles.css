@@ -114,10 +114,11 @@ label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--t
 .modal h3 { padding: 0; font-size: 14px; text-transform: none; letter-spacing: 0; color: var(--text); } .modal p { margin: 0; }
 .fatal { max-width: 520px; margin: 15vh auto; padding: 16px; }
 
+/* Narrow desktop windows (the phone layout in mobile.css takes over below 900 px). */
 @media (max-width: 1100px) {
   html, body, #root, .app { height: auto; }
-  main { grid-template-columns: minmax(0, 1fr); }
-  .watch { max-height: 260px; } .main-view { flex: none; min-height: 0; } .chart { flex: none; height: 300px; } .bottom { min-height: 320px; max-height: 480px; }
-  .right-col { overflow: visible; } .qh-grid { margin-left: 0; grid-template-columns: repeat(2, auto); }
-  .top-right { margin-left: 0; flex-wrap: wrap; }
+  .app main { grid-template-columns: minmax(0, 1fr); }
+  .app .watch { max-height: 260px; } .app .main-view { min-height: 480px; } .app .bottom { min-height: 320px; max-height: 480px; }
+  .app .right-col { overflow: visible; } .app .qh-grid { margin-left: 0; grid-template-columns: repeat(2, auto); }
+  .app .top-right { margin-left: 0; flex-wrap: wrap; }
 }
