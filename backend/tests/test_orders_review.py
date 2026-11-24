@@ -420,8 +420,22 @@ def test_large_books_fall_back_to_greedy_pairing_and_stay_sound():
     got = margin.requirement(pos, marks)
     loss = sum((n * marks[s] for s, n in pos.items()), D(0)) * 100 - min(value_at(pos, D(p)) for p in range(0, 301, 5))
     assert min(loss, legacy_requirement(pos, marks)) <= got <= legacy_requirement(pos, marks)
-    # a 10-lot butterfly is searched as a 1-lot one
-    assert margin._pairing_count({C100: D(20)}, {C95: D(10), C105: D(10)}) == 4
+
+
+def test_pairing_is_searched_per_contract_not_per_lot():
+    """Review follow-up: dividing out the lot size missed half-and-half splits of a short."""
+    p110 = opt("P", 110)
+    pos = {P90: D(2), P100: D(-2), p110: D(2)}
+    marks = {P90: D("0.02"), P100: D("0.02"), p110: D("0.01"), "ABC": D("100")}
+    # one short against the 110 put (no strike risk) and one against the 90 put (10.00 wide) are valued
+    # together: below 100 the 110 put gains what the 90 put spread loses. Net value 1.00, one unused
+    # 90 put and one unused 110 put paid in full: 3.00. Either whole-lot pairing costs 4.00 or more.
+    assert margin.requirement(pos, marks) == D("3.00")
+    assert margin.requirement({s: n * 5 for s, n in pos.items()}, marks) == D("15.00")  # scales with the lot
+    # books too large for a per-contract search are searched in blocks, and stay a valid upper bound
+    big = {s: n * 60 for s, n in pos.items()}
+    assert margin._pairing_count({P100: D(120)}, {P90: D(120), p110: D(120)}) > margin._MAX_EXACT
+    assert D("180.00") <= margin.requirement(big, marks) <= D("240.00")
 
 
 def model_mark(symbol, spot):

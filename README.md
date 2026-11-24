@@ -1,12 +1,26 @@
 # PaperDesk
 
-A paper trading platform: practise trading stocks and options with simulated money.
-This is a first working build. It runs entirely on your own machine and needs no
-account, API key or internet connection.
+A paper trading simulator: practise trading stocks and options with pretend money. It runs on your own
+computer, in your browser (and a phone browser on the same Wi-Fi), and needs no account, API key or
+internet connection to start.
 
-**All market data in this build is simulated.** The companies are fictional and their
-prices follow a random walk. Option prices come from a pricing model. Nothing here is
-real market data or investment advice.
+PaperDesk **never sends an order to a broker**. By default **all market data is simulated**: the companies
+are fictional and their prices follow a random walk; option prices come from a pricing model. With a free
+Alpaca key it can show real stock and option quotes (see below), and orders are still only simulated.
+Nothing here is investment advice.
+
+## Documentation
+
+| Read | For |
+|---|---|
+| [docs/QUICK_START.md](docs/QUICK_START.md) | One page: from nothing to a first paper trade on Windows, then phone access |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | The full guide: install, the screen, orders, how fills work, accounts and margin, options, reports, replay, phone access, real data, troubleshooting, glossary |
+| [docs/KNOWN_LIMITS.md](docs/KNOWN_LIMITS.md) | What is simulated, approximate, untested or not built |
+| [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) | Alpaca and Finnhub: facts, setup, how the adapter works |
+| [docs/REPLAY.md](docs/REPLAY.md) | Historical replay and the session file format |
+| [docs/PLAN.md](docs/PLAN.md) | The original plan (not a description of what exists) |
+
+The app also has a **Help** button with the essentials, for use offline.
 
 ## Run it
 
@@ -21,8 +35,8 @@ server answers; the Windows path is checked by CI but has not been tried by hand
 http://127.0.0.1:8000. The first start creates a virtual environment and installs from
 `backend/pyproject.toml`; later starts reuse it until `pyproject.toml` changes.
 
-The first start creates two accounts (a 100,000 margin account and a 25,000 cash
-account). State is saved in `backend/data/` and survives restarts.
+The first start creates two accounts (a 100,000 margin account and a 25,000 cash account). State is saved in
+`backend/data/` and survives restarts.
 
 > **By default there is no login.** Anyone who can reach the port can trade and delete your paper accounts,
 > so PaperDesk listens on `127.0.0.1` only. To use it from your phone, turn on LAN mode (below), which adds a
@@ -30,10 +44,10 @@ account). State is saved in `backend/data/` and survives restarts.
 
 | Setting (environment variable) | Default | Meaning |
 |---|---|---|
-| `PAPERDESK_SESSIONS` | `always` | `always`: the simulated market never closes. `us`: follow US market hours and holidays |
-| `PAPERDESK_DATA` | `backend/data` | Where state is saved |
-| `PAPERDESK_SEED` | `7` | Seed for the simulated price history |
-| `PORT` | `8000` | Port (`run.sh`, `run.bat`, Docker) |
+| `PAPERDESK_SESSIONS` | `always` (`us` with real data) | `always`: the simulated market never closes. `us`: follow US market hours and holidays |
+| `PAPERDESK_DATA` | `backend/data` | Where state is saved. Set it in the environment: the server ignores it in `.env` |
+| `PAPERDESK_SEED` | `7` | Seed for the simulated price history. Set it in the environment, not `.env` |
+| `PORT` | `8000` | Port (`run.sh`, `run.bat`, Docker). In `.env` it is read by Docker only |
 | `HOST` | `127.0.0.1` | Bind address (`run.sh`, `run.bat`; `0.0.0.0` in LAN mode). A network address is refused without LAN mode. Only the Docker image sets `0.0.0.0`, inside the container |
 | `PAPERDESK_LAN` | `0` | `1`: let devices on your network connect (needs `PAPERDESK_PASSCODE`). See LAN mode |
 | `PAPERDESK_PASSCODE` | unset | Passcode, at least 8 characters. When set, browsers must sign in |
@@ -41,63 +55,49 @@ account). State is saved in `backend/data/` and survives restarts.
 | `PAPERDESK_LOOPBACK_BYPASS` | `1` | `1`: browsers on this computer skip the passcode. `0`: everyone signs in |
 | `PAPERDESK_ALLOWED_HOSTS` | unset | Extra host names to answer to besides `localhost` (for example `mypc.local`); in LAN mode IP addresses always work |
 | `PAPERDESK_BIND` | `127.0.0.1` | Docker only: where compose publishes the port. `0.0.0.0` is refused without LAN mode |
+| `PAPERDESK_FEED`, `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `FINNHUB_API_KEY`, ... | unset | Real market data: see [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) |
 
-`.env.example` lists every setting, including reserved names for the market data work.
+`.env.example` lists every setting.
 
 ### Use it from your phone (LAN mode)
 
-LAN mode is off by default. To turn it on, copy `.env.example` to `.env` (next to `run.sh`) and set:
+Step-by-step instructions for Windows are in [docs/USER_GUIDE.md](docs/USER_GUIDE.md) (section 12) and
+[docs/QUICK_START.md](docs/QUICK_START.md). In short: copy `.env.example` to `.env` (next to `run.sh`), set
 
 ```bash
 PAPERDESK_LAN=1
 PAPERDESK_PASSCODE='a long passcode you use nowhere else'
 ```
 
-(or set the same variables in the environment). Then start `run.sh` or `run.bat` as usual. PaperDesk now
-listens on all network interfaces and prints the address to open on your phone, such as
-`http://192.168.1.20:8000`. The phone must be on the same Wi-Fi network as the computer. On Windows the
-firewall may ask whether to allow Python: allow it on **Private networks only**, never Public. If the phone
-cannot connect, check that Windows calls your Wi-Fi a private network.
+and start `run.sh` or `run.bat`. PaperDesk listens on all network interfaces and prints the address to open on
+the phone, such as `http://192.168.1.20:8000`. The phone must be on the same Wi-Fi. On Windows, allow Python
+through the firewall on **Private networks only**.
 
-The phone shows a sign-in screen; after the passcode it stays signed in for 30 days of no use
-(`PAPERDESK_SESSION_DAYS`). Use "Sign out" in the top bar to end the session on that device. Browsers on the
-computer itself skip the passcode unless `PAPERDESK_LOOPBACK_BYPASS=0`. Sign-ins survive a restart: only a
-SHA-256 digest of each session token is stored, in `sessions.json` in the data directory (owner-only file
-permissions on Linux and macOS). Changing the passcode signs every device out; deleting `sessions.json` does
-too. Without LAN mode or a passcode the program behaves as before: `127.0.0.1` only, no login.
+**What this protects, honestly.** LAN mode uses plain HTTP, not HTTPS: anyone on the same network could watch
+the traffic, including the passcode and the session cookie. Use it only on your own home network, never on
+public or shared Wi-Fi, and do not reuse the passcode. HTTPS with a self-signed certificate is not included.
+Passcodes that are the example text, a common word or number sequence, or have fewer than 4 different
+characters are refused at start-up.
 
-**Be honest with yourself about what this protects.** LAN mode uses plain HTTP, not HTTPS: anyone on the same
-network could watch the traffic, including the passcode as you type it and the session cookie, and could then
-use your session. Use it only on your own home network, never on public or shared Wi-Fi (cafes, hotels,
-offices, student housing). It is paper money, but do not reuse the passcode anywhere else. HTTPS with a
-self-signed certificate is not included: phones show alarming warnings for such certificates and they are
-hard to set up well, so it was left out rather than done badly.
+Mechanics, for developers and reviewers:
 
-Passcodes that are the example text from `.env.example`, a common word or number sequence, or have fewer than
-4 different characters are refused at start-up.
-
-Trade-offs to know about:
-
-- If the sign-in screen says there were too many wrong passcodes and it was not you, someone on your network
-  may be guessing. Restarting PaperDesk clears the counters; then change the passcode.
-- Under Docker Desktop (and other setups where Docker forwards the port) every device reaches the container
-  from the same address, so they share one counter: wrong guesses on one device slow down the others.
-- Browsers do not separate cookies by port, so the session cookie is also sent to any other web app on the
-  same address (for example another program on `http://192.168.1.20:3000`). Do not run untrusted web apps on
-  the same computer while LAN mode is on.
-
-What else is in place: wrong passcodes are slowed down per device (after three tries, 1, 2, 4 ... seconds, up
-to 15 minutes) and all sign-ins pause for a while after 30 failures in 15 minutes; failed attempts are logged
-with the device address, never with what was typed. The passcode and session tokens are never logged. The
-session cookie is `HttpOnly` and `SameSite=Strict`; requests that change anything, and the live stream, are
-refused when they come from another website; the server only answers to `localhost`, `127.0.0.1`, IP
-addresses (LAN mode) and `PAPERDESK_ALLOWED_HOSTS`, which blocks DNS rebinding attacks; and responses carry
-a Content-Security-Policy and related headers. A reverse proxy in front of PaperDesk is not supported in this
-build: the server ignores `X-Forwarded-For` (uvicorn runs with `--no-proxy-headers`) and never lets a request
-that carries proxy headers skip the passcode. If you use one anyway, set `PAPERDESK_LOOPBACK_BYPASS=0`.
-
-Server-rendered pages cannot use inline scripts under the Content-Security-Policy. A print button is written
-as `<button type="button" data-print>Print</button><script src="/print.js"></script>`.
+- Sign-ins last `PAPERDESK_SESSION_DAYS` days without use and survive a restart: only a SHA-256 digest of each
+  session token is stored, in `sessions.json` in the data directory (owner-only permissions on Linux and
+  macOS). Changing the passcode, or deleting `sessions.json`, signs every device out.
+- Wrong passcodes are slowed per device (after three tries, 1, 2, 4 ... seconds, up to 15 minutes) and all
+  sign-ins pause after 30 failures in 15 minutes; restarting clears the counters. Failed attempts are logged
+  with the device address, never with what was typed. The passcode and session tokens are never logged.
+- The session cookie is `HttpOnly` and `SameSite=Strict`; requests that change anything, and the live stream,
+  are refused when they come from another website; the server only answers to `localhost`, `127.0.0.1`, IP
+  addresses (LAN mode) and `PAPERDESK_ALLOWED_HOSTS`, which blocks DNS rebinding; responses carry a
+  Content-Security-Policy and related headers.
+- A reverse proxy in front of PaperDesk is not supported: the server ignores `X-Forwarded-For` (uvicorn runs
+  with `--no-proxy-headers`) and never lets a request that carries proxy headers skip the passcode. If you use
+  one anyway, set `PAPERDESK_LOOPBACK_BYPASS=0`.
+- Browsers do not separate cookies by port, so the session cookie also reaches other web apps on the same
+  address. Under Docker Desktop all devices share one wrong-passcode counter.
+- Server-rendered pages cannot use inline scripts under the Content-Security-Policy. A print button is written
+  as `<button type="button" data-print>Print</button><script src="/print.js"></script>`.
 
 ### Docker
 
@@ -106,60 +106,58 @@ cp .env.example .env     # optional
 docker compose up --build
 ```
 
-Then open http://127.0.0.1:8000. State lives in the named volume `paperdesk-data`
-(`docker compose down -v` deletes it). The compose file publishes the port on `127.0.0.1` only, which is
-what keeps the unauthenticated app private; do not edit that line. CI builds the image and checks that it
-starts and answers.
-
-LAN mode in Docker: put `PAPERDESK_LAN=1`, `PAPERDESK_PASSCODE='...'` and `PAPERDESK_BIND=0.0.0.0` in `.env`,
-then `docker compose up --build`. Compose then publishes the port on all interfaces of the computer; the
-server refuses to start if `PAPERDESK_BIND` points at the network without LAN mode and a passcode. Open
-`http://<this computer's address>:8000` on the phone (find the address with `ipconfig` on Windows or
-`ip addr` on Linux). In Docker every browser has to sign in, including the one on the computer, because
-requests reach the container through Docker's network rather than from `127.0.0.1` (compose sets
-`PAPERDESK_LOOPBACK_BYPASS=0` for this reason).
+Then open http://127.0.0.1:8000. State lives in the named volume `paperdesk-data` (`docker compose down -v`
+deletes it). The compose file publishes the port on `127.0.0.1` only, which is what keeps the unauthenticated app
+private; do not edit that line. LAN mode in Docker: put `PAPERDESK_LAN=1`, `PAPERDESK_PASSCODE='...'` and
+`PAPERDESK_BIND=0.0.0.0` in `.env`; the server refuses to start if `PAPERDESK_BIND` points at the network without
+LAN mode and a passcode. In Docker every browser has to sign in, including the one on the computer (compose sets
+`PAPERDESK_LOOPBACK_BYPASS=0`).
 
 ## What works
 
-- **Market data:** simulated prices for fictional companies by default. With Alpaca keys the app
-  uses real stock and option quotes (IEX real time on the free plan), with Finnhub optional for
-  earnings and fundamentals; it falls back to simulated prices and says why. Setup:
-  `docs/DATA_PROVIDERS.md`. Every quote is labelled with its source; option prices without provider
-  data are model prices.
-- **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute
-  to weekly) with SMA, EMA, Bollinger bands, VWAP and RSI, depth ladder, time and sales,
-  company facts, screener, and a Research tab (news, earnings and dividend calendar,
-  corporate actions, fundamentals; real data needs a provider).
-- **Orders:** market, limit, stop, stop-limit and trailing stop; market and limit on open
-  and on close; day, good-till-canceled, good-till-date, immediate-or-cancel and
-  fill-or-kill; brackets, one-cancels-other groups and one-triggers-other chains; order
-  preview, change and cancel; fractional shares.
-- **Options:** chains with weekly and monthly expiries, implied volatility and greeks,
-  single-leg trades and multi-leg orders (two to four legs, all-or-none at a net price)
-  with payoff preview and strategy-aware margin for spreads, condors, butterflies and
-  calendars; automatic exercise and assignment at expiry.
-- **Accounts:** cash and margin accounts, several at once, reset; Reg T style margin and
-  buying power, short selling. Per-account settings (Settings button) for dividend
-  reinvestment, T+1 settlement and the settled-cash rule, the pattern day trader rule,
-  margin interest and short borrow fees with their rates, and margin-call liquidation
-  after a grace period.
-- **Corporate actions:** splits (lots, options and open orders adjusted or canceled, cash
-  in lieu) and dividends; the simulated feed schedules them for its companies.
-- **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO,
-  LIFO or highest-cost matching, realised gains report with holding period and
-  wash-sale flag, monthly statements, CSV export, trade journal, performance analytics
-  (Reports tab), price alerts.
-- **Historical replay:** replay a recorded or bundled session in a sandbox account with a
-  simulated clock (`docs/REPLAY.md`); live state is never touched.
+- **Market data:** simulated prices for fictional companies by default. With Alpaca keys the app uses real
+  stock and option quotes (IEX real time on the free plan; options are the indicative feed), with Finnhub
+  optional for earnings and fundamentals; it falls back to simulated prices and says why. The live adapter
+  has not yet been run with a real key. Every quote is labelled with its source; option prices without
+  provider data are model prices.
+- **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute to weekly) with SMA,
+  EMA, Bollinger bands, VWAP and RSI, a synthetic depth ladder, time and sales, company facts, screener, and a
+  Research tab (real data needs a provider).
+- **Orders in the ticket:** market, limit, stop, stop limit and trailing stop; day, good till canceled,
+  immediate or cancel and fill or kill; a bracket (take profit and stop loss); fractional shares; order
+  preview; cancel. **In the engine and API, not yet in the ticket:** market and limit on open and on close,
+  good-till-date, one-cancels-other and one-triggers-other groups, multi-leg orders and changing an order.
+- **Options:** chains with weekly and monthly expiries, implied volatility and greeks, single-leg trades from
+  the chain; automatic exercise and assignment at expiry; strategy-aware margin for spreads, condors,
+  butterflies and calendars (multi-leg orders are API-only for now).
+- **Accounts:** cash and margin accounts, several at once, reset; Reg T style margin and buying power, short
+  selling, margin calls with liquidation after a grace period. Per-account settings (Settings button) for
+  dividend reinvestment, T+1 settlement and the settled-cash rule, the pattern day trader rule, margin interest
+  and short borrow fees with their rates.
+- **Corporate actions:** splits (lots, options and open orders adjusted or canceled, cash in lieu) and
+  dividends, for the simulated feed. Real-provider actions are shown in Research but not applied.
+- **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO or highest-cost
+  matching, realised gains report with holding period and an informational wash-sale flag, monthly statements,
+  CSV export, trade journal, performance statistics (Reports tab).
+- **Alerts and notifications:** alerts on price, percent change, volume, indicators (moving-average
+  crosses, RSI, MACD on any bar size), option implied volatility and delta, position and account
+  gain/loss, account value, buying power and margin excess, reminders, and dividend or split dates of
+  symbols you hold; one-shot or re-arming with a cool-down, optional expiry and note (Alerts tab,
+  New alert). A bell lists every alert and system event (fills, canceled and expired orders, margin
+  calls, liquidation, dividends, splits, option exercise and expiry, data feed problems) with read
+  and unread state; it is kept per account and survives restarts. Browser notifications and a sound
+  are optional and asked for with a click. Browsers allow notifications only over HTTPS or on the
+  computer itself, so on a phone in LAN mode (plain HTTP) they stay inside the app. Earnings dates
+  are not available from the data feed, so there is no earnings alert.
+- **Historical replay:** replay a recorded or bundled session in a sandbox account with a simulated clock
+  (`docs/REPLAY.md`); live state is never touched.
+- **Help:** an in-app Help panel (top bar, or the menu on a phone).
 
 ## What is not built yet
 
-See `docs/PLAN.md` for the full plan. Still to do:
-
-- Corporate actions from a real provider (Alpaca's are shown in Research but not applied
-  to accounts; only the simulated feed's are).
-- Early assignment, American-style pricing.
-- Chart drawing tools, user accounts (LAN mode has a single shared passcode), HTTPS.
+See `docs/KNOWN_LIMITS.md`. Still to do: ticket screens for the engine-only order types, chart drawing tools,
+early assignment and American-style pricing, corporate actions from a real provider applied to accounts, user
+accounts and HTTPS.
 
 ## Develop
 
