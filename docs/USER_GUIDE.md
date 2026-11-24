@@ -214,8 +214,8 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
 **Centre top.** The symbol's quote (bid, ask and their sizes, open, previous close, day range, volume,
 52-week range, market cap), then four tabs:
 
-- **Chart**: candlesticks with volume. Timeframes **1M**, **5M**, **15M**, **1H**, **1D**, **1W**. Careful:
-  on the buttons, "1M" means one *minute*, not one month, and "1W" is one *week*. Indicators you can
+- **Chart**: candlesticks with volume. Timeframes **1m**, **5m**, **15m** (minutes), **1h** (hour), **1D** (day)
+  and **1W** (week); keys 1 to 6 pick them. Indicators you can
   switch on: SMA 20, SMA 50, EMA 21, Bollinger bands, VWAP (intraday timeframes only) and RSI 14. The
   chart draws your average cost as a solid blue line and your open orders as dashed lines. Intraday
   times are in your computer's time zone. The last candle updates as prices arrive.

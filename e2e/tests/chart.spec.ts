@@ -146,9 +146,9 @@ test("a horizontal line stays after a reload, a timeframe change and in another 
   await page.reload();
   await chartReady(page);
   await check(page);
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1H", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1D", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 day", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
 
   // A fresh browser profile has no local cache: the drawing comes from the server.
@@ -365,9 +365,9 @@ test("keyboard shortcuts and their help", async ({ page, open }) => {
   await search.blur();
 
   await page.keyboard.press("4");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1H", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.keyboard.press("2");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5M", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5 minutes", exact: true })).toHaveAttribute("aria-pressed", "true");
   const t = ticket(page);
   await page.keyboard.press("s");
   await expect(t.getByRole("button", { name: "Sell", exact: true })).toHaveClass(/on/);
@@ -426,7 +426,7 @@ test("no console errors when switching symbol, timeframe, indicators and views q
   const tfs = page.getByRole("group", { name: "Timeframe" });
   for (let round = 0; round < 3; round++) {
     for (const s of ["TECX", "MKTX", "NVLX", "MKTX"]) await watch.getByRole("cell", { name: s, exact: true }).click();
-    for (const tf of ["1M", "1D", "15M", "1W", "5M"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
+    for (const tf of ["1 minute", "1 day", "15 minutes", "1 week", "5 minutes"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
     await page.getByLabel("Chart type").selectOption(round % 2 ? "line" : "candles");
     await page.getByRole("tab", { name: "Options" }).click();
     await page.getByRole("tab", { name: "Chart" }).click();

@@ -19,10 +19,13 @@ export function Dialog({ onClose, labelledBy, label, destructive = false, classN
   const close = useRef(onClose);
   close.current = onClose;
   const downOnBackdrop = useRef(false);
+  // The opener is read during the first render: by the time effects run, an autoFocus field inside has focus.
+  const opener = useRef<HTMLElement | null | undefined>(undefined);
+  if (opener.current === undefined) opener.current = document.activeElement as HTMLElement | null;
 
   useEffect(() => {
     const el = ref.current!;
-    const opener = document.activeElement as HTMLElement | null;
+    const back = opener.current;
     stack.push(el);
     // keep an autoFocus field's focus; otherwise focus the first control (or the dialog itself)
     if (!el.contains(document.activeElement)) (el.querySelector<HTMLElement>(FOCUSABLE) || el).focus();
@@ -42,7 +45,7 @@ export function Dialog({ onClose, labelledBy, label, destructive = false, classN
       document.removeEventListener("keydown", onKey, true);
       const i = stack.lastIndexOf(el);
       if (i >= 0) stack.splice(i, 1);
-      if (opener && opener.isConnected && typeof opener.focus === "function") opener.focus();
+      if (back && back !== document.body && back.isConnected && typeof back.focus === "function") back.focus();
     };
   }, []);
 
