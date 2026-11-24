@@ -1,10 +1,10 @@
-import { test, expect } from "@playwright/test";
+import { expect, it as test } from "vitest";
 import {
   analyse, chartRange, curve, describeLeg, Leg, legFromSymbol, midNet, naturalNet, optionSymbol, parseOption, profitAt, recognise, unitsOf,
-} from "../../frontend/src/payoff";
-import { templateLegs, defaultExpiries } from "../../frontend/src/strategy";
+} from "./payoff";
+import { templateLegs, defaultExpiries } from "./strategy";
 
-// Unit tests of the payoff maths in frontend/src/payoff.ts (a pure module: no page is opened).
+// Unit tests of the payoff maths in payoff.ts and the templates in strategy.ts (pure modules).
 // The figures are the ones backend/tests/test_multileg.py checks for the server's payoff().
 
 const E = "2026-12-18", F = "2027-01-15";
