@@ -48,7 +48,7 @@ if "%HOST%"=="::" set "OPENHOST=127.0.0.1"
 
 if not defined PAPERDESK_NO_BROWSER start "" /b ".venv\Scripts\python.exe" "%~dp0tools\open_when_ready.py" "http://%OPENHOST%:%PORT%"
 echo PaperDesk is starting on http://%OPENHOST%:%PORT%  ^(close this window or press Ctrl+C to stop^)
-".venv\Scripts\python.exe" -m uvicorn app.api.server:app_factory --factory --host "%HOST%" --port %PORT%
+".venv\Scripts\python.exe" -m uvicorn app.api.server:app_factory --factory --host "%HOST%" --port "%PORT%" --no-proxy-headers
 if errorlevel 1 goto :fail
 exit /b 0
 

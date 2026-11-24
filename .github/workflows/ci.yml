@@ -145,19 +145,25 @@ jobs:
         run: docker build -t paperdesk:ci .
       - name: Check the compose file
         run: docker compose config --quiet
+      # Responses are captured before grep looks at them: with pipefail, "curl | grep -q" can fail when grep
+      # exits early and curl gets SIGPIPE.
       - name: Run the container, wait for the API and the UI, then stop it
         run: |
           docker run -d --name paperdesk-ci -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp --cap-drop ALL \
             --security-opt no-new-privileges:true paperdesk:ci
           ok=""
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8000/api/status | grep -q '"paper":true'; then ok=1; break; fi
+            status="$(curl -fsS http://127.0.0.1:8000/api/status 2>/dev/null || true)"
+            case "$status" in *'"paper":true'*) ok=1; break ;; esac
             sleep 2
           done
           docker logs paperdesk-ci
           test -n "$ok" || { echo "The API did not answer on http://127.0.0.1:8000/api/status"; exit 1; }
-          curl -fsS http://127.0.0.1:8000/ | grep -q '<div id="root">' || { echo "GET / did not return the UI"; exit 1; }
-          curl -fsSI http://127.0.0.1:8000/ | grep -qi '^content-security-policy:' || { echo "No security headers"; exit 1; }
+          page="$(curl -fsS http://127.0.0.1:8000/)"
+          case "$page" in *'<div id="root">'*) ;; *) echo "GET / did not return the UI"; exit 1 ;; esac
+          # GET, not HEAD: the UI route answers GET only.
+          headers="$(curl -fsS -D - -o /dev/null http://127.0.0.1:8000/)"
+          grep -qi '^content-security-policy:' <<<"$headers" || { echo "No security headers on /"; echo "$headers"; exit 1; }
           echo "The image starts; API and UI both answered."
       - name: LAN mode without a passcode refuses to start
         run: |
@@ -166,6 +172,21 @@ jobs:
           fi
           cat lan.log
           grep -q "needs a passcode" lan.log
-      - name: Stop the container
+      - name: LAN mode with a passcode asks for it
+        run: |
+          docker run -d --name paperdesk-lan -p 127.0.0.1:8001:8000 -e PAPERDESK_LAN=1 -e PAPERDESK_LOOPBACK_BYPASS=0 \
+            -e PAPERDESK_PASSCODE='ci only test passcode 7' paperdesk:ci
+          ok=""
+          for i in $(seq 1 60); do
+            state="$(curl -fsS http://127.0.0.1:8001/api/auth/state 2>/dev/null || true)"
+            case "$state" in *'"auth_required":true'*) ok=1; break ;; esac
+            sleep 2
+          done
+          docker logs paperdesk-lan
+          test -n "$ok" || { echo "The LAN mode container did not answer"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8001/api/accounts)"
+          test "$code" = 401 || { echo "Expected 401 without signing in, got $code"; exit 1; }
+          echo "LAN mode container refuses the API without a session."
+      - name: Stop the containers
         if: always()
-        run: docker rm -f paperdesk-ci || true
+        run: docker rm -f paperdesk-ci paperdesk-lan || true

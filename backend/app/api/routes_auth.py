@@ -9,16 +9,26 @@ GET  /api/auth/state   {"auth_required", "authenticated", "bypass", "lan"}; alwa
 import math
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from . import auth
 
 MAX_BODY = 4096
 
+# Served for server-rendered pages (see auth.PUBLIC_API): any element with a data-print attribute prints.
+PRINT_JS = ('document.addEventListener("click", function (e) {\n'
+            '  var t = e.target && e.target.closest ? e.target.closest("[data-print]") : null;\n'
+            '  if (t) { e.preventDefault(); window.print(); }\n'
+            '});\n')
+
 
 def register(app, ctx):
     config = auth.load_config()          # raises auth.ConfigError: the server does not start
-    access = auth.Access(config, data_dir=getattr(ctx.ex, "data_dir", None))
+    # Sessions live with the LIVE exchange's data directory: a replay swaps ctx.ex for a sandbox with its
+    # own directory, and sign-ins must not follow it.
+    live = getattr(ctx, "live", None) or ctx.ex
+    access = auth.Access(config, data_dir=getattr(live, "data_dir", None))
+    access.app = app
     app.state.access = access
     app.add_middleware(auth.AccessMiddleware, access=access)
     if config.lan or config.auth:
@@ -77,6 +87,10 @@ def register(app, ctx):
         resp.raw_headers.append((b"set-cookie", auth.cookie_header(
             token, int(access.sessions.idle), request.url.scheme == "https").encode()))
         return resp
+
+    @app.get("/print.js", include_in_schema=False)
+    def print_js():
+        return Response(PRINT_JS, media_type="text/javascript", headers={"Cache-Control": "max-age=3600"})
 
     @app.post("/api/auth/logout")
     def logout(request: Request):

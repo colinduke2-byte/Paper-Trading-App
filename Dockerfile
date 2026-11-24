@@ -35,4 +35,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 # 0.0.0.0 is for inside the container only. The compose file publishes the port on 127.0.0.1 of the host
 # unless LAN mode is turned on (PAPERDESK_LAN=1, PAPERDESK_PASSCODE and PAPERDESK_BIND=0.0.0.0; see README.md).
-CMD ["sh", "-c", "exec python -m uvicorn app.api.server:app_factory --factory --host \"${HOST:-0.0.0.0}\" --port \"${PORT:-8000}\""]
+CMD ["sh", "-c", "exec python -m uvicorn app.api.server:app_factory --factory --host \"${HOST:-0.0.0.0}\" --port \"${PORT:-8000}\" --no-proxy-headers"]

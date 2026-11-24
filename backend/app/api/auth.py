@@ -56,7 +56,10 @@ COOKIE = "paperdesk_session"
 MIN_PASSCODE = 8
 MAX_PASSCODE = 1024
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-PUBLIC_API = {"/api/auth/login", "/api/auth/logout", "/api/auth/state"}
+PUBLIC_API = {"/api/auth/login", "/api/auth/logout", "/api/auth/state", "/print.js"}
+# /print.js: the CSP forbids inline handlers (onclick=...), so server-rendered pages such as printable
+# statements use <button type="button" data-print>Print</button><script src="/print.js"></script>.
+PROXY_HEADERS = {b"forwarded", b"x-forwarded-for", b"x-real-ip", b"via", b"x-forwarded-host", b"x-forwarded-proto"}
 DOCS = ("/docs", "/redoc", "/openapi.json")
 ACCESS_KEYS = ("PAPERDESK_LAN", "PAPERDESK_PASSCODE", "PAPERDESK_SESSION_DAYS", "PAPERDESK_LOOPBACK_BYPASS",
                "PAPERDESK_ALLOWED_HOSTS", "PAPERDESK_BIND")
@@ -117,6 +120,25 @@ def _is_loopback_host(host: str) -> bool:
     return ip.is_loopback
 
 
+# Placeholder texts from .env.example, docker-compose.yml and README.md, and common trivial choices.
+PLACEHOLDERS = {
+    "choose a long passcode", "at least 8 characters, not used anywhere else", "a long passcode you use nowhere else",
+    "changeme", "change me", "changeit", "passcode", "password", "password1", "password123", "passw0rd",
+    "paperdesk", "paperdesk1", "paperdesk123", "letmein", "letmein1", "iloveyou", "welcome1", "admin123",
+    "administrator", "qwerty", "qwertyui", "qwertyuiop", "asdfghjk", "asdfghjkl", "zxcvbnm", "abcdefgh",
+    "abcd1234", "1234abcd", "12345678", "123456789", "1234567890", "0123456789", "87654321", "11111111",
+    "secret", "secret123", "trustno1", "football", "baseball", "sunshine", "princess", "monkey123",
+}
+
+
+def is_weak_passcode(passcode: str) -> bool:
+    p = passcode.strip()
+    if len(p) < MIN_PASSCODE or len(set(p)) < 4:
+        return True
+    norm = re.sub(r"\s+", " ", p.lower())
+    return norm in PLACEHOLDERS or norm.replace(" ", "") in {x.replace(" ", "") for x in PLACEHOLDERS}
+
+
 @dataclass(frozen=True)
 class Config:
     lan: bool = False
@@ -147,6 +169,10 @@ def load_config(environ: Optional[dict] = None) -> Config:
                           "PaperDesk did not start.")
     if passcode is not None and len(passcode) > MAX_PASSCODE:
         raise ConfigError(f"PAPERDESK_PASSCODE is too long: use at most {MAX_PASSCODE} characters.")
+    if passcode is not None and is_weak_passcode(passcode):
+        raise ConfigError("PAPERDESK_PASSCODE is the example text or too simple: choose your own passcode of at "
+                          f"least {MIN_PASSCODE} characters with at least 4 different characters, not a common "
+                          "word or number sequence. PaperDesk did not start.")
     if lan and passcode is None:
         raise ConfigError("LAN mode (PAPERDESK_LAN=1) needs a passcode: set PAPERDESK_PASSCODE to at least "
                           f"{MIN_PASSCODE} characters in .env or the environment. PaperDesk did not start.")
@@ -427,9 +453,20 @@ def split_host(value: str) -> tuple:
     return host, port
 
 
+UI_CATCH_ALL = "/{path:path}"
+ASSETS = "/assets"
+
+
+def _always_protected(path: str) -> bool:
+    if path == "/api" or path.startswith("/api/") or path == "/ws" or path.startswith("/ws/"):
+        return True
+    return any(path == d or path.startswith(d + "/") for d in DOCS)
+
+
 class Access:
     def __init__(self, config: Config, data_dir: Optional[str] = None, clock: Callable[[], float] = time.time):
         self.config = config
+        self.app = None       # set by routes_auth.register; used to find which routes a path reaches
         self._clock = clock
         self.limiter = Limiter(self.now)
         path = os.path.join(data_dir, "sessions.json") if data_dir and config.auth else None
@@ -490,17 +527,34 @@ class Access:
             return (o_port or (443 if o.scheme == "https" else 80)) == int(port)
         return o_port is None
 
-    def protected(self, path: str) -> bool:
+    def protected(self, scope: dict) -> bool:
+        """Deny by default. With a passcode set, a request is public only when it is a sign-in endpoint, a
+        static asset, or a path that no route but the UI catch-all would answer (the UI shell). Any route a
+        module registers, wherever its path, needs a session; /api, /ws and the API docs always do."""
         if not self.config.auth:
             return False
+        path = scope.get("path", "")
         if path in PUBLIC_API:
             return False
-        if path == "/api" or path.startswith("/api/") or path == "/ws" or path.startswith("/ws/"):
+        if _always_protected(path):
             return True
-        return any(path == d or path.startswith(d + "/") for d in DOCS)
+        if self.app is None:
+            return False
+        from starlette.routing import Match, Mount
+        for route in self.app.router.routes:
+            rpath = getattr(route, "path", None)
+            if rpath == UI_CATCH_ALL or (isinstance(route, Mount) and rpath == ASSETS):
+                continue
+            if route.matches(scope)[0] != Match.NONE:
+                return True
+        return False
 
     def bypassed(self, scope: dict) -> bool:
-        return self.config.loopback_bypass and is_loopback_client((scope.get("client") or ("",))[0])
+        """Loopback clients skip the passcode, unless the request went through a proxy (a proxy on this
+        computer would make every remote request look local)."""
+        if not self.config.loopback_bypass or not is_loopback_client((scope.get("client") or ("",))[0]):
+            return False
+        return not any(k.lower() in PROXY_HEADERS for k, _ in scope.get("headers") or [])
 
 
 def cookie_header(token: str, max_age: int, secure: bool) -> str:
@@ -544,7 +598,7 @@ class AccessMiddleware:
             return await self._refuse(scope, receive, send, 403,
                                       "Refused a request that came from another website.")
         token = None
-        if acc.protected(path) and not acc.bypassed(scope):
+        if acc.protected(scope) and not acc.bypassed(scope):
             token = HTTPConnection(scope).cookies.get(COOKIE)
             if not acc.sessions.check(token):
                 return await self._refuse(scope, receive, send, 401,
@@ -653,6 +707,12 @@ def preflight(environ: Optional[dict] = None, out=None, err=None) -> int:
         return 1
     host = (env.get("HOST") or "").strip()
     port = (env.get("PORT") or "8000").strip()
+    if not (port.isdigit() and 1 <= int(port) <= 65535):
+        print(f"PORT must be a number from 1 to 65535, not {port!r}.", file=err)
+        return 1
+    if host and not (_ip(host) is not None and re.fullmatch(r"[0-9A-Fa-f:.]+", host) or _HOSTNAME.match(host.lower())):
+        print(f"HOST must be an IP address or a host name, not {host!r}. Leave it unset unless you know why.", file=err)
+        return 1
     if not cfg.lan:
         host = host or "127.0.0.1"
         if not _is_loopback_host(host):

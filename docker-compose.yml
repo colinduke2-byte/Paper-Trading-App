@@ -24,6 +24,9 @@ services:
       PORT: "${PORT:-8000}"
       PAPERDESK_DATA: /data
       PAPERDESK_BIND: "${PAPERDESK_BIND:-127.0.0.1}"   # tells the server where the port is published
+      # Requests reach the container through Docker's network, so "from this computer" cannot be told apart
+      # from "from the network" here: every browser signs in.
+      PAPERDESK_LOOPBACK_BYPASS: "0"
     volumes:
       - paperdesk-data:/data
     read_only: true

@@ -421,3 +421,125 @@ def test_unreadable_session_file_starts_empty(monkeypatch, tmp_path):
     c, _, _ = locked(monkeypatch, data_dir=str(tmp_path))
     assert c.get("/api/accounts").status_code == 401
     assert login(c).json() == {"ok": True}
+
+
+# ---- review fixes --------------------------------------------------------------------------------------
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _read(*parts):
+    with open(os.path.join(ROOT, *parts), encoding="utf-8") as f:
+        return f.read()
+
+
+@pytest.mark.parametrize("weak", ["password", "PASSCODE", "12345678", "aaaaaaaa", "abababab", "        ",
+                                  "  ab12  ", "changeme", "Choose a long passcode", "qwertyuiop", "Pass Word"])
+def test_weak_and_placeholder_passcodes_are_refused(weak):
+    with pytest.raises(auth.ConfigError, match="example text or too simple"):
+        auth.load_config({"PAPERDESK_PASSCODE": weak})
+
+
+def test_example_placeholders_are_refused(tmp_path):
+    # The .env.example line, simply uncommented, must not start a server.
+    line = next(l for l in _read(".env.example").splitlines() if l.startswith("# PAPERDESK_PASSCODE="))
+    env = tmp_path / ".env"
+    env.write_text("PAPERDESK_LAN=1\n" + line[2:] + "\n")
+    with pytest.raises(auth.ConfigError, match="example text"):
+        auth.load_config({"PAPERDESK_ENV_FILE": str(env)})
+    compose = next(l for l in _read("docker-compose.yml").splitlines() if "PAPERDESK_PASSCODE=" in l)
+    with pytest.raises(auth.ConfigError, match="example text"):
+        auth.load_config({"PAPERDESK_PASSCODE": compose.split("=", 1)[1].strip().strip("'")})
+    readme = next(l for l in _read("README.md").splitlines() if l.startswith("PAPERDESK_PASSCODE="))
+    with pytest.raises(auth.ConfigError, match="example text"):
+        auth.load_config({"PAPERDESK_PASSCODE": readme.split("=", 1)[1].strip().strip("'")})
+    assert auth.load_config({"PAPERDESK_PASSCODE": PASS}).auth
+
+
+@pytest.mark.parametrize("header", ["X-Forwarded-For", "Forwarded", "X-Real-IP", "Via"])
+def test_proxied_loopback_requests_do_not_bypass(monkeypatch, header):
+    c, _, _ = locked(monkeypatch, client=("127.0.0.1", 5000))
+    assert c.get("/api/accounts").status_code == 200
+    assert c.get("/api/accounts", headers={header: "127.0.0.1"}).status_code == 401
+    assert c.get("/api/auth/state", headers={header: "127.0.0.1"}).json()["bypass"] is False
+
+
+def test_launchers_ignore_proxy_headers_and_docker_disables_the_bypass():
+    import yaml
+    assert "--no-proxy-headers" in _read("Dockerfile")
+    assert "--no-proxy-headers" in _read("run.sh")
+    assert "--no-proxy-headers" in _read("run.bat")
+    assert '--port "%PORT%"' in _read("run.bat")
+    env = yaml.safe_load(_read("docker-compose.yml"))["services"]["paperdesk"]["environment"]
+    assert env["PAPERDESK_LOOPBACK_BYPASS"] == "0"
+
+
+def test_every_route_is_under_api_or_ws_or_known(monkeypatch, ui_dir):
+    """A new routes_*.py that adds a route outside /api must be a deliberate choice (and is protected
+    anyway, see the next test)."""
+    from starlette.routing import Mount
+    _, app, _ = locked(monkeypatch)
+    allowed = {"/assets", "/{path:path}", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json", "/print.js"}
+    stray = [r.path for r in app.routes
+             if r.path not in allowed and not r.path.startswith("/api/") and r.path != "/ws"]
+    assert stray == []
+    assert any(isinstance(r, Mount) and r.path == "/assets" for r in app.routes)
+
+
+def test_routes_outside_api_are_protected_by_default(monkeypatch, ui_dir):
+    c, app, _ = locked(monkeypatch)
+    app.add_api_route("/metrics", lambda: {"secret": 1})
+    app.add_api_websocket_route("/feed", lambda ws: None)
+    assert c.get("/metrics").status_code == 401
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/feed") as ws:
+            ws.receive_json()
+    for public in ("/", "/trade/MKTX", "/assets/app.js", "/print.js", "/api/auth/state"):
+        assert c.get(public).status_code == 200, public
+
+
+def test_print_script_for_server_rendered_pages(monkeypatch):
+    c, _, _ = locked(monkeypatch)
+    r = c.get("/print.js")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/javascript")
+    assert "data-print" in r.text and "window.print()" in r.text
+    csp = c.get("/api/auth/state").headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0]
+
+
+def test_preflight_validates_host_and_port():
+    def run(env):
+        out, err = io.StringIO(), io.StringIO()
+        return auth.preflight(env, out, err), out.getvalue(), err.getvalue()
+    for env in ({"HOST": "127.0.0.1 & calc"}, {"HOST": "a\"b"}, {"PORT": "80 & x"}, {"PORT": "0"}, {"PORT": "70000"}):
+        code, out, err = run(env)
+        assert code == 1 and out == "", env
+    assert run({"HOST": "localhost", "PORT": "8123"})[:2] == (0, "localhost\n")
+    assert run({"HOST": "::1"})[:2] == (0, "::1\n")
+
+
+def test_sign_ins_survive_replay_and_stay_in_the_live_data_dir(monkeypatch, tmp_path):
+    from app.marketdata.replay.samples import SAMPLES
+    live = tmp_path / "live"
+    c, app, _ = locked(monkeypatch, data_dir=str(live))
+    assert login(c).json() == {"ok": True}
+    token = c.cookies[auth.COOKIE]
+    assert app.state.access.sessions.path == str(live / "sessions.json")
+    assert c.post("/api/replay/start", json={"session": SAMPLES[0][0]}).status_code == 200
+    assert c.get("/api/status").json()["mode"] == "replay"
+    assert c.get("/api/replay/status").json()["active"] is True
+    assert c.get("/api/accounts").status_code == 200
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"symbols": []})
+    anon = TestClient(app)
+    assert anon.get("/api/replay/status").status_code == 401
+    assert anon.post("/api/replay/exit").status_code == 401
+    with pytest.raises(WebSocketDisconnect):
+        with anon.websocket_connect("/ws") as ws:
+            ws.receive_json()
+    second = TestClient(app)
+    assert login(second).json() == {"ok": True}        # a sign-in during replay is a live sign-in too
+    assert c.post("/api/replay/exit").json() == {"active": False}
+    assert c.get("/api/accounts").status_code == 200 and second.get("/api/accounts").status_code == 200
+    assert not [p for p in tmp_path.rglob("sessions.json") if p != live / "sessions.json"]
+    assert token not in (live / "sessions.json").read_text()

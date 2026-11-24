@@ -57,10 +57,17 @@ export function AccessGate({ children }: { children: ReactNode }) {
   return <AccessContext.Provider key={generation} value={{ state, signOut }}>{children}</AccessContext.Provider>;
 }
 
-export function SignOut() {
+// The sign-out action, or null when it does not apply (no passcode, or this computer skips it). A menu or a
+// top-bar actions list can use this directly: `const so = useSignOutAction(); if (so) actions.push(so);`.
+export function useSignOutAction(): { key: string; label: string; onClick: () => void } | null {
   const { state, signOut } = useContext(AccessContext);
   if (!state?.auth_required || state.bypass) return null;
-  return <button className="ghost sm" onClick={signOut}>Sign out</button>;
+  return { key: "sign-out", label: "Sign out", onClick: signOut };
+}
+
+export function SignOut() {
+  const action = useSignOutAction();
+  return action ? <button className="ghost sm" onClick={action.onClick}>{action.label}</button> : null;
 }
 
 function Login({ notice, onDone }: { notice: string; onDone: () => void }) {

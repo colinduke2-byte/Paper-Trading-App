@@ -61,7 +61,7 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: `"${python}" -m uvicorn app.api.server:app_factory --factory --host 127.0.0.1 --port ${port}`,
+      command: `"${python}" -m uvicorn app.api.server:app_factory --factory --host 127.0.0.1 --port ${port} --no-proxy-headers`,
       cwd: join(root, "backend"),
       url: `http://127.0.0.1:${port}/api/status`,
       reuseExistingServer: false,
@@ -69,7 +69,7 @@ export default defineConfig({
       env: { ...common, PAPERDESK_DATA: process.env.E2E_DATA! },
     },
     {
-      command: `"${python}" -m uvicorn app.api.server:app_factory --factory --host 127.0.0.1 --port ${authPort}`,
+      command: `"${python}" -m uvicorn app.api.server:app_factory --factory --host 127.0.0.1 --port ${authPort} --no-proxy-headers`,
       cwd: join(root, "backend"),
       url: `http://127.0.0.1:${authPort}/api/auth/state`,
       reuseExistingServer: false,

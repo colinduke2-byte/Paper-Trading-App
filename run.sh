@@ -32,4 +32,4 @@ export PAPERDESK_ENV_FILE="${PAPERDESK_ENV_FILE:-$(cd .. && pwd)/.env}"
 HOST="$(.venv/bin/python -m app.api.auth preflight)" || { echo "PaperDesk did not start." >&2; exit 1; }
 OPEN="$HOST"; case "$HOST" in 0.0.0.0|::) OPEN=127.0.0.1 ;; esac
 echo "PaperDesk is starting on http://${OPEN}:${PORT:-8000}  (press Ctrl+C to stop)"
-exec .venv/bin/python -m uvicorn app.api.server:app_factory --factory --host "$HOST" --port "${PORT:-8000}"
+exec .venv/bin/python -m uvicorn app.api.server:app_factory --factory --host "$HOST" --port "${PORT:-8000}" --no-proxy-headers

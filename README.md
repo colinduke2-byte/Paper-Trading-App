@@ -73,6 +73,19 @@ offices, student housing). It is paper money, but do not reuse the passcode anyw
 self-signed certificate is not included: phones show alarming warnings for such certificates and they are
 hard to set up well, so it was left out rather than done badly.
 
+Passcodes that are the example text from `.env.example`, a common word or number sequence, or have fewer than
+4 different characters are refused at start-up.
+
+Trade-offs to know about:
+
+- If the sign-in screen says there were too many wrong passcodes and it was not you, someone on your network
+  may be guessing. Restarting PaperDesk clears the counters; then change the passcode.
+- Under Docker Desktop (and other setups where Docker forwards the port) every device reaches the container
+  from the same address, so they share one counter: wrong guesses on one device slow down the others.
+- Browsers do not separate cookies by port, so the session cookie is also sent to any other web app on the
+  same address (for example another program on `http://192.168.1.20:3000`). Do not run untrusted web apps on
+  the same computer while LAN mode is on.
+
 What else is in place: wrong passcodes are slowed down per device (after three tries, 1, 2, 4 ... seconds, up
 to 15 minutes) and all sign-ins pause for a while after 30 failures in 15 minutes; failed attempts are logged
 with the device address, never with what was typed. The passcode and session tokens are never logged. The
@@ -80,7 +93,11 @@ session cookie is `HttpOnly` and `SameSite=Strict`; requests that change anythin
 refused when they come from another website; the server only answers to `localhost`, `127.0.0.1`, IP
 addresses (LAN mode) and `PAPERDESK_ALLOWED_HOSTS`, which blocks DNS rebinding attacks; and responses carry
 a Content-Security-Policy and related headers. A reverse proxy in front of PaperDesk is not supported in this
-build (if you use one anyway, set `PAPERDESK_LOOPBACK_BYPASS=0`).
+build: the server ignores `X-Forwarded-For` (uvicorn runs with `--no-proxy-headers`) and never lets a request
+that carries proxy headers skip the passcode. If you use one anyway, set `PAPERDESK_LOOPBACK_BYPASS=0`.
+
+Server-rendered pages cannot use inline scripts under the Content-Security-Policy. A print button is written
+as `<button type="button" data-print>Print</button><script src="/print.js"></script>`.
 
 ### Docker
 
@@ -99,7 +116,8 @@ then `docker compose up --build`. Compose then publishes the port on all interfa
 server refuses to start if `PAPERDESK_BIND` points at the network without LAN mode and a passcode. Open
 `http://<this computer's address>:8000` on the phone (find the address with `ipconfig` on Windows or
 `ip addr` on Linux). In Docker every browser has to sign in, including the one on the computer, because
-requests reach the container through Docker's network rather than from `127.0.0.1`.
+requests reach the container through Docker's network rather than from `127.0.0.1` (compose sets
+`PAPERDESK_LOOPBACK_BYPASS=0` for this reason).
 
 ## What works
 
