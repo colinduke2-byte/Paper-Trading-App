@@ -9,16 +9,20 @@ third-party code.
 
 ## Charts: TradingView Lightweight Charts
 
-The price charts are drawn with Lightweight Charts by TradingView, Inc. (Apache License 2.0). As its
-NOTICE asks, the app links to https://www.tradingview.com/ from every chart (the logo on the chart and
-the "Charting by TradingView" link below the chart and in Help).
+The price charts are drawn with TradingView Lightweight Charts, Copyright TradingView, Inc.
+(https://www.tradingview.com/), licensed under the Apache License 2.0 (full text below). Its README asks
+users to add the attribution notice from the project's NOTICE file
+(https://github.com/tradingview/lightweight-charts/blob/master/NOTICE; the npm package does not include
+that file) and a link to https://www.tradingview.com/ on a page available to users. PaperDesk shows the
+library's logo on the chart, a "Charting by TradingView" link under the chart toolbar and the same
+attribution and link in Help, About.
 
 ## Web interface (bundled into frontend/dist)
 
 | Package | Version | Licence | Source |
 |---|---|---|---|
 | fancy-canvas | 2.1.0 | MIT |  |
-| js-tokens | 4.0.0 | MIT | lydell/js-tokens |
+| js-tokens | 4.0.0 | MIT | https://github.com/lydell/js-tokens |
 | lightweight-charts | 5.3.0 | Apache-2.0 | https://www.tradingview.com/lightweight-charts/ |
 | loose-envify | 1.4.0 | MIT | https://github.com/zertosh/loose-envify |
 | react | 18.3.1 | MIT | https://reactjs.org/ |

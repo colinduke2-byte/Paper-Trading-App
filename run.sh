@@ -18,11 +18,13 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-# (Re)install only when the virtualenv is new or pyproject.toml changed since the last install.
-if [ ! -x .venv/bin/python ] || [ ! -f .venv/.installed ] || [ pyproject.toml -nt .venv/.installed ]; then
+# (Re)install only when the virtualenv is new or pyproject.toml or constraints.txt changed since the last install.
+# constraints.txt pins the exact versions the tests passed with (tools/backend_constraints.py refreshes it).
+if [ ! -x .venv/bin/python ] || [ ! -f .venv/.installed ] || [ pyproject.toml -nt .venv/.installed ] \
+   || [ constraints.txt -nt .venv/.installed ]; then
   echo "Setting up PaperDesk (first start takes a minute)..."
   [ -x .venv/bin/python ] || "$PY" -m venv .venv
-  .venv/bin/python -m pip install -q -e . && touch .venv/.installed || {
+  .venv/bin/python -m pip install -q -c constraints.txt -e . && touch .venv/.installed || {
     echo "Installing the Python packages failed. Check your internet connection and run this again." >&2; exit 1; }
 fi
 

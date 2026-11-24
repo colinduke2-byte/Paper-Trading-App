@@ -157,9 +157,12 @@ def test_a_margin_call_liquidation_can_close_what_covers_a_short_option():
     assert s["margin_call"] and s["margin_call_since"] is not None
     # Liquidation goes straight to the engine, so the orders branch's rule that a "closing" order which
     # uncovers a short option must pass the full risk check never stops it from closing positions.
-    clock.advance(48 * 3600)
-    feed.set_quote("ABC", D("59.99"), D("60"), D("60"), bid_size=100000, ask_size=100000)
-    ex.tick()
+    # The grace period counts running time only (a jump of the clock is a pause), so use 6 minutes of ticks.
+    ex.account(a).settings["margin_call_grace_hours"] = "0.1"
+    for _ in range(6):
+        clock.advance(60)
+        feed.set_quote("ABC", D("59.99"), D("60"), D("60"), bid_size=100000, ask_size=100000)
+        ex.tick()
     acc = ex.account(a)
     s = ex.summary(a)
     assert not s["margin_call"] and s["equity"] >= s["maintenance_requirement"]

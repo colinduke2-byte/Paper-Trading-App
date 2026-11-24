@@ -1395,13 +1395,19 @@ class Exchange:
             return
         os.makedirs(self.data_dir, exist_ok=True)
         if self.dirty or force:
+            # Cleared before the state is gathered (a change made meanwhile marks it dirty again) and set
+            # back if the write fails, so a failed write is retried on the next save.
             self.dirty = False
-            self._write(self._path("state.json"), {
-                "version": 1,
-                "accounts": [a.to_plain() for a in self.accounts.values()],
-                "orders": [to_plain(o) for o in self.engine.orders.values()],
-                "watchlists": self.watchlists, "alerts": self.alerts,
-                "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})
+            try:
+                self._write(self._path("state.json"), {
+                    "version": 1,
+                    "accounts": [a.to_plain() for a in self.accounts.values()],
+                    "orders": [to_plain(o) for o in self.engine.orders.values()],
+                    "watchlists": self.watchlists, "alerts": self.alerts,
+                    "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})
+            except BaseException:
+                self.dirty = True
+                raise
         now = self.now()
         if force or now - self._last_market_save >= 60:
             self._last_market_save = now

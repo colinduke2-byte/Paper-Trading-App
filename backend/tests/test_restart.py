@@ -491,3 +491,28 @@ def test_feed_closing_price_is_used_when_the_feed_has_it():
     ex.tick()
     assert ex.account(a).positions() == {}
     assert any("approximate price" in m for _, k, m in ex.account(a).life.log if k == "expiration")
+
+
+# ---- N16: a failed save is retried ---------------------------------------------------------------------
+def test_a_failed_save_stays_dirty_and_is_retried(monkeypatch):
+    import pytest
+    tmp = tempfile.mkdtemp()
+    clock, feed = SimClock(T0), SimFeed()
+    ex = Exchange(feed, clock, data_dir=tmp)
+    feed.set_quote("ABC", "99.99", "100.00", "100.00")
+    ex.tick()
+    ex.create_account("t", "margin", D("100000"))
+    real = Exchange._write
+
+    def broken(path, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Exchange, "_write", staticmethod(broken))
+    with pytest.raises(OSError):
+        ex.save()
+    assert ex.dirty
+    monkeypatch.setattr(Exchange, "_write", staticmethod(real))
+    ex.save()
+    assert not ex.dirty
+    ex2 = Exchange(SimFeed(INFO), SimClock(T0), data_dir=tmp)
+    assert ex2.load() and len(ex2.accounts) == 1

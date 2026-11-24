@@ -24,13 +24,14 @@ set "NEED=0"
 if not exist ".venv\Scripts\python.exe" set "NEED=1"
 if not exist ".venv\.installed" set "NEED=1"
 if "%NEED%"=="0" (
-  %PY% -c "import os,sys; sys.exit(0 if os.path.getmtime('.venv/.installed') >= os.path.getmtime('pyproject.toml') else 1)" >nul 2>&1
+  %PY% -c "import os,sys; t=os.path.getmtime('.venv/.installed'); sys.exit(0 if t >= os.path.getmtime('pyproject.toml') and t >= os.path.getmtime('constraints.txt') else 1)" >nul 2>&1
   if errorlevel 1 set "NEED=1"
 )
 if "%NEED%"=="1" (
   echo Setting up PaperDesk ^(first start takes a minute^)...
   if not exist ".venv\Scripts\python.exe" ( %PY% -m venv .venv || goto :fail )
-  ".venv\Scripts\python.exe" -m pip install -q -e . || goto :fail
+  rem constraints.txt pins the exact versions the tests passed with (tools\backend_constraints.py refreshes it).
+  ".venv\Scripts\python.exe" -m pip install -q -c constraints.txt -e . || goto :fail
   echo done> ".venv\.installed"
 )
 
