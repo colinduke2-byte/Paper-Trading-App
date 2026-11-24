@@ -14,8 +14,8 @@ from ..core.money import model_to_price, parse as parse_num
 from ..ledger.account import LOT_METHODS
 from ..options.symbology import parse as parse_option
 from ..core.errors import NotFound
+from ..marketdata.labels import default_benchmark, price_source
 
-DEFAULT_BENCHMARK = "MKTX"
 CSV_KINDS = ("fills", "orders", "ledger", "positions", "gains", "journal")
 LOT_METHOD_LABELS = {"fifo": "First in, first out", "lifo": "Last in, first out", "highest_cost": "Highest cost first"}
 
@@ -59,7 +59,8 @@ def register(app, ctx):
         rf = parse_num(risk_free)
         if not Decimal("-1") < rf < Decimal("1"):
             raise ValueError("risk_free is an annual rate written as a fraction, for example 0.04")
-        bench = (benchmark or "").upper().strip() or (DEFAULT_BENCHMARK if e.is_stock(DEFAULT_BENCHMARK) else "")
+        default = default_benchmark(e.feed, e.is_stock)
+        bench = (benchmark or "").upper().strip() or default
         if bench and not e.is_stock(bench):
             raise NotFound(f"unknown benchmark symbol {bench}")
         summ = e.summary(aid)
@@ -76,7 +77,7 @@ def register(app, ctx):
             b["curve"] = [[t, float(start_value * v)] for t, v in b_index]
         lots = closed_lots(a)
         return plain({
-            "account_id": aid, "simulated": True, "returns": r, "benchmark": b,
+            "account_id": aid, **price_source(e.feed), "benchmark_default": default, "returns": r, "benchmark": b,
             "account_curve": curve(series), "index_curve": curve(index),
             "trades": trade_stats(lots),
             "exposure": exposure(e.positions(aid), sectors(), summ["equity"]),
@@ -128,7 +129,7 @@ def register(app, ctx):
                 marks[sym] = price_at(price_history(e, sym), end - 1)
         marks = {s: p for s, p in marks.items() if p is not None}
         live = e.summary(aid)["equity"] if current else None
-        return monthly_statement(a, year, mon, now, live, marks)
+        return monthly_statement(a, year, mon, now, live, marks, source=price_source(e.feed))
 
     @app.get("/api/accounts/{aid}/statements")
     def statements(aid: str):

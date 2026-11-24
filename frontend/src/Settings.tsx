@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Dialog } from "./Dialog";
 import { api, dateTime, numText, usd } from "./util";
 
 type Field = { key: string; type: "bool" | "number"; default: any; label: string; help: string; min: string | null; max: string | null };
@@ -56,8 +57,7 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
   const hidden = fields.length - shown.length;
 
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" style={S.modal} role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} style={S.modal} labelledBy="settings-title">
         <h3 id="settings-title">Account rules</h3>
         {summary && (
           <div style={S.stats}>
@@ -100,7 +100,6 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
           <button className="ghost" onClick={onClose}>Close</button>
           <button className="primary" onClick={save} disabled={busy || !fields.length}>Save</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

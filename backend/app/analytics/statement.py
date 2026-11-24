@@ -55,8 +55,12 @@ def _positions_at(account, end: float) -> dict:
 
 
 def monthly_statement(account, year: int, month: int, now: float, live_equity: Optional[Decimal] = None,
-                      marks: Optional[dict] = None) -> dict:
-    """Statement for one New York calendar month. marks: {symbol: price} at month end (optional)."""
+                      marks: Optional[dict] = None, source: Optional[dict] = None) -> dict:
+    """Statement for one New York calendar month. marks: {symbol: price} at month end (optional).
+    source: where the prices come from (app.marketdata.labels.price_source); simulated when not given."""
+    source = source or {"simulated": True, "price_source": "simulated prices",
+                        "price_note": "All figures use simulated prices."}
+    simulated = source["simulated"]
     start, end = month_bounds(year, month)
     if start > now:
         raise ValueError(f"{year:04d}-{month:02d} has not started yet")
@@ -116,9 +120,12 @@ def monthly_statement(account, year: int, month: int, now: float, live_equity: O
         "realized_pnl": realized, "unrealized_change": close_unreal - open_unreal,
         "reconciliation_difference": close_eq - (open_eq + dep_total + realized - fees + other_total + close_unreal - open_unreal),
         "positions": positions,
-        "notes": ["All prices are simulated. This is a paper trading statement, not a brokerage record.",
+        "simulated": simulated, "price_source": source["price_source"],
+        "notes": [("All prices are simulated. " if simulated else f"Prices are {source['price_source']}; the trades "
+                   "are simulated. ") + "This is a paper trading statement, not a brokerage record.",
                   "Account value at a month boundary is the account value sample taken at or just before it; "
-                  "month-end marks come from the simulated feed's last price before the month end.",
+                  f"month-end marks come from the {'simulated feed' if simulated else 'price feed'}'s last price "
+                  "before the month end.",
                   "Other income and charges lists any ledger entry that is not a trade or deposit, such as dividends or interest."],
     }
 
@@ -173,7 +180,7 @@ th {{ font-weight: 600; color: #444; font-size: 12px; }} .n {{ text-align: right
 .empty {{ color: #777; }} ul {{ color: #555; padding-left: 18px; }}
 @media print {{ body {{ padding: 0; }} .noprint {{ display: none; }} }}
 </style></head><body>
-<p class="paper">Paper trading: simulated, no real money</p>
+<p class="paper">{'Paper trading: simulated prices, no real money' if st.get('simulated', True) else 'Paper trading: real market prices, simulated trades, no real money'}</p>
 <h1>Monthly statement · {e(st['month'])}</h1>
 <p class="meta">{e(st['account_name'])} ({e(st['account_id'])}, {e(st['account_type'])} account) ·
 period {_d(st['period_start'])} to {_d(st['period_end'] - 1)} (New York time){' · month in progress' if st['current'] else ''} ·

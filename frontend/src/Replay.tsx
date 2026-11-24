@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Dialog } from "./Dialog";
 import { api, numText, usd } from "./util";
 import "./replay.css";
 
@@ -79,8 +80,7 @@ export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onSt
   };
 
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal replay-modal" role="dialog" aria-modal="true" aria-labelledby="replay-title" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} className="modal replay-modal" labelledBy="replay-title">
         <h3 id="replay-title">Replay a trading session</h3>
         <p className="muted">You trade in a separate sandbox account while the session plays back on its own clock. Your paper accounts are saved and left exactly as they are; the sandbox is discarded when you exit.</p>
         {sessions === null && !error && <p className="muted">Loading sessions…</p>}
@@ -121,8 +121,7 @@ export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onSt
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" disabled={!pick || busy} onClick={start}>{busy ? "Starting…" : `Start with ${usd(Number(numText(cash)) || 0)}`}</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

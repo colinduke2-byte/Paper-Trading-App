@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Dialog } from "./Dialog";
 import { Chart } from "./Chart";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
@@ -300,9 +301,8 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
     } catch (e: any) { setError(e.message); }
   };
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <h3>{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
+    <Dialog onClose={onClose} labelledBy="account-dialog-title" destructive={mode === "reset"}>
+        <h3 id="account-dialog-title">{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
         {mode === "reset" && <p className="muted">This erases the account's positions, orders and history and starts again with the cash below. It cannot be undone.</p>}
         {mode === "new" && (
           <>
@@ -321,7 +321,6 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" onClick={submit}>{mode === "new" ? "Create account" : "Erase and reset"}</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from ..core import calendar as cal
 from ..exchange import Exchange, OrderRejected
 from ..marketdata.feed import TIMEFRAMES
+from ..marketdata.labels import price_source
 from ..marketdata.synthetic import SyntheticFeed
 from ..options import chain as optchain
 from ..options.symbology import describe, parse as parse_option
@@ -131,7 +132,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         rp = ctx.replay
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
-                "paper": True, **plain(ex.feed.status_info()),
+                "paper": True, **plain(ex.feed.status_info()), "price_note": price_source(ex.feed)["price_note"],
                 "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
 
     async def broadcast(ex: Exchange) -> None:

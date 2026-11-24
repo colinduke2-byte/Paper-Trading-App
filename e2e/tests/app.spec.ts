@@ -69,7 +69,7 @@ test("a rejected order shows the real reason", async ({ page, request, open }) =
   const small = await createAccount(request, "cash", "1000");
   await open(small);
   await review(page, "100000");
-  await expect(page.getByRole("alert")).toContainText("This order would be rejected: insufficient cash.");
+  await expect(page.getByRole("alert")).toContainText("This order would be rejected: insufficient cash");
   await expect(page.getByRole("button", { name: "Place paper order" })).toHaveCount(0);
 });
 

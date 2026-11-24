@@ -55,6 +55,11 @@ def _field(req: dict, key: str) -> Optional[Decimal]:
     return None if v is None or v == "" else parse_num(v, FIELD_LABELS.get(key, key.replace("_", " ")))
 
 
+def _usd(x: Decimal) -> str:
+    x = cents(x)
+    return f"-${-x:,.2f}" if x < 0 else f"${x:,.2f}"
+
+
 def _starting_cash(value) -> Decimal:
     v = D(value)
     if v <= 0 or v > Decimal("1000000000"):
@@ -568,6 +573,45 @@ class Exchange:
                     result = w
         return result
 
+    def _shortfall(self, account: Account, worst: "_Worst", entry: Optional[Order] = None,
+                   what: str = "this order") -> str:
+        """The risk check's reason with the amounts: what the order needs and what is available.
+
+        Both are measured against the account with its other open orders counted (as the buying power
+        shown in the app is), so the difference is exactly what this order would add."""
+        reason = worst.reason or "order rejected by risk check"
+        if not reason.startswith("insufficient"):
+            return reason  # structural: short selling or uncovered calls in a cash account
+        before = self._worst_case(account, [])
+        if account.type == "margin":
+            option = entry is not None and (bool(entry.legs) or multiplier(entry.symbol) == 100)
+            scale = Decimal(1) if option else margin.INITIAL
+            have = max(before.excess, ZERO) / scale if before.ok else ZERO
+            need = (before.excess - worst.excess) / scale if before.ok else (-worst.excess) / scale
+            kind = "option buying power" if option else "buying power"
+        else:
+            room = lambda w: w.cash_after - w.requirement
+            have = max(room(before), ZERO) if before.ok else ZERO
+            need = room(before) - room(worst) if before.ok else -room(worst)
+            kind = "cash"
+        if what == "the change" and reason in ("insufficient buying power", "insufficient cash"):
+            reason = "insufficient buying power for the change"
+        text = f"{reason}: {what} needs {_usd(max(need, ZERO))} of {kind} and {_usd(have)} is available"
+        if entry is not None and entry.stop_price is not None and entry.type in (m.STOP, m.STOP_LIMIT) \
+                and entry.side == m.BUY:
+            text += (f". A resting stop order reserves buying power as if it fills at its stop price ({_usd(entry.stop_price)}) "
+                     "or the current price, whichever is higher")
+        pos = {k: v for k, v in account.positions().items() if v != 0}
+        ev = margin.evaluate(account.type, account.cash, pos, self._marks(pos))
+        if account.type == "margin":
+            free = max(ev.excess, ZERO) / scale if ev.ok else ZERO
+        else:
+            free = max(account.cash - ev.requirement, ZERO) if ev.ok else ZERO
+        if cents(free - have) > 0:
+            whose = "your open orders, this one at its current size" if what == "the change" else "your other open orders"
+            text += f" ({_usd(free - have)} is reserved by {whose})"
+        return text
+
     def _not_riskier(self, account: Account, deltas: dict, cash_delta: Decimal) -> bool:
         """True when applying these position changes (and paying cash_delta) adds no risk.
 
@@ -709,7 +753,7 @@ class Exchange:
             warnings.append("One-cancels-other: a fill on one of these orders reduces or cancels the others.")
         if any(o.role in (m.EXIT, m.TRIGGERED) for o in orders[1:]):
             warnings.append("The triggered orders stay on hold until this order fills.")
-        return {"ok": ok, "reason": None if ok else rule or worst.reason, "symbol": entry.symbol,
+        return {"ok": ok, "reason": None if ok else rule or self._shortfall(a, worst, entry), "symbol": entry.symbol,
                 "description": describe(entry.symbol), "side": entry.side, "qty": entry.qty,
                 "estimated_price": price, "estimated_notional": notional, "estimated_fees": fee,
                 "estimated_total": notional + fee if entry.side == m.BUY else notional - fee,
@@ -731,7 +775,7 @@ class Exchange:
         entry = orders[0]
         worst = self._risk_check(a, orders)
         if not (worst.closing or worst.ok):
-            raise OrderRejected(worst.reason or "order rejected by risk check")
+            raise OrderRejected(self._shortfall(a, worst, entry))
         rule = self._rule_check(a, orders, worst)  # pattern day trader and settled-cash rules
         if rule:
             raise OrderRejected(rule)
@@ -790,10 +834,10 @@ class Exchange:
         self._handle(self.engine.replace(order_id, self.now(), qty, limit, stop))
         # Held bracket and exit children are re-sized to what their entry filled when they are
         # released, so editing them cannot add risk; a held triggered order keeps its own size.
-        if (o.status != m.HELD or o.role == m.TRIGGERED) and not self._worst_case(a, []).ok \
+        if (o.status != m.HELD or o.role == m.TRIGGERED) and not (after := self._worst_case(a, [])).ok \
                 and not self._reduces_risk_after(a, o):
             o.qty, o.limit_price, o.stop_price = old
-            raise OrderRejected("insufficient buying power for the change")
+            raise OrderRejected(self._shortfall(a, after, o, "the change"))
         if o.status != m.HELD:  # pattern day trader and settled-cash rules, as on submit
             rule = self.lifecycle.pre_trade(a, o, None if self._reduces_risk_after(a, o) else self._worst_case(a, []))
             if rule:
@@ -949,7 +993,7 @@ class Exchange:
                          "ratio": l["ratio"], "qty": leg_qty, "bid": q.bid, "ask": q.ask, "estimated_price": px,
                          "source": sources[l["symbol"]],
                          "position_before": held, "position_after": held + (leg_qty if l["side"] == m.BUY else -leg_qty)})
-        return {"ok": ok, "reason": None if ok else rule or worst.reason, "underlying": o.symbol, "qty": o.qty,
+        return {"ok": ok, "reason": None if ok else rule or self._shortfall(a, worst, o), "underlying": o.symbol, "qty": o.qty,
                 "type": m.LIMIT if o.limit_price is not None else m.MARKET, "tif": o.tif, "legs": rows,
                 "net_price": abs(net), "price_effect": effect(net),
                 "market_net_price": abs(market_net), "market_price_effect": effect(market_net),
