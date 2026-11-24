@@ -12,6 +12,8 @@ import { isPhone, screensFor } from "./screens";
 // e2e/README.md.
 
 test.skip(process.platform !== "linux", "visual baselines are made on Linux (the CI runner)");
+// Locally a baseline from the CI runner rarely matches pixel for pixel, so the check runs in CI or on request.
+test.skip(!process.env.CI && !process.env.E2E_VISUAL, "visual comparisons run in CI, or locally with E2E_VISUAL=1");
 
 const authURL = `http://127.0.0.1:${process.env.E2E_AUTH_PORT}`;
 

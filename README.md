@@ -96,6 +96,31 @@ a Content-Security-Policy and related headers. A reverse proxy in front of Paper
 build: the server ignores `X-Forwarded-For` (uvicorn runs with `--no-proxy-headers`) and never lets a request
 that carries proxy headers skip the passcode. If you use one anyway, set `PAPERDESK_LOOPBACK_BYPASS=0`.
 
+### Add it to your phone's home screen
+
+PaperDesk can be added to the home screen like an app (it has a web app manifest and icons). With LAN mode
+on, open the address the server printed on the phone, sign in, then:
+
+- **iPhone or iPad (Safari):** tap the Share button, then **Add to Home Screen**. Other iOS browsers have
+  the same entry in their share menu on recent iOS versions.
+- **Android (Chrome):** open the ⋮ menu, then **Add to Home screen** (it may say **Install app**). Samsung
+  Internet: menu, **Add page to**, **Home screen**.
+
+The icon opens PaperDesk full screen, without the browser's address bar, in the phone layout; the sign-in
+lasts as long as in the browser (on iOS the home-screen app keeps its own cookies, so you sign in once more
+there). What does not work: PaperDesk is served over plain HTTP on your network, which browsers do not treat
+as a secure context, so there is no offline mode, no service worker and no push notifications; the app needs
+the computer running PaperDesk to be on and reachable. Android Chrome may only offer a shortcut rather than a
+full install for the same reason. If the computer's address changes (a new address from the router), the
+home-screen icon points at the old one: remove it and add it again, or give the computer a fixed address in
+your router.
+
+The manifest and icons (`/manifest.webmanifest`, `/favicon.ico`, `/favicon.svg`, `/apple-touch-icon.png`,
+`/icons/...`) are served without signing in, because browsers fetch them that way; they hold nothing about
+your accounts. The server serves only that exact list of files from the UI build (`PUBLIC_STATIC` in
+`backend/app/api/auth.py`). The icons are drawn from `frontend/public/icons/mark.svg`; after editing it, run
+`node tools/make_icons.mjs` to render the PNGs and `favicon.ico`.
+
 Server-rendered pages cannot use inline scripts under the Content-Security-Policy. A print button is written
 as `<button type="button" data-print>Print</button><script src="/print.js"></script>`.
 
@@ -187,15 +212,19 @@ cd e2e && npm install && npm test              # browser tests: builds the UI, s
 ```
 
 The end-to-end tests (Playwright, `e2e/`) start the server themselves on a random private port with a
-temporary data directory and a synthetic feed, and fail on any console or page error. They run on a desktop
-profile and on iPhone 13 and Pixel 7 emulation (`e2e/tests/mobile.spec.ts`); mobile tests that today's layout
-fails are marked `test.fixme` with the reason. Environment: `E2E_PYTHON` (Python with the backend installed;
+temporary data directory and a synthetic feed, and fail on any console or page error. Locally they run in
+Chromium only (desktop, iPhone 13 and Pixel 7 emulation); `E2E_ENGINES=chromium,firefox,webkit` adds desktop
+Firefox, desktop Safari, iPhones and an iPad on the real WebKit engine. They include axe-core accessibility
+scans, a keyboard-only walkthrough and visual comparisons; see `e2e/README.md` for the projects, how CI runs
+them and how to update the visual baselines. Tests that today's product fails are marked `test.fixme` with
+the reason. Environment: `E2E_PYTHON` (Python with the backend installed;
 defaults to `backend/.venv`, else `python3`), `E2E_PORT`, `E2E_CHROMIUM` (path to a Chromium to use instead of
 Playwright's own), `E2E_SKIP_BUILD=1`. Run `npx playwright install chromium` once if no browser is installed.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pull requests and pushes to `main`: backend tests on
-Python 3.11 and 3.13 (Linux), plus Windows and macOS; the UI build; the end-to-end tests; and a Windows job that
-starts `run.bat` and checks that the API and UI answer; and a Docker job that builds the image, runs it and checks
+Python 3.11 and 3.13 (Linux), plus Windows and macOS; the UI build; the end-to-end tests in Chromium, Firefox and
+WebKit (one job per engine); the desktop end-to-end suite in Microsoft Edge on Windows against a server started
+by `run.bat` (in a non-UTC time zone); a Windows job that starts `run.bat` and checks that the API and UI answer; and a Docker job that builds the image, runs it and checks
 that the API and UI answer. The e2e run starts a second server with a passcode (loopback bypass off) for the
 sign-in tests (`e2e/tests/auth.spec.ts`, desktop and Pixel 7; `E2E_AUTH_PORT`, `E2E_PASSCODE`).
 
