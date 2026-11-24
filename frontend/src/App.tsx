@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chart } from "./Chart";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
 import { Ticket, TicketSeed } from "./Ticket";
+import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { api, isOption, money, pct, signed, store, time, tone, underlyingOf, usd } from "./util";
 
 type Toast = { id: number; text: string; bad?: boolean };
@@ -24,6 +25,8 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
+  const small = useSmallScreen();
+  const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
   const ws = useRef<WebSocket | null>(null);
   const toastId = useRef(0);
 
@@ -121,17 +124,89 @@ export default function App() {
   const closePosition = (p: any) => {
     setSymbol(p.underlying || p.symbol);
     setTimeout(() => setSeed({ symbol: p.symbol, side: p.qty > 0 ? "sell" : "buy", qty: Math.abs(p.qty), nonce: Date.now() }), 0);
+    setScreen("Trade");
   };
+  const pickSymbol = (s: string) => { setSymbol(s); setScreen("Chart"); };
+  const tradeOption = (s: string, side: string, price: number) => {
+    setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() });
+    setScreen("Trade");
+  };
+  const startTrade = (side: string) => { setSeed({ symbol, side, nonce: Date.now() }); setScreen("Trade"); };
 
   if (fatal) return <div className="fatal"><h1>PaperDesk</h1><p>{fatal}</p></div>;
 
+  // Top-bar actions: desktop shows them in the header, the phone layout lists them in its menu.
+  const topActions: TopAction[] = [
+    { label: "New account", onClick: () => setDialog("new") },
+    { label: "Reset", onClick: () => setDialog("reset") },
+  ];
+  const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
+  const banner = (
+    <div className="paper-banner" role="note">
+      Paper trading · no real money{status?.simulated_data ? " · simulated market data" : status?.delay_seconds ? ` · data delayed ${status.delay_seconds / 60} min` : ""}
+    </div>
+  );
+  const accountSelect = (
+    <select value={accountId} aria-label="Account" onChange={(e) => setAccountId(e.target.value)}>
+      {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
+    </select>
+  );
+  const marginNotice = summary?.margin_call && (
+    <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
+  );
+  const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
+  const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
+  const mainTabs = (
+    <div className="tabs" role="tablist">
+      {["Chart", "Options", "Company"].map((v) => (
+        <button key={v} role="tab" aria-selected={v === view} className={v === view ? "on" : ""} onClick={() => setView(v)}>{v}</button>
+      ))}
+    </div>
+  );
+  const mainView = (
+    <div className="view">
+      {view === "Chart" && <Chart symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
+      {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
+      {view === "Company" && <Company info={info} />}
+    </div>
+  );
+  const bottom = accountId && (
+    <BottomPanel accountId={accountId} positions={positions} orders={orders} refreshKey={refreshKey} quotes={quotes}
+      onSelect={pickSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify} />
+  );
+  const ticketEl = accountId && (
+    <Ticket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} description={ticketDesc} position={ticketPos}
+      onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
+  );
+  const depth = <DepthTape symbol={underlyingOf(symbol)} />;
+  const overlays = (
+    <>
+      <div className="toasts" aria-live="polite">
+        {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
+      </div>
+      {dialog && (
+        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
+          onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />
+      )}
+    </>
+  );
+
+  if (small) {
+    return (
+      <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
+        summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
+        notice={marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}>
+        {overlays}
+      </MobileShell>
+    );
+  }
+
   return (
-    <div className="app">
+    <div className="app" data-account={accountId}>
       <header className="top">
         <div className="brand">PaperDesk</div>
-        <div className="paper-banner" role="note">
-          Paper trading · no real money{status?.simulated_data ? " · simulated market data" : status?.delay_seconds ? ` · data delayed ${status.delay_seconds / 60} min` : ""}
-        </div>
+        {banner}
         <div className="top-stats">
           <div><span>Account value</span><b>{usd(summary?.equity)}</b></div>
           <div><span>Day P&amp;L</span><b className={tone(summary?.day_pnl)}>{signed(summary?.day_pnl)}</b></div>
@@ -141,53 +216,28 @@ export default function App() {
         </div>
         <div className="top-right">
           <span className={connected ? "dot ok" : "dot"} title={connected ? "Live connection" : "Reconnecting…"} />
-          <span className="muted">{status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…"}</span>
-          <select value={accountId} aria-label="Account" onChange={(e) => setAccountId(e.target.value)}>
-            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
-          </select>
-          <button className="ghost sm" onClick={() => setDialog("new")}>New account</button>
-          <button className="ghost sm" onClick={() => setDialog("reset")}>Reset</button>
+          <span className="muted">{session}</span>
+          {accountSelect}
+          {topActions.map((a, i) => <Fragment key={i}>{a.element ?? <button className="ghost sm" onClick={a.onClick}>{a.label}</button>}</Fragment>)}
         </div>
       </header>
-      {summary?.margin_call && (
-        <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
-      )}
+      {marginNotice}
       <main>
-        <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={setSymbol} onChange={saveWatch} />
+        {watchlist}
         <div className="center-col">
           <section className="panel main-view">
-            <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />
-            <div className="tabs" role="tablist">
-              {["Chart", "Options", "Company"].map((v) => (
-                <button key={v} role="tab" aria-selected={v === view} className={v === view ? "on" : ""} onClick={() => setView(v)}>{v}</button>
-              ))}
-            </div>
-            <div className="view">
-              {view === "Chart" && <Chart symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
-              {view === "Options" && <OptionChain symbol={symbol} onTrade={(s, side, price) => setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() })} />}
-              {view === "Company" && <Company info={info} />}
-            </div>
+            {quoteHeader}
+            {mainTabs}
+            {mainView}
           </section>
-          {accountId && (
-            <BottomPanel accountId={accountId} positions={positions} orders={orders} refreshKey={refreshKey} quotes={quotes}
-              onSelect={setSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify} />
-          )}
+          {bottom}
         </div>
         <div className="right-col">
-          {accountId && (
-            <Ticket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} description={ticketDesc} position={ticketPos}
-              onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
-          )}
-          <DepthTape symbol={underlyingOf(symbol)} />
+          {ticketEl}
+          {depth}
         </div>
       </main>
-      <div className="toasts" aria-live="polite">
-        {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
-      </div>
-      {dialog && (
-        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
-          onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />
-      )}
+      {overlays}
     </div>
   );
 }

@@ -38,7 +38,9 @@ export const test = base.extend<Fixtures>({
         localStorage.setItem("pd.symbol", s);
       }, [acc.id, symbol]);
       await page.goto("/");
-      await expect(page.getByRole("combobox", { name: "Account" })).toHaveValue(acc.id);
+      // The phone layout keeps the account picker in its menu, so check the account on the root element there.
+      if ((page.viewportSize()?.width ?? 1440) < 900) await expect(page.locator(".m-shell")).toHaveAttribute("data-account", acc.id);
+      else await expect(page.getByRole("combobox", { name: "Account" })).toHaveValue(acc.id);
       await expect(page.getByRole("heading", { name: symbol, level: 2 })).toBeVisible();
     });
   },

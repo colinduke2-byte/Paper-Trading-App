@@ -157,19 +157,27 @@ test("every bottom tab renders", async ({ page, open }) => {
 });
 
 test("no horizontal overflow at 420 px width", async ({ page, open }) => {
+  // Below 900 px the phone layout takes over: one view at a time with a tab bar at the bottom.
   await page.setViewportSize({ width: 420, height: 900 });
   await open();
   await expect(page.getByRole("note")).toBeVisible();
   const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  const nav = (name: string) => page.getByRole("navigation", { name: "Views" }).getByRole("button", { name, exact: true });
   expect(await overflow(), "overflow on load").toBeLessThanOrEqual(0);
-  // dispatchEvent: at this width the chart currently overlaps the bottom tabs (see mobile.spec.ts), so a real click is blocked.
+  await nav("Account").click();
   for (const tab of [/^Positions/, /^Orders/, "Fills", "Activity", "Performance", "Alerts", "Screener"]) {
-    await bottomTab(page, tab).dispatchEvent("click");
+    await bottomTab(page, tab).click();
     await expect(bottomTab(page, tab)).toHaveAttribute("aria-selected", "true");
     expect(await overflow(), `horizontal overflow on tab ${tab}`).toBeLessThanOrEqual(0);
   }
+  await nav("Chart").click();
   for (const view of ["Options", "Company", "Chart"]) {
     await page.getByRole("tab", { name: view }).click();
+    await expect(page.getByRole("tab", { name: view })).toHaveAttribute("aria-selected", "true");
+    expect(await overflow(), `horizontal overflow on view ${view}`).toBeLessThanOrEqual(0);
+  }
+  for (const view of ["Watchlist", "Trade"]) {
+    await nav(view).click();
     expect(await overflow(), `horizontal overflow on view ${view}`).toBeLessThanOrEqual(0);
   }
 });
