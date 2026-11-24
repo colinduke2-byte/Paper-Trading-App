@@ -178,7 +178,7 @@ th {{ font-weight: 600; color: #444; font-size: 12px; }} .n {{ text-align: right
 <p class="meta">{e(st['account_name'])} ({e(st['account_id'])}, {e(st['account_type'])} account) ·
 period {_d(st['period_start'])} to {_d(st['period_end'] - 1)} (New York time){' · month in progress' if st['current'] else ''} ·
 tax-lot method {e(st['lot_method'].replace('_', ' '))} · generated {e(st['generated_iso'])}</p>
-<p class="noprint"><button onclick="window.print()">Print</button></p>
+<p class="noprint"><button type="button" data-print>Print</button><script src="/print.js"></script></p>
 <h2>Summary</h2>
 <table class="summary"><tbody>{''.join(f'<tr><td>{e(k)}</td><td>{_m(v)}</td></tr>' for k, v in summary)}</tbody></table>
 <h2>Balances</h2>
