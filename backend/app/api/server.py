@@ -53,19 +53,38 @@ def order_row(o) -> dict:
     return row
 
 
+def create_default_accounts(ex: Exchange) -> None:
+    ex.create_account("Margin account", "margin", Decimal("100000"))
+    ex.create_account("Cash account", "cash", Decimal("25000"))
+
+
 def default_exchange() -> Exchange:
     from ..marketdata.config import attach, select_feed
+    from ..storage.lock import DataDirLock
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
+    lock = DataDirLock(data_dir).acquire()  # raises DataDirLocked when another server uses this folder
     # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
     sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
     ex = Exchange(sel.feed, data_dir=sel.data_dir, session_mode=sel.session_mode)
+    ex.data_lock = lock
     attach(sel, ex)
-    if not ex.load() or not ex.accounts:
-        ex.create_account("Margin account", "margin", Decimal("100000"))
-        ex.create_account("Cash account", "cash", Decimal("25000"))
+    loaded = ex.load()
+    recovering = ex.store is not None and ex.store.blocked  # damaged or newer state: wait for the user's choice
+    if not recovering and (not loaded or not ex.accounts):
+        create_default_accounts(ex)
     if not ex.watchlists:
         ex.watchlists = {"Main": sel.watchlist or ["MKTX", "TECX", "NVLX", "ORBT", "PXLR", "AUTO", "FNBK", "ENRG", "RETL", "STRM"]}
     return ex
+
+
+def storage_brief(live: Exchange) -> Optional[dict]:
+    """Save health of the live data folder, for every status message (details: /api/data/status)."""
+    st = live.store
+    if st is None:
+        return None
+    r = st.recovery
+    return {"last_save": st.last_save, "saving_failed": st.error is not None, "error": st.error,
+            "recovery": {"kind": r["kind"], "reason": r["reason"]} if r else None}
 
 
 class AppContext:
@@ -129,7 +148,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
                 "paper": True, **plain(ex.feed.status_info()),
-                "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None,
+                "storage": storage_brief(ctx.live)}
 
     async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()
@@ -175,6 +195,9 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             ctx.ex.save(force=True)
             if ctx.ex is not ctx.live:
                 ctx.live.save(force=True)
+        lock = getattr(ctx.live, "data_lock", None)
+        if lock is not None:
+            lock.release()
 
     app = FastAPI(title="PaperDesk", lifespan=lifespan)
     ctx.app = app
@@ -513,4 +536,10 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
 
 def app_factory() -> FastAPI:
-    return create_app()
+    from ..storage.lock import DataDirLocked
+    try:
+        return create_app()
+    except DataDirLocked as e:
+        import sys
+        print(f"PaperDesk did not start: {e}", file=sys.stderr)
+        raise SystemExit(1) from None

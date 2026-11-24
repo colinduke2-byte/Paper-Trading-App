@@ -127,14 +127,18 @@ class Account:
         return pnl
 
     # ---- storage -------------------------------------------------------
-    def to_plain(self) -> dict:
-        return {"id": self.id, "name": self.name, "type": self.type, "starting_cash": str(self.starting_cash),
-                "created_at": self.created_at, "ledger": self.ledger.to_plain(),
-                "lots": {s: [[str(l.qty), str(l.price), l.ts, str(l.cost), l.fill_id] for l in ls] for s, ls in self.lots.items()},
-                "fills": [to_plain(f) for f in self.fills], "closed": self.closed,
-                "equity_history": self.equity_history, "day_start_equity": str(self.day_start_equity),
-                "lot_method": self.lot_method, "journal": self.journal,
-                "settings": self.settings, "lifecycle": self.life.to_plain()}
+    def to_plain(self, lists: bool = True) -> dict:
+        """Storage form. lists=False leaves out the append-only lists (ledger, fills, closed), which the
+        storage layer keeps in segment files (app/storage/store.py)."""
+        out = {"id": self.id, "name": self.name, "type": self.type, "starting_cash": str(self.starting_cash),
+               "created_at": self.created_at,
+               "lots": {s: [[str(l.qty), str(l.price), l.ts, str(l.cost), l.fill_id] for l in ls] for s, ls in self.lots.items()},
+               "equity_history": self.equity_history, "day_start_equity": str(self.day_start_equity),
+               "lot_method": self.lot_method, "journal": self.journal,
+               "settings": self.settings, "lifecycle": self.life.to_plain()}
+        if lists:
+            out.update(ledger=self.ledger.to_plain(), fills=[to_plain(f) for f in self.fills], closed=self.closed)
+        return out
 
     @classmethod
     def from_plain(cls, d: dict) -> "Account":

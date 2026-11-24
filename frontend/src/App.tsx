@@ -7,6 +7,7 @@ import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
+import { DataDialog, SaveNotice } from "./DataBackups";
 import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
 import { useSignOutAction } from "./Login";
 
@@ -31,6 +32,7 @@ export default function App() {
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dataOpen, setDataOpen] = useState(false);
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
@@ -164,6 +166,7 @@ export default function App() {
     { label: "Reset", onClick: () => setDialog("reset") },
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
+    { label: "Data", title: "Data and backups: save status, backups, restore, account export and import", onClick: () => setDataOpen(true) },
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
   ];
   const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
@@ -180,6 +183,8 @@ export default function App() {
   const marginNotice = summary?.margin_call && (
     <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
   );
+  const saveNotice = <SaveNotice storage={status?.storage} />;
+  const notices = status?.storage?.saving_failed ? <div className="notice-stack">{saveNotice}{marginNotice}</div> : marginNotice;
   const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
   const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
   const mainTabs = (
@@ -214,6 +219,10 @@ export default function App() {
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
+      {dataOpen && (
+        <DataDialog accountId={accountId} onClose={() => setDataOpen(false)} notify={notify}
+          onRestored={async () => { const list = await loadAccounts(); if (!list.find((a: any) => a.id === accountId)) setAccountId(list[0]?.id || ""); setRefreshKey((k) => k + 1); }} />
+      )}
       {settingsOpen && accountId && (
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}
@@ -228,7 +237,7 @@ export default function App() {
     return (
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
-        notice={marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        notice={notices} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
         ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
         replayBar={status?.replay ? replayBar : null} mode={mode}>
         {overlays}
@@ -256,6 +265,7 @@ export default function App() {
         </div>
       </header>
       {replayBar}
+      {saveNotice}
       {marginNotice}
       <main key={mode}>
         {watchlist}

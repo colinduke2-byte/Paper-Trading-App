@@ -54,9 +54,10 @@ class Ledger:
                 out[a] = out.get(a, ZERO) + v
         return out
 
-    def to_plain(self) -> list:
+    def to_plain(self, start: int = 0) -> list:
+        """Transactions from index `start` on (the storage layer appends only the new ones)."""
         return [{"id": t.id, "ts": t.ts, "kind": t.kind, "memo": t.memo, "ref": t.ref,
-                 "postings": [[a, str(v)] for a, v in t.postings]} for t in self.transactions]
+                 "postings": [[a, str(v)] for a, v in t.postings]} for t in self.transactions[start:]]
 
     @classmethod
     def from_plain(cls, rows: list) -> "Ledger":

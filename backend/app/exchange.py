@@ -68,6 +68,8 @@ class Exchange:
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
         self.dirty = False
+        self.load_result = None
+        self.before_destructive = None  # set by the data service: snapshot before a reset or delete  # what the last load() found (app.storage.store.LoadResult)
         self.lifecycle = LifecycleManager(self)  # corporate actions, settlement, interest, PDT, margin calls
 
     # ---- time and market state -----------------------------------------
@@ -130,6 +132,8 @@ class Exchange:
 
     def reset_account(self, account_id: str, starting_cash=None) -> Account:
         old = self.account(account_id)
+        if self.before_destructive:
+            self.before_destructive("pre-reset")
         for o in self.engine.active_orders():
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
@@ -144,6 +148,8 @@ class Exchange:
         self.account(account_id)
         if len(self.accounts) == 1:
             raise ValueError("cannot delete the only account")
+        if self.before_destructive:
+            self.before_destructive("pre-delete")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
         del self.accounts[account_id]
         self.dirty = True
@@ -1164,53 +1170,86 @@ class Exchange:
         return out
 
     # ---- persistence -----------------------------------------------------------
+    # app/storage does the file work (format, segments, recovery, backups): docs/STATE_FORMAT.md.
     def _path(self, name: str) -> str:
         return os.path.join(self.data_dir, name)
 
+    @property
+    def store(self):
+        """The StateStore of this exchange's data directory (None without one)."""
+        if not self.data_dir:
+            return None
+        st = getattr(self, "_store", None)
+        if st is None or st.dir != self.data_dir:
+            from .storage.store import StateStore
+            st = self._store = StateStore(self.data_dir)
+        return st
+
     @staticmethod
     def _write(path: str, data: dict) -> None:
-        # The temp file is created in the target directory, so the replace never crosses volumes.
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-                f.flush()
-                os.fsync(f.fileno())
-            # On Windows os.replace raises PermissionError while another process (a virus scanner, an
-            # editor, a backup tool) briefly holds the target open, so retry for a short while.
-            for attempt in range(10):
-                try:
-                    os.replace(tmp, path)
-                    return
-                except PermissionError:
-                    if attempt == 9:
-                        raise
-                    _time.sleep(0.05 * (attempt + 1))
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        from .storage.fsutil import atomic_write_bytes
+        atomic_write_bytes(path, json.dumps(data).encode("utf-8"))
 
-    def save(self, force: bool = False) -> None:
-        if not self.data_dir:
-            return
-        os.makedirs(self.data_dir, exist_ok=True)
+    def document_head(self) -> dict:
+        """Everything in the state document except the accounts and orders."""
+        return {"watchlists": self.watchlists, "alerts": self.alerts, "seq": self._peek_sequences(),
+                "lifecycle": self.lifecycle.to_plain()}
+
+    def to_document(self) -> dict:
+        """The complete state as one self-contained document (backups, archives, migrations)."""
+        from .storage.schema import CURRENT_VERSION
+        return {"version": CURRENT_VERSION, "accounts": [a.to_plain() for a in self.accounts.values()],
+                "orders": [to_plain(o) for o in self.engine.orders.values()], **self.document_head()}
+
+    def save_plan(self, force: bool = False):
+        """Serialise what needs saving (pure: no file I/O). Call under the exchange lock; hand the result to
+        self.store.write() outside it. None when there is nothing to save or saving must wait."""
+        st = self.store
+        if st is None or st.should_wait(force):
+            return None
+        state = None
+        accounts = orders = head = None
         if self.dirty or force:
             self.dirty = False
-            self._write(self._path("state.json"), {
-                "version": 1,
-                "accounts": [a.to_plain() for a in self.accounts.values()],
-                "orders": [to_plain(o) for o in self.engine.orders.values()],
-                "watchlists": self.watchlists, "alerts": self.alerts,
-                "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})
+            accounts, orders, head = list(self.accounts.values()), list(self.engine.orders.values()), self.document_head()
+        market = None
         now = self.now()
         if force or now - self._last_market_save >= 60:
             self._last_market_save = now
-            snap = self.feed.snapshot()
-            if snap:
-                self._write(self._path("market.json"), snap)
+            market = self.feed.snapshot() or None
+        if accounts is None and market is None:
+            return None
+        from . import __version__ as app_version
+        if accounts is None:  # only the market is due
+            from .storage.store import SavePlan, encode
+            plan = SavePlan(0, market=encode(market))
+            with st._meta:
+                st._seq += 1
+                plan.seq = st._seq
+            return plan
+        return st.plan(accounts, orders, head, market, app_version)
+
+    def write_plan(self, plan) -> bool:
+        """Write a plan from save_plan(). On failure the state stays marked as changed, so it is saved again."""
+        if plan is None:
+            return True
+        ok = self.store.write(plan)
+        if not ok:
+            self.dirty = True
+            if plan.market is not None:
+                self._last_market_save = float("-inf")
+        return ok
+
+    def save(self, force: bool = False) -> bool:
+        st = self.store
+        if st is None:
+            return True
+        if st.blocked:
+            return False  # recovery: the files on disk must not be overwritten
+        if st.should_wait(force):
+            return st.error is None  # waiting out the back-off after a failed save
+        os.makedirs(self.data_dir, exist_ok=True)
+        return self.write_plan(self.save_plan(force))
 
     def _peek_sequences(self) -> dict:
         """Read the next id of each counter without using it up."""
@@ -1223,24 +1262,42 @@ class Exchange:
             out[key] = n
         return out
 
-    def load(self) -> bool:
-        if not self.data_dir:
-            return False
-        try:
-            with open(self._path("market.json"), encoding="utf-8") as f:
-                self.feed.restore(json.load(f))
-        except (OSError, ValueError):
-            pass
-        try:
-            with open(self._path("state.json"), encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return False
-        self.accounts = {a["id"]: Account.from_plain(a) for a in data["accounts"]}
+    def apply_document(self, data: dict) -> None:
+        """Replace the whole state with a validated, current-version document. Builds everything first, so
+        a document that fails part-way leaves the exchange as it was."""
+        accounts = {a["id"]: Account.from_plain(a) for a in data["accounts"]}
         seq = data["seq"]
-        self.engine.restore([from_plain(Order, o) for o in data["orders"]], seq["fill"])
+        orders = [from_plain(Order, o) for o in data["orders"]]
+        self.accounts = accounts
+        self.engine.restore(orders, seq["fill"])
         self.watchlists, self.alerts = data.get("watchlists", {}), data.get("alerts", [])
         self._order_seq, self._acct_seq = count(seq["order"]), count(seq["account"])
         self._alert_seq, self._expiry_seq = count(seq["alert"]), count(seq["expiry"])
         self.lifecycle.restore(data.get("lifecycle"))
+
+    def load(self) -> bool:
+        """Load the saved state. False when there is none, or when it is damaged or from a newer version:
+        then self.store.recovery says what happened, and nothing is saved until it is resolved."""
+        st = self.store
+        if st is None:
+            return False
+        res = st.load()
+        self.load_result = res
+        if res.market is not None:
+            self.feed.restore(res.market)
+        if res.market_problem:
+            st.warnings.append(res.market_problem)
+        if res.status != "ok":
+            return False
+        try:
+            self.apply_document(res.doc)
+        except (KeyError, TypeError, ValueError, ArithmeticError, AttributeError, IndexError) as e:
+            st._damaged(f"state.json could not be loaded ({type(e).__name__}: {e})", None, "")
+            self.accounts, self.engine.orders = {}, {}
+            return False
+        st.adopt(self.accounts.values())
+        from .storage.schema import account_problems
+        for a in self.accounts.values():
+            for p in account_problems(a):
+                st.warnings.append(p)
         return True
