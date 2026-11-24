@@ -4,6 +4,7 @@ import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from
 import { BottomPanel } from "./Panels";
 import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
+import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { api, isOption, money, pct, signed, store, time, tone, underlyingOf, usd } from "./util";
 
 type Toast = { id: number; text: string; bad?: boolean };
@@ -25,6 +26,7 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
+  const [replayPicker, setReplayPicker] = useState(false);
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
   const ws = useRef<WebSocket | null>(null);
@@ -114,7 +116,17 @@ export default function App() {
     api("/watchlists/Main", { method: "PUT", body: list }).catch((e) => notify(`Could not save the watchlist: ${e.message}`, true));
   };
 
-  const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000);
+  // Switching between live and replay changes the active exchange: reload what belongs to it.
+  useModeSwitch(status, async () => {
+    const [list, wl, syms] = await Promise.all([loadAccounts(), api("/watchlists"), api("/symbols")]).catch(() => [[], {}, []]);
+    setAccountId((cur) => (list.find((a: any) => a.id === cur) ? cur : list[0]?.id || ""));
+    const main = wl.Main || Object.values(wl)[0] || [];
+    setWatch(main);
+    setSymbol((cur) => (syms.some((x: any) => x.symbol === cur) ? cur : main[0] || syms[0]?.symbol || cur));
+    setRefreshKey((k) => k + 1);
+  });
+
+  const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000, [modeKey(status)]);
   const ticketPos = positions.find((p) => p.symbol === seed.symbol);
   const stockPos = positions.find((p) => p.symbol === symbol);
   const openForSymbol = orders.filter((o) => o.symbol === symbol && ["working", "partially_filled"].includes(o.status));
@@ -139,11 +151,12 @@ export default function App() {
   const topActions: TopAction[] = [
     { label: "New account", onClick: () => setDialog("new") },
     { label: "Reset", onClick: () => setDialog("reset") },
+    ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
   ];
   const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
   const banner = (
-    <div className="paper-banner" role="note">
-      Paper trading · no real money{status?.simulated_data ? " · simulated market data" : status?.delay_seconds ? ` · data delayed ${status.delay_seconds / 60} min` : ""}
+    <div className={status?.replay ? "paper-banner replay" : "paper-banner"} role="note">
+      {replayBanner(status) ?? <>Paper trading · no real money{status?.simulated_data ? " · simulated market data" : status?.delay_seconds ? ` · data delayed ${status.delay_seconds / 60} min` : ""}</>}
     </div>
   );
   const accountSelect = (
@@ -165,7 +178,7 @@ export default function App() {
   );
   const mainView = (
     <div className="view">
-      {view === "Chart" && <Chart symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
+      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
     </div>
@@ -179,11 +192,14 @@ export default function App() {
       onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
   );
   const depth = <DepthTape symbol={underlyingOf(symbol)} />;
+  const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
+  const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const overlays = (
     <>
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
+      {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
       {dialog && (
         <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
           onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />
@@ -196,7 +212,8 @@ export default function App() {
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
         notice={marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
-        ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}>
+        ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
+        replayBar={status?.replay ? replayBar : null} mode={mode}>
         {overlays}
       </MobileShell>
     );
@@ -218,11 +235,12 @@ export default function App() {
           <span className={connected ? "dot ok" : "dot"} title={connected ? "Live connection" : "Reconnecting…"} />
           <span className="muted">{session}</span>
           {accountSelect}
-          {topActions.map((a, i) => <Fragment key={i}>{a.element ?? <button className="ghost sm" onClick={a.onClick}>{a.label}</button>}</Fragment>)}
+          {topActions.map((a, i) => <Fragment key={i}>{a.element ?? <button className="ghost sm" title={a.title} onClick={a.onClick}>{a.label}</button>}</Fragment>)}
         </div>
       </header>
+      {replayBar}
       {marginNotice}
-      <main>
+      <main key={mode}>
         {watchlist}
         <div className="center-col">
           <section className="panel main-view">

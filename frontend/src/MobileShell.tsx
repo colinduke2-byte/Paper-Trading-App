@@ -3,14 +3,23 @@ import { signed, tone, usd } from "./util";
 import "./mobile.css";
 
 // Small-screen layout: a compact top bar, one full-height view at a time and a bottom tab bar.
-// The views are built from the same elements as the desktop layout (App passes them in), so a
-// new bottom-panel tab or top-bar action shows up here without changes to this file.
+// The views are built from the same elements as the desktop layout (App passes them in).
+//
+// How to add things so they also work on a phone (no change to this file needed):
+// - A new tab next to Positions, Orders, ...: add it to TABS in Panels.tsx. The Account view renders
+//   BottomPanel as it is, so the tab appears there automatically (the tab strip scrolls sideways).
+// - A new top-bar action (a Settings button, say): add an entry to `topActions` in App.tsx, either
+//   { label, onClick } or { label, element }. Desktop shows it in the header; here it is a button in
+//   the menu (an onClick entry closes the menu first). Make any dialog it opens work at 390 px.
+// - Something shown under the header in a special mode (like the replay bar): pass it in as a prop
+//   and render it in the "strip" grid row below; the views shrink to make room.
+// Controls in the views get 44 px touch targets and 16 px input text from mobile.css automatically.
 
 export type Screen = "Watchlist" | "Chart" | "Trade" | "Account";
 export const SCREENS: Screen[] = ["Watchlist", "Chart", "Trade", "Account"];
 
 // A top-bar entry. Desktop renders it in the header; the phone layout lists it in the menu.
-export type TopAction = { label: string; onClick?: () => void; element?: ReactNode };
+export type TopAction = { label: string; onClick?: () => void; element?: ReactNode; title?: string };
 
 // Phones in portrait (below 900 px), and phones in landscape (short and not very wide).
 export const SMALL_QUERY = "(max-width: 899px), (max-height: 540px) and (max-width: 1199px)";
@@ -82,8 +91,10 @@ export function MobileShell(p: {
   watchlist: ReactNode; quote: ReactNode; mainTabs: ReactNode; mainView: ReactNode; view: string;
   ticket: ReactNode; depth: ReactNode; bottom: ReactNode; symbol: string;
   onTrade: (side: "buy" | "sell") => void; children?: ReactNode;
+  replayBar?: ReactNode; mode?: string; // the replay controls (only while a replay runs) and a key that changes on live/replay switches
 }) {
   const [menu, setMenu] = useState(false);
+  const [replayMore, setReplayMore] = useState(false);
   const [side, setSide] = useState<ChainSide>("calls");
   const keyboard = useKeyboardOpen();
   const s = p.summary;
@@ -118,9 +129,16 @@ export function MobileShell(p: {
         </div>
         <div className="m-top-row2">{p.banner}</div>
       </header>
+      {p.replayBar && (
+        <div className={"m-replay" + (replayMore ? " open" : "")}>
+          {p.replayBar}
+          <button className="ghost m-replay-more" aria-expanded={replayMore} aria-label={replayMore ? "Fewer replay controls" : "More replay controls"}
+            onClick={() => setReplayMore((x) => !x)}><Icon d="M6 9l6 6 6-6" /></button>
+        </div>
+      )}
       {p.notice}
 
-      <main className="m-views">
+      <main className="m-views" key={p.mode}>
         <section className="m-view m-watch" hidden={p.screen !== "Watchlist"} aria-label="Watchlist view">{p.watchlist}</section>
 
         <section className="m-view m-chart" data-view={p.view} hidden={p.screen !== "Chart"} aria-label="Chart view">
@@ -196,7 +214,7 @@ export function MobileShell(p: {
             <div className="m-sheet-actions">
               {p.actions.map((a, i) => a.element
                 ? <div key={i} className="m-sheet-item">{a.element}</div>
-                : <button key={i} className="ghost" onClick={() => { setMenu(false); a.onClick?.(); }}>{a.label}</button>)}
+                : <button key={i} className="ghost" title={a.title} onClick={() => { setMenu(false); a.onClick?.(); }}>{a.label}</button>)}
             </div>
             <p className="muted m-sheet-status">{p.connected ? "Live connection" : "Reconnecting…"} · {p.session}</p>
           </div>

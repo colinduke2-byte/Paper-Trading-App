@@ -181,3 +181,21 @@ test("no horizontal overflow at 420 px width", async ({ page, open }) => {
     expect(await overflow(), `horizontal overflow on view ${view}`).toBeLessThanOrEqual(0);
   }
 });
+
+test("the Replay button starts a replay and Exit returns to live", async ({ page, open, request }) => {
+  await open();
+  try {
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "Replay a trading session" });
+    await picker.getByRole("button", { name: /^Start with/ }).click();
+    await expect(page.getByRole("note")).toContainText("Replay of");
+    const bar = page.getByRole("region", { name: "Replay controls" });
+    await bar.getByRole("button", { name: "+1 min" }).click();
+    await bar.getByRole("button", { name: "Exit replay" }).click();
+    await expect(bar).toHaveCount(0);
+    await expect(page.getByRole("note")).toContainText("Paper trading · no real money");
+    await expect(page.getByRole("button", { name: "Replay", exact: true })).toBeVisible();
+  } finally {
+    await request.post("/api/replay/exit").catch(() => {});
+  }
+});

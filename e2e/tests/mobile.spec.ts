@@ -20,12 +20,12 @@ async function go(page: Page, view: (typeof VIEWS)[number]) {
 async function smallTargets(page: Page, where: string): Promise<string[]> {
   const small = await page.evaluate(() => {
     const out: string[] = [];
-    for (const el of document.querySelectorAll<HTMLElement>("button, select, input:not([type=checkbox]), [role=tab], a[href]")) {
+    for (const el of document.querySelectorAll<HTMLElement>("button, select, input:not([type=checkbox]):not([type=radio]), [role=tab], a[href]")) {
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0 || getComputedStyle(el).pointerEvents === "none") continue;
       if (r.width < 40 || r.height < 40) out.push(`${el.tagName.toLowerCase()} "${(el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 24)}" ${Math.round(r.width)}x${Math.round(r.height)}`);
     }
-    for (const el of document.querySelectorAll<HTMLElement>("input[type=checkbox]")) {
+    for (const el of document.querySelectorAll<HTMLElement>("input[type=checkbox], input[type=radio]")) {
       const label = el.closest("label");
       const r = (label || el).getBoundingClientRect();
       if (r.width && r.height && r.height < 40) out.push(`checkbox "${(label?.textContent || "").trim().slice(0, 24)}" ${Math.round(r.height)} px tall`);
@@ -340,4 +340,78 @@ test("tables scroll inside their own container", async ({ page, open }) => {
   expect(info.scroller, "chain table needs a scrolling container").not.toBeNull();
   expect(["auto", "scroll"]).toContain(info.scroller!.overflowX);
   expect(await overflow(page)).toBeLessThanOrEqual(0);
+});
+
+test.describe("replay", () => {
+  // Replay mode is global on the server; never leave it running for the next test.
+  test.afterEach(async ({ request }) => { await request.post("/api/replay/exit").catch(() => {}); });
+
+  test("start a replay from the menu, play, pause, step, trade and exit", async ({ page, open, request }) => {
+    await open();
+    await page.getByRole("button", { name: "Menu" }).tap();
+    await page.getByRole("dialog", { name: "Menu" }).getByRole("button", { name: "Replay" }).tap();
+    const picker = page.getByRole("dialog", { name: "Replay a trading session" });
+    await expect(picker.getByRole("radio").first()).toBeChecked();
+    expect(await smallTargets(page, "Replay picker")).toEqual([]);
+    await picker.getByRole("button", { name: /^Start with/ }).tap();
+    await expect(picker).toHaveCount(0);
+
+    const banner = page.getByRole("note");
+    await expect(banner).toContainText("Replay of");
+    await expect(banner).toContainText("paper trading, no real money");
+    const bar = page.getByRole("region", { name: "Replay controls" });
+    await expect(bar).toBeVisible();
+    // The banner is never cut off, and every view still fits with the controls showing.
+    expect(await banner.evaluate((e) => e.scrollWidth <= e.clientWidth && e.scrollHeight <= e.clientHeight + 1)).toBe(true);
+    for (const view of VIEWS) {
+      await go(page, view);
+      await fitsViewport(page, `replay ${view}`);
+      expect(await smallTargets(page, `replay ${view}`)).toEqual([]);
+    }
+    await go(page, "Chart");
+
+    // Play, then pause.
+    await bar.getByRole("button", { name: "Play", exact: true }).tap();
+    await expect(bar.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+    await bar.getByRole("button", { name: "Pause", exact: true }).tap();
+    await expect(bar.getByRole("button", { name: "Play", exact: true })).toBeVisible();
+
+    // The step controls sit behind "More".
+    await page.getByRole("button", { name: "More replay controls" }).tap();
+    await expect(bar.getByRole("button", { name: "+1 min" })).toBeVisible();
+    for (const view of VIEWS) {
+      await go(page, view);
+      await fitsViewport(page, `replay expanded ${view}`);
+    }
+    expect(await smallTargets(page, "replay expanded")).toEqual([]);
+    await go(page, "Chart");
+    const clock = bar.locator(".replay-clock");
+    const before = await clock.textContent();
+    const chart = page.getByRole("img", { name: /price chart$/ });
+    await chart.evaluate((e: any) => { e.__beforeStep = true; });
+    await bar.getByRole("button", { name: "+1 min" }).tap();
+    await expect(clock).not.toHaveText(before!);
+    // The chart reloads its history after a jump (it is a new element).
+    await expect.poll(() => chart.evaluate((e: any) => !!e.__beforeStep)).toBe(false);
+    await page.getByRole("button", { name: "Fewer replay controls" }).tap();
+
+    // Trade in the sandbox account.
+    const sandbox = await page.locator(".m-shell").getAttribute("data-account");
+    await go(page, "Trade");
+    await placeFromTicket(page, "2");
+    await expect(page.getByText(/Filled: buy 2 /)).toBeVisible();
+    await go(page, "Account");
+    await expect(page.locator(".bottom tbody tr").first()).toContainText("2");
+
+    // Exit back to the live accounts.
+    await bar.getByRole("button", { name: "Exit replay" }).tap();
+    await expect(page.getByText("Replay closed. You are back on your paper accounts.")).toBeVisible();
+    await expect(bar).toHaveCount(0);
+    await expect(banner).toContainText("Paper trading · no real money");
+    const live = (await (await request.get("/api/accounts")).json()).map((a: any) => a.id);
+    await expect.poll(() => page.locator(".m-shell").getAttribute("data-account")).not.toBe(sandbox);
+    expect(live).toContain(await page.locator(".m-shell").getAttribute("data-account"));
+    await page.getByRole("button", { name: "Menu" }).tap();
+    await expect(page.getByRole("dialog", { name: "Menu" }).getByRole("button", { name: "Replay" })).toBeVisible();
+  });
 });

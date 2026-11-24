@@ -3,8 +3,8 @@
 .m-shell {
   --m-nav: 58px; --m-tap: 44px;
   position: fixed; top: 0; left: 0; right: 0; height: 100vh; height: 100dvh;
-  display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "top" "notice" "views" "nav";
+  display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "top" "strip" "notice" "views" "nav";
   overflow: hidden; background: var(--bg); font-size: 13.5px;
   -webkit-text-size-adjust: 100%; text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
 }
@@ -206,8 +206,8 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
 /* Landscape phones: the tab bar becomes a rail on the left, the top bar a single row. */
 @media (orientation: landscape) and (max-height: 540px) {
   .m-shell {
-    grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr);
-    grid-template-areas: "nav top" "nav notice" "nav views";
+    grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-areas: "nav top" "nav strip" "nav notice" "nav views";
   }
   .m-nav {
     grid-template-columns: none; grid-auto-rows: 1fr; border-top: 0; border-right: 1px solid var(--line); width: auto;
@@ -235,3 +235,41 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
 
 /* The chart library's attribution logo stays visible, but a stray tap while panning must not leave the app. */
 .m-shell a#tv-attr-logo { pointer-events: none; }
+
+/* Replay controls: one compact row (session, clock, play/pause, exit) under the top bar; "More" opens
+   the step, speed, progress and jump controls. The views shrink to make room in either state. */
+.m-top-row2 .paper-banner { min-width: 0; white-space: normal; }
+.m-replay { grid-area: strip; display: flex; align-items: flex-start; background: #101a28; border-bottom: 1px solid #2f5487; min-width: 0; }
+.m-replay .replay-bar {
+  flex: 1; min-width: 0; border-bottom: 0; padding: 6px 4px 6px max(10px, env(safe-area-inset-left)); gap: 6px 8px;
+  max-height: 42dvh; overflow-y: auto; overscroll-behavior: contain;
+}
+.m-replay .replay-when { flex: 1 1 120px; min-width: 0; gap: 2px 6px; }
+.m-replay .replay-clock { font-size: 14px; }
+.m-replay .replay-controls { gap: 6px; }
+.m-replay .replay-play { min-width: 92px; }
+.m-replay .replay-exit { margin-left: 0; }
+.m-replay .replay-progress { flex-basis: 100%; }
+.m-replay .replay-progress input[type=range] { min-height: var(--m-tap); }
+.m-replay .replay-jump input { width: 88px; }
+.m-replay-more { flex: none; margin: 6px max(8px, env(safe-area-inset-right)) 6px 4px; padding: 0; display: grid; place-items: center; }
+.m-replay:not(.open) .replay-controls > :not(.replay-play),
+.m-replay:not(.open) .replay-progress, .m-replay:not(.open) .replay-jump, .m-replay:not(.open) .replay-local,
+.m-replay:not(.open) .replay-badge, .m-replay:not(.open) .replay-when > b { display: none; } /* the banner already names the session */
+.m-replay:not(.open) .replay-bar { flex-wrap: nowrap; align-items: center; }
+.m-replay:not(.open) .replay-when { flex: 1 1 auto; }
+.m-replay:not(.open) .replay-exit { flex: none; }
+.m-replay-more svg { transition: transform .15s; } .m-replay.open .m-replay-more svg { transform: rotate(180deg); }
+.m-shell .replay-item { flex: none; }
+.m-shell .replay-modal { width: 100%; }
+.m-shell .replay-list { max-height: 38dvh; }
+.m-shell .replay-item { min-height: var(--m-tap); }
+.m-shell .replay-item input[type=radio] { width: 22px; height: 22px; margin-top: 1px; flex: none; }
+.m-shell .replay-fields > label { flex: 1 1 100px; }
+@media (orientation: landscape) and (max-height: 540px) {
+  .m-replay .replay-bar { max-height: 50dvh; }
+  .m-replay .replay-progress { flex-basis: 200px; }
+  .m-brand { flex: none; }
+  .m-stats { flex: none; }
+  .m-top-row2 .paper-banner { flex: 1 1 auto; }
+}
