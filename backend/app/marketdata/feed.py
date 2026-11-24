@@ -1,8 +1,9 @@
 """Market data provider interface, bar storage and the scripted test feed."""
 from collections import deque
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from ..core.models import Quote
 from ..core.money import CENT, ZERO, D, cents
@@ -54,6 +55,14 @@ def _aggregate(rows: list, seconds: int, offset: int = 0) -> list:
         else:
             out.append([t, r[1], r[2], r[3], r[4], r[5]])
     return out
+
+
+class ClosePrice(NamedTuple):
+    """Result of MarketDataProvider.closing_price. `ready` False: asked for, not known yet (ask again later).
+    `ready` True with `price` None: there is no close for that day (not a trading day, no trades, no data)."""
+    ready: bool
+    price: Optional[Decimal]
+    note: str = ""
 
 
 class MarketDataProvider:
@@ -132,6 +141,30 @@ class MarketDataProvider:
     def option_chain(self, underlying: str, expiry, now: float) -> Optional[dict]:
         """Provider chain in the shape of options.chain.chain(), or None to use the model."""
         return None
+
+    def option_listing(self, underlying: str, fetch: bool = True) -> Optional[dict]:
+        """{expiry date: set of strike Decimals} the provider lists, or None to use the model calendar.
+        With fetch=False only what is already cached is returned (for code on the tick path)."""
+        return None
+
+    def quote_note(self, symbol: str) -> Optional[dict]:
+        """{"stale": bool, "note": text} when the price shown for symbol needs explaining, else None."""
+        return None
+
+    def closing_price(self, symbol: str, day) -> ClosePrice:
+        """Official closing price of symbol on day (a date), unadjusted. Never blocks: a live feed fetches it on
+        its own thread and answers ClosePrice(False, None) until it has it. This default reads stored daily bars."""
+        ts = int((day - date(1970, 1, 1)).total_seconds())
+        for r in reversed(self.store.daily.get(symbol, [])):
+            if r[0] == ts:
+                return ClosePrice(True, cents(Decimal(repr(r[4]))), f"{self.name} daily bar")
+            if r[0] < ts:
+                break
+        return ClosePrice(True, None, f"no {self.name} daily bar for {symbol} on {day.isoformat()}")
+
+    def no_price_reason(self, symbol: str) -> str:
+        """Plain sentence: why there is no quote for symbol."""
+        return f"no quote available for {symbol}"
 
     def status_info(self) -> dict:
         """Extra fields for /api/status: data source, real-time or delayed, stream health."""

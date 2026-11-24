@@ -42,6 +42,9 @@ class Quote:
     high: Optional[Decimal] = None
     low: Optional[Decimal] = None
     prev_close: Optional[Decimal] = None
+    # True when the feed says this quote is too old to trade against (thresholds per session state are the
+    # feed's; see docs/DATA_PROVIDERS.md, "Quote age"). Simulated feeds never set it.
+    stale: bool = False
 
     @property
     def mid(self) -> Decimal:

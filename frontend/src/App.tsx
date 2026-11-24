@@ -12,10 +12,21 @@ import { useSignOutAction } from "./Login";
 
 type Toast = { id: number; text: string; bad?: boolean };
 
+/** `cur` if the active feed knows it, else the first watchlist symbol (or the first listed symbol). */
+async function validSymbol(cur: string, watch: string[]): Promise<string> {
+  const known: any[] = cur ? await api(`/symbols/lookup?symbols=${encodeURIComponent(cur)}`).catch(() => []) : [];
+  if (known.length) return cur;
+  if (watch[0]) return watch[0];
+  const first: any[] = await api("/symbols?limit=1").catch(() => []);
+  return first[0]?.symbol || cur;
+}
+
 export default function App() {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [accountId, setAccountId] = useState<string>(() => store("pd.account") || "");
   const [symbol, setSymbol] = useState<string>(() => store("pd.symbol") || "MKTX");
+  // The remembered symbol may belong to the other feed (a fictional one on real data): check it before use.
+  const [symbolChecked, setSymbolChecked] = useState(false);
   const [watch, setWatch] = useState<string[]>([]);
   const [quotes, setQuotes] = useState<Record<string, any>>({});
   const [summary, setSummary] = useState<any>(null);
@@ -58,7 +69,10 @@ export default function App() {
       try {
         const [list, wl] = await Promise.all([loadAccounts(), api("/watchlists")]);
         if (!list.find((a: any) => a.id === accountId)) setAccountId(list[0]?.id || "");
-        setWatch(wl.Main || Object.values(wl)[0] || []);
+        const main = wl.Main || Object.values(wl)[0] || [];
+        setWatch(main);
+        setSymbol(await validSymbol(symbol, main));
+        setSymbolChecked(true);
       } catch (e: any) {
         setFatal(`Cannot reach the PaperDesk server (${e.message}). Check that it is running, then reload.`);
       }
@@ -129,15 +143,16 @@ export default function App() {
 
   // Switching between live and replay changes the active exchange: reload what belongs to it.
   useModeSwitch(status, async () => {
-    const [list, wl, syms] = await Promise.all([loadAccounts(), api("/watchlists"), api("/symbols")]).catch(() => [[], {}, []]);
+    const [list, wl] = await Promise.all([loadAccounts(), api("/watchlists")]).catch(() => [[], {}]);
     setAccountId((cur) => (list.find((a: any) => a.id === cur) ? cur : list[0]?.id || ""));
     const main = wl.Main || Object.values(wl)[0] || [];
     setWatch(main);
-    setSymbol((cur) => (syms.some((x: any) => x.symbol === cur) ? cur : main[0] || syms[0]?.symbol || cur));
+    setSymbol(await validSymbol(symbol, main));
     setRefreshKey((k) => k + 1);
   });
 
-  const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000, [modeKey(status)]);
+  const shown = symbolChecked ? symbol : ""; // nothing is fetched for a symbol until it is known to exist
+  const [info] = usePoll<any>(shown ? `/fundamentals/${shown}` : null, 30000, [modeKey(status)]);
   const ticketPos = positions.find((p) => p.symbol === seed.symbol);
   const stockPos = positions.find((p) => p.symbol === symbol);
   const openForSymbol = orders.filter((o) => o.symbol === symbol && ["working", "partially_filled"].includes(o.status));
@@ -189,7 +204,7 @@ export default function App() {
       ))}
     </div>
   );
-  const mainView = (
+  const mainView = !shown ? <div className="view" /> : (
     <div className="view">
       {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
@@ -205,7 +220,7 @@ export default function App() {
     <Ticket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} description={ticketDesc} position={ticketPos}
       onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
   );
-  const depth = <DepthTape symbol={underlyingOf(symbol)} />;
+  const depth = shown ? <DepthTape symbol={underlyingOf(shown)} /> : null;
   const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
   const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const overlays = (

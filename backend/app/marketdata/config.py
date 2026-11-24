@@ -77,6 +77,21 @@ def wanted_symbols(ex, clients=None) -> list:
     return list(dict.fromkeys(out))
 
 
+def held_symbols(ex) -> list:
+    """Stocks whose corporate actions matter: held (directly or as an option's underlying) or with open orders."""
+    from ..options.symbology import parse as parse_option
+    out = set()
+    syms = [s for a in list(ex.accounts.values()) for s in list(a.lots)]
+    for o in list(ex.engine.orders.values()):
+        if o.active:
+            syms.append(o.symbol)
+            syms.extend(l["symbol"] for l in (o.legs or ()))
+    for s in syms:
+        c = parse_option(s)
+        out.add(c.underlying if c else s)
+    return sorted(out)
+
+
 def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] = None, synthetic_seed: int = 7,
                 start: bool = True, **alpaca_kw) -> Selection:
     """Pick the feed. Never raises for configuration problems: it falls back to synthetic and says why."""
@@ -140,3 +155,5 @@ def attach(sel: Selection, ex) -> None:
     """Let a live feed see which symbols the exchange needs."""
     if hasattr(sel.feed, "interest_source"):
         sel.feed.interest_source = lambda: wanted_symbols(ex)
+    if hasattr(sel.feed, "holdings_source"):
+        sel.feed.holdings_source = lambda: held_symbols(ex)

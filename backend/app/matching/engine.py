@@ -6,7 +6,8 @@ quotes and gets back events: ("order", Order) for every state change and
 
 Fill model (conservative by design):
 - Market orders (and triggered stops) fill in full, walking a synthetic book:
-  each level holds the displayed size and is one slippage step worse.
+  each level holds the displayed size and is one slippage step worse. They never fill
+  against an empty side (a quote with no bid for a sell, no ask for a buy): they wait.
 - Limit orders fill only when the opposite quote reaches the limit, at the quote
   price, for at most the displayed size per quote update. A resting limit also
   fills at its limit price when a new print trades strictly through it.
@@ -234,6 +235,12 @@ class MatchingEngine:
             events.append(("order", o))
         as_market = o.type == MARKET or o.type in (STOP, TRAILING_STOP)
         remaining = o.remaining
+        if as_market and (q.ask if o.side == BUY else q.bid) <= 0:
+            # One-sided book (a live feed reports no bid or no ask): nothing to fill against, so wait.
+            if initial and immediate:
+                self._finish(o, CANCELED, now, events, f"no {'ask' if o.side == BUY else 'bid'} available for an "
+                                                       f"immediate order")
+            return
         if as_market:
             self._fill(o, remaining, self._walk(q, o.side, remaining), now, events)
             return

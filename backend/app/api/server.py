@@ -44,7 +44,45 @@ def quote_row(ex: Exchange, symbol: str) -> Optional[dict]:
     if q.prev_close:
         row["change"] = float(q.last - q.prev_close)
         row["change_pct"] = float((q.last - q.prev_close) / q.prev_close * 100)
+    note = ex.feed.quote_note(symbol) if ex.is_stock(symbol) else None
+    if note:  # a live feed explains a one-sided book or a price that is not from today
+        row.update(stale=note["stale"], note=note["note"])
     return row
+
+
+def symbol_rows(ex: Exchange, q: str, limit: int) -> list:
+    info = ex.feed.symbols()
+    row = lambda s: {"symbol": s, "name": info[s]["name"], "sector": info[s].get("sector", ""),
+                     "type": info[s].get("type", "stock")}
+    q = q.upper().strip()
+    if not q:
+        first = [s for wl in ex.watchlists.values() for s in wl]
+        for a in ex.accounts.values():
+            first += [(parse_option(s).underlying if parse_option(s) else s) for s in a.lots]
+        first += [o.symbol for o in ex.engine.active_orders()]
+        picked = [s for s in dict.fromkeys(first) if s in info][:limit]
+        seen = set(picked)
+        rest = sorted(s for s in info if s not in seen)[:max(limit - len(picked), 0)]
+        return [row(s) for s in picked + rest]
+    # exact symbol, then symbols starting with q, then symbols containing it, then company names
+    ranked = []
+    for s, i in info.items():
+        name = (i.get("name") or "").upper()
+        if s == q:
+            rank = 0
+        elif s.startswith(q):
+            rank = 1
+        elif q in s:
+            rank = 2
+        elif name.startswith(q):
+            rank = 3
+        elif q in name:
+            rank = 4
+        else:
+            continue
+        ranked.append((rank, len(s), s))
+    ranked.sort()
+    return [row(s) for _, _, s in ranked[:limit]]
 
 
 def order_row(o) -> dict:
@@ -129,7 +167,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
                 "paper": True, **plain(ex.feed.status_info()),
-                "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None,
+                "day_roll_waiting": ex.lifecycle.waiting}  # set while the start of a day waits for corporate actions
 
     async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()
@@ -200,13 +239,11 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return status()
 
     @app.get("/api/symbols")
-    def symbols(q: str = ""):
+    def symbols(q: str = "", limit: int = Query(50, ge=1, le=500)):
+        """Search every symbol; return at most `limit` rows. An empty query gives a short useful list
+        (watchlists, positions and open orders first, then the rest alphabetically), not every listing."""
         ex = ctx.ex
-        q = q.upper().strip()
-        rows = [{"symbol": s, "name": i["name"], "sector": i["sector"], "type": i.get("type", "stock")}
-                for s, i in ex.feed.symbols().items()
-                if not q or q in s or q in i["name"].upper()]
-        return sorted(rows, key=lambda r: (not r["symbol"].startswith(q), r["symbol"]))
+        return symbol_rows(ex, q, limit)
 
     @app.get("/api/quotes")
     def quotes(symbols: str = Query("")):

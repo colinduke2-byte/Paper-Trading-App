@@ -223,6 +223,7 @@ class SyntheticFeed(MarketDataProvider):
             for s, raw in data["quotes"].items():
                 kw = {k: (Decimal(v) if k not in ("symbol", "ts", "trade") and v is not None else v) for k, v in raw.items()}
                 kw["trade"] = False
+                kw.pop("stale", None)  # never saved as stale; and not a Decimal field
                 quotes[s] = Quote(**kw)
             if set(quotes) != set(self.info):
                 return

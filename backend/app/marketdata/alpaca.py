@@ -23,7 +23,7 @@ import random
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -35,7 +35,8 @@ from ..core.money import CENT, ZERO
 from ..options import chain as optchain
 from ..options import pricing
 from ..options.symbology import Contract, build, parse as parse_option
-from .feed import TIMEFRAMES, MarketDataProvider
+from .alpaca_actions import ActionBook
+from .feed import TIMEFRAMES, ClosePrice, MarketDataProvider
 from .http import JsonClient, ProviderError, RateLimiter, Transport, dec, loads, parse_ts
 
 log = logging.getLogger("paperdesk.alpaca")
@@ -61,6 +62,32 @@ TF_ALPACA = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour", "1d": "1
 TF_LOOKBACK_DAYS = {"1m": 7, "5m": 30, "15m": 60, "1h": 200}
 TF_TTL = {"1m": 30, "5m": 60, "15m": 120, "1h": 300, "1d": 900, "1w": 3600}
 ROUND_LOT = Decimal(100)  # stock quote sizes arrive in round lots
+RECENT_TRADE = 60.0  # seconds: a missing side may be filled from a trade at most this old
+# Quote age (docs/DATA_PROVIDERS.md, "Quote age"): a quote is stale when the provider's newest quote or
+# trade time for the symbol is older than this in the regular session, or in the pre/post sessions...
+STALE_AFTER = {"regular": 120.0, "pre": 900.0, "post": 900.0}
+# ... and, while the market is closed, when it is from before the open of the latest session.
+
+
+def last_session_open(now: float) -> float:
+    """Open time of the most recent regular session that has started (today's, or an earlier day's)."""
+    d = cal.ny_date(now)
+    for _ in range(15):
+        if cal.is_trading_day(d):
+            t = datetime.combine(d, cal.OPEN, tzinfo=cal.NY).timestamp()
+            if t <= now:
+                return t
+        d -= timedelta(days=1)
+    return now
+
+
+def is_stale(newest: float, now: float) -> bool:
+    if not newest:
+        return True
+    limit = STALE_AFTER.get(cal.session(now))
+    if limit is not None:
+        return now - newest > limit
+    return newest < last_session_open(now)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -128,9 +155,11 @@ class AlpacaREST:
         j = self._data("/v1beta1/news", {"symbols": symbols, "limit": limit, "sort": "desc"}, **kw) or {}
         return j.get("news") or []
 
-    def corporate_actions(self, symbols: str, start: str, end: str, types: Optional[str] = None, **kw) -> dict:
+    def corporate_actions(self, symbols: str, start: str, end: str, types: Optional[str] = None,
+                          max_pages: int = 5, strict: bool = False, **kw) -> dict:
+        """All pages up to max_pages. With strict, a result cut off by max_pages raises instead."""
         out, token = {}, None
-        for _ in range(5):
+        for _ in range(max_pages):
             j = self._data("/v1/corporate-actions", {"symbols": symbols, "start": start, "end": end, "types": types,
                                                      "limit": 1000, "page_token": token}, **kw) or {}
             for k, rows in (j.get("corporate_actions") or {}).items():
@@ -138,7 +167,24 @@ class AlpacaREST:
             token = j.get("next_page_token")
             if not token:
                 break
+        else:
+            if token and strict:
+                raise ProviderError(0, f"Alpaca returned more than {max_pages} pages of corporate actions")
         return out
+
+    def bars_range(self, symbol: str, timeframe: str, start: str, end: str, feed: str, adjustment: str = "raw",
+                   max_pages: int = 10, **kw) -> list:
+        """Every bar between start and end, oldest first, following next_page_token."""
+        out, token = [], None
+        for _ in range(max_pages):
+            j = self._data("/v2/stocks/bars", {"symbols": symbol, "timeframe": timeframe, "start": start, "end": end,
+                                               "limit": 10000, "feed": feed, "sort": "asc", "adjustment": adjustment,
+                                               "page_token": token}, **kw) or {}
+            out.extend((j.get("bars") or {}).get(symbol, []) or [])
+            token = j.get("next_page_token")
+            if not token:
+                return out
+        raise ProviderError(0, f"Alpaca returned more than {max_pages} pages of bars for {symbol}")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -182,6 +228,7 @@ class SymbolState:
     trade_ts: float = 0.0
     new_trade: bool = False
     received: float = 0.0  # wall time this process last heard about the symbol
+    feed_name: str = "IEX"
 
     @property
     def ts(self) -> float:
@@ -233,35 +280,81 @@ class SymbolState:
                 self.volume = ZERO
             changed = True
         elif prev:
-            self.prev_close = dec(prev.get("c"))
+            pc = dec(prev.get("c"))
+            changed |= pc != self.prev_close  # before the first trade or quote this is the only price known
+            self.prev_close = pc
         return changed
 
-    def to_quote(self) -> Optional[Quote]:
+    def to_quote(self, now: Optional[float] = None) -> Optional[Quote]:
         """A usable Quote, or None when nothing is known yet.
 
-        A missing or crossed side (common outside regular hours on IEX) is filled from the
-        last trade so the quote is never zero-priced; see docs/DATA_PROVIDERS.md.
+        With `now` (what the feed passes) the policy is deliberate and conservative (see
+        docs/DATA_PROVIDERS.md, "Missing prices"): a missing or crossed side is filled from the
+        last trade only while that trade is at most RECENT_TRADE seconds old. Otherwise the
+        missing side stays 0, so a market order on that side waits instead of filling at an old
+        price, and `last` falls back to the last trade, then the quote midpoint, then the
+        previous close (so the position is still valued). Without `now` a missing side is always
+        filled from the last trade (the older behaviour, kept for callers that have no clock).
         """
         bid = self.bid if self.bid and self.bid > 0 else None
         ask = self.ask if self.ask and self.ask > 0 else None
         last = self.last
-        if bid is None and ask is None:
+        if now is None or (last is not None and now - self.trade_ts <= RECENT_TRADE):
+            if bid is None and ask is None:
+                if last is None:
+                    return None
+                bid = ask = last
+            elif bid is None:
+                bid = min(ask, last) if last else ask
+            elif ask is None:
+                ask = max(bid, last) if last else bid
+            if ask < bid:
+                ask = bid
             if last is None:
+                last = (bid + ask) / 2
+        else:
+            if bid is None and ask is None and last is None and self.prev_close is None:
                 return None
-            bid = ask = last
-        elif bid is None:
-            bid = min(ask, last) if last else ask
-        elif ask is None:
-            ask = max(bid, last) if last else bid
-        if ask < bid:
-            ask = bid
-        if last is None:
-            last = (bid + ask) / 2
-        return Quote(symbol=self.symbol, bid=bid, ask=ask, bid_size=self.bid_size, ask_size=self.ask_size,
-                     last=last, last_size=self.last_size if self.new_trade else ZERO, volume=self.volume,
+            if bid is not None and ask is not None and ask < bid:
+                ask = bid
+            if last is None:
+                last = (bid + ask) / 2 if bid is not None and ask is not None else self.prev_close or bid or ask
+            bid, ask = bid or ZERO, ask or ZERO
+        return Quote(symbol=self.symbol, bid=bid, ask=ask, bid_size=self.bid_size if bid else ZERO,
+                     ask_size=self.ask_size if ask else ZERO, last=last,
+                     last_size=self.last_size if self.new_trade else ZERO, volume=self.volume,
                      ts=self.ts, trade=self.new_trade, open=self.open, high=self.high, low=self.low,
                      prev_close=self.prev_close)
 
+    def filled_from_trade(self, now: float) -> bool:
+        """True while a missing side is being filled from a recent trade (it stops when the trade ages)."""
+        one_sided = not (self.bid and self.bid > 0) or not (self.ask and self.ask > 0) or self.ask < self.bid
+        return one_sided and self.last is not None and now - self.trade_ts <= RECENT_TRADE
+
+    def note(self, now: float) -> tuple:
+        """(stale, plain sentence or None) describing where the shown price comes from."""
+        has_bid, has_ask = bool(self.bid and self.bid > 0), bool(self.ask and self.ask > 0)
+        today = cal.ny_date(now)
+        if self.last is None:
+            if has_bid and has_ask:
+                return False, "No trade yet; the price shown is the quote midpoint."
+            if self.prev_close is not None:
+                return True, "No trade or two-sided quote yet; the price shown is the previous close."
+        stale = bool(self.trade_ts) and cal.ny_date(self.trade_ts) != today
+        if self.last is not None and now - self.trade_ts <= RECENT_TRADE and not (has_bid and has_ask):
+            side = "bid" if not has_bid and has_ask else "ask" if has_bid else "bid and ask"
+            return False, f"The {side} shown {'is' if side != 'bid and ask' else 'are'} the last trade price: " \
+                          f"the {self.feed_name} book has no {side} right now and the trade is under " \
+                          f"{RECENT_TRADE:.0f} seconds old."
+        missing = [n for n, ok in (("bid", has_bid), ("ask", has_ask)) if not ok]
+        when = (f" Last trade {cal.ny_datetime(self.trade_ts):%Y-%m-%d %H:%M} New York time."
+                if self.trade_ts else "")
+        if missing:
+            return True, (f"No {' or '.join(missing)} on {self.feed_name} right now, so market orders on that side "
+                          f"wait.{when}")
+        if stale:
+            return True, f"No trade today yet; the last price is from an earlier session.{when}"
+        return False, None
 
 def option_quote_from_snapshot(symbol: str, snap: dict) -> Optional[Quote]:
     q, t = snap.get("latestQuote") or {}, snap.get("latestTrade") or {}
@@ -302,8 +395,10 @@ def option_leg(c: Contract, snap: Optional[dict], spot: float, base_vol: float, 
 
 
 def build_chain(underlying: str, expiry: date, snaps: dict, spot: float, base_vol: float, now: float,
-                source: str, open_interest: Optional[dict] = None) -> list:
-    by_strike: dict = {}
+                source: str, open_interest: Optional[dict] = None, strikes=()) -> list:
+    """Rows for every strike with a provider snapshot, plus every listed strike in `strikes` (model-priced
+    where the provider sent nothing)."""
+    by_strike: dict = {k: {} for k in strikes}
     for sym, snap in snaps.items():
         c = parse_option(sym)
         if c is None or c.expiry != expiry or c.underlying != underlying:
@@ -558,6 +653,7 @@ class StreamClient:
 class AlpacaFeed(MarketDataProvider):
     name = "alpaca"
     simulated = False
+    late_actions = True  # Alpaca can publish a corporate action after its ex-date
 
     def __init__(self, key: str, secret: str, *, feed: str = "iex", options_feed: str = "indicative",
                  trading_url: str = PAPER_TRADING_URL, transport: Optional[Transport] = None,
@@ -590,6 +686,13 @@ class AlpacaFeed(MarketDataProvider):
         self._last_poll: dict = {}
         self._ondemand: dict = {}
         self.interest_source: Optional[Callable[[], list]] = None
+        self.holdings_source: Optional[Callable[[], list]] = None  # symbols held or with open orders
+        self.actions = ActionBook(self.rest, wall_clock, lambda: self.holdings_source() if self.holdings_source else [])
+        self._listing: dict = {}  # underlying -> {expiry: set of listed strikes} (standard contracts only)
+        self._fresh_until: dict = {}  # symbol -> wall time a side filled from a recent trade stops being valid
+        self._splits: dict = {}  # symbol -> {action id: (ex_date, old/new)} for previous-close consistency
+        self._closes: dict = {}  # (symbol, date) -> ClosePrice, filled by the poller (closing_price)
+        self._close_retry: dict = {}  # (symbol, date) -> wall time of the next attempt after a failure
         self.extra_interest: Optional[Callable[[], list]] = None
         self.assets_error: Optional[str] = None
         self.assets_loaded_at: Optional[float] = None
@@ -661,18 +764,62 @@ class AlpacaFeed(MarketDataProvider):
         self._ondemand[symbol] = self.wall_clock() + seconds
 
     def step(self, now: float) -> list:
+        wall = self.wall_clock()
         with self._lock:
             changed, self._changed = self._changed, set()
+            for sym, until in list(self._fresh_until.items()):
+                if wall > until:  # the trade that filled a missing side is too old now: show the side as empty
+                    self._fresh_until.pop(sym, None)
+                    changed.add(sym)
             out = []
             for sym in changed:
                 st = self._state.get(sym)
-                q = st.to_quote() if st else None
+                q = st.to_quote(wall) if st else None
                 if q is None:
                     continue
+                if st.filled_from_trade(wall):
+                    self._fresh_until[sym] = st.trade_ts + RECENT_TRADE
                 st.new_trade = False
+                q.stale = is_stale(st.ts, wall)
                 self.quotes[sym] = q
                 out.append(q)
         return out
+
+    def quote(self, symbol: str) -> Optional[Quote]:
+        """The latest quote, with `stale` worked out now (a quote ages while nothing new arrives)."""
+        q = self.quotes.get(symbol)
+        st = self._state.get(symbol)
+        if q is None or st is None:
+            return q
+        stale = is_stale(st.ts, self.wall_clock())
+        if q.stale != stale:
+            q = self.quotes[symbol] = replace(q, stale=stale)
+        return q
+
+    def quote_note(self, symbol: str) -> Optional[dict]:
+        """{"stale": bool, "note": text} when the shown price needs explaining, else None."""
+        st = self._state.get(symbol)
+        if st is None:
+            return None
+        now = self.wall_clock()
+        stale, text = st.note(now)
+        old = is_stale(st.ts, now)
+        if old and st.ts and cal.session(now) != "closed":
+            age = now - st.ts
+            when = f"{age / 60:.0f} minutes" if age < 7200 else f"{age / 3600:.0f} hours"
+            text = ((text + " ") if text else "") + (f"The latest quote or trade for {symbol} is {when} old, so it is "
+                                                     f"treated as stale: market orders are refused and orders do not "
+                                                     f"fill against it until a new quote arrives.")
+        return {"stale": stale or old, "note": text} if text else None
+
+    def no_price_reason(self, symbol: str) -> str:
+        if parse_option(symbol):
+            return (f"Alpaca's {self.options_feed} option feed has no quote for {symbol} and the model has no "
+                    f"underlying price to work from.")
+        if symbol not in self.info:
+            return f"{symbol} is not in Alpaca's list of tradable US equities."
+        return (f"No quote has arrived from Alpaca for {symbol} yet. It may be halted, not trading on "
+                f"{FEEDS[self.data_feed]['exchange']} yet today, or the first request is still in progress.")
 
     def quote_age(self, symbol: str) -> Optional[float]:
         st = self._state.get(symbol)
@@ -687,7 +834,7 @@ class AlpacaFeed(MarketDataProvider):
                 ts = parse_ts(m.get("t"))
                 if not sym or ts is None:
                     continue
-                st = self._state.setdefault(sym, SymbolState(sym))
+                st = self._state_for(sym)
                 if m["T"] == "q":
                     ok = st.apply_quote(m, ts)
                 else:
@@ -700,6 +847,12 @@ class AlpacaFeed(MarketDataProvider):
                     st.received = now
                     self._changed.add(sym)
 
+    def _state_for(self, sym: str) -> SymbolState:
+        st = self._state.get(sym)
+        if st is None:
+            st = self._state[sym] = SymbolState(sym, feed_name=FEEDS[self.data_feed]["exchange"].split(" ")[0])
+        return st
+
     def apply_snapshots(self, snaps: dict) -> None:
         now = self.wall_clock()
         today = cal.ny_date(now)
@@ -707,10 +860,45 @@ class AlpacaFeed(MarketDataProvider):
             for sym, snap in (snaps or {}).items():
                 if not snap:
                     continue
-                st = self._state.setdefault(sym, SymbolState(sym))
+                st = self._state_for(sym)
                 if st.apply_snapshot(snap, today):
+                    self._fix_prev_close(sym, st, snap, today)
                     st.received = now
                     self._changed.add(sym)
+
+    def _fix_prev_close(self, sym: str, st: SymbolState, snap: dict, today: date) -> None:
+        """Keep the previous close on the same basis as today's prices after a split.
+
+        Whether Alpaca's snapshot adjusts the previous daily bar for a split on today's ex-date is
+        UNVERIFIED. So when a split took effect after the bar the previous close came from, the
+        raw and the split-adjusted value are both candidates, and the one closer to today's prices
+        (last trade or quote) is kept. A split ratio is far from 1, so the two are easy to tell apart.
+        """
+        splits = self._splits.get(sym)
+        if not splits or st.prev_close is None:
+            return
+        daily, prev = snap.get("dailyBar"), snap.get("prevDailyBar")
+        dts = parse_ts(daily.get("t")) if daily else None
+        bar = prev if dts is not None and cal.ny_date(dts) == today else daily if dts is not None else prev
+        bts = parse_ts((bar or {}).get("t"))
+        if bts is None:
+            return
+        bar_day = cal.ny_date(bts)
+        factor = Decimal(1)
+        for ex, f in splits.values():
+            if bar_day < ex <= today:
+                factor *= f
+        if factor == 1:
+            return
+        if st.last is not None and st.trade_ts and cal.ny_date(st.trade_ts) == today:
+            ref = st.last
+        elif st.bid and st.ask and st.bid > 0 and st.ask > 0 and st.quote_ts and cal.ny_date(st.quote_ts) == today:
+            ref = (st.bid + st.ask) / 2
+        else:
+            ref = None  # nothing from today yet: assume the bar is not adjusted; the next snapshot re-checks
+        adjusted = (st.prev_close * factor).quantize(Decimal("0.0001"))
+        if ref is None or abs(math.log(float(adjusted / ref))) < abs(math.log(float(st.prev_close / ref))):
+            st.prev_close = adjusted
 
     def option_quote(self, symbol: str) -> Optional[Quote]:
         hit = self._opt.get(symbol)
@@ -787,6 +975,14 @@ class AlpacaFeed(MarketDataProvider):
                 log.warning("Alpaca polling: %s", e.message)
             except Exception as e:  # never let the poller die
                 log.warning("Alpaca polling failed: %r", e)
+            try:
+                self.actions.poll()  # corporate actions for the lifecycle; the tick only reads the result
+            except Exception as e:
+                log.warning("Alpaca corporate actions failed: %r", e)
+            try:
+                self.fetch_closes()  # closing prices asked for through closing_price()
+            except Exception as e:
+                log.warning("Alpaca closing prices failed: %r", e)
             self._stop.wait(1.0)
 
     # ---- history ---------------------------------------------------------------------------------
@@ -823,8 +1019,9 @@ class AlpacaFeed(MarketDataProvider):
             except ProviderError as e:
                 if e.status not in (400, 403, 422):
                     raise
+        # Split-adjusted at every timeframe, so a chart that spans a split has no jump in it.
         return parse_bars(self.rest.bars(symbol, TF_ALPACA[tf], start, None, n, self.data_feed,
-                                         "split" if daily else "raw", max_wait=8), daily)
+                                         "split", max_wait=8), daily)
 
     def base_vol(self, symbol: str) -> float:
         hit = self._bar_cache.get((symbol, "1d"))
@@ -838,10 +1035,22 @@ class AlpacaFeed(MarketDataProvider):
 
     # ---- options -------------------------------------------------------------------------------
     def option_expirations(self, underlying: str) -> Optional[list]:
+        listing = self.option_listing(underlying)
+        return sorted(listing) if listing else None
+
+    def option_listing(self, underlying: str, fetch: bool = True) -> Optional[dict]:
+        """{expiry: set of strikes} of the standard (100-share) contracts Alpaca lists, or None if unknown.
+
+        Cached for an hour; a failed refresh keeps the previous list. Adjusted contracts (a root that
+        differs from the underlying, or a deliverable other than 100 shares) are left out: the
+        simulator only knows standard contracts.
+        """
         now = self.wall_clock()
         hit = self._exp_cache.get(underlying)
-        if hit and now - hit[0] < 3600:
+        if hit and (now - hit[0] < 3600 or not fetch):
             return hit[1]
+        if not fetch:
+            return None
         today = cal.ny_date(now)
         try:
             rows = self.rest.option_contracts(underlying, today.isoformat(), (today + timedelta(days=800)).isoformat(),
@@ -849,14 +1058,22 @@ class AlpacaFeed(MarketDataProvider):
         except ProviderError as e:
             log.warning("Alpaca option contracts %s: %s", underlying, e.message)
             return hit[1] if hit else None
-        exps = sorted({date.fromisoformat(r["expiration_date"]) for r in rows if r.get("expiration_date")})
+        listing: dict = {}
         for r in rows:
+            c = parse_option(r.get("symbol") or "")
+            if c is None or c.underlying != underlying:
+                continue
+            if str(r.get("size") or "100") != "100" or str(r.get("multiplier") or "100") != "100":
+                continue
+            if r.get("root_symbol") not in (None, "", underlying) or r.get("tradable") is False:
+                continue
+            listing.setdefault(c.expiry, set()).add(c.strike)
             if r.get("open_interest") not in (None, ""):
                 self._oi[r["symbol"]] = r["open_interest"]
-        if not exps:
-            return None
-        self._exp_cache[underlying] = (now, exps)
-        return exps
+        if not listing:
+            return hit[1] if hit else None
+        self._exp_cache[underlying] = (now, listing)
+        return listing
 
     def option_chain(self, underlying: str, expiry: date, now: float) -> Optional[dict]:
         wall = self.wall_clock()
@@ -875,24 +1092,136 @@ class AlpacaFeed(MarketDataProvider):
         if q is None:
             return None
         spot = float(q.last)
+        listed = (self.option_listing(underlying) or {}).get(expiry)
+        strikes = {k for k in listed if spot * 0.7 <= float(k) <= spot * 1.3} if listed else set()
         try:
             snaps = self.rest.option_chain(underlying, self.options_feed, expiry.isoformat(),
                                            strike_gte=f"{spot * 0.7:.2f}", strike_lte=f"{spot * 1.3:.2f}", max_wait=8)
         except ProviderError as e:
             log.warning("Alpaca option chain %s: %s", underlying, e.message)
-            return hit[1] if hit else None
-        if not snaps:
+            if hit:
+                return hit[1]
+            snaps = {}
+        if not snaps and not strikes:
             return None
         self._store_option_snaps(snaps)
-        rows = build_chain(underlying, expiry, snaps, spot, self.base_vol(underlying), now, self.options_feed, self._oi)
+        rows = build_chain(underlying, expiry, snaps, spot, self.base_vol(underlying), now, self.options_feed, self._oi,
+                           strikes=strikes)
         if not rows:
             return None
         model_legs = sum(1 for r in rows for k in ("call", "put") if r[k]["source"] == "model")
-        out = {"underlying": underlying, "expiry": expiry.isoformat(), "spot": spot, "simulated": False,
-               "source": f"alpaca-{self.options_feed}", "source_label": OPTION_FEEDS[self.options_feed],
+        if model_legs == 2 * len(rows):  # listed contracts, but no option quote at all
+            source, label, simulated = "model", ("model prices on the strikes Alpaca lists (no option quotes were "
+                                                 "received), not market data"), True
+        else:
+            source, label, simulated = f"alpaca-{self.options_feed}", OPTION_FEEDS[self.options_feed], False
+        out = {"underlying": underlying, "expiry": expiry.isoformat(), "spot": spot, "simulated": simulated,
+               "source": source, "source_label": label,
                "as_of": wall, "model_legs": model_legs, "rows": rows}
         self._chain_cache[key] = (wall, out)
         return out
+
+    # ---- official closes ----------------------------------------------------------------------
+    def closing_price(self, symbol: str, day: date) -> ClosePrice:
+        """Official (unadjusted) close of symbol on day, from Alpaca's daily bar. Never blocks: the first call
+        queues the request for the poller thread and returns ClosePrice(False, None, ...); later calls return
+        the cached result. Cached for good once known; a failure is retried after 60 s."""
+        with self._lock:
+            hit = self._closes.get((symbol, day))
+            if hit is not None and hit.ready:
+                return hit
+            if hit is None:
+                self._closes[(symbol, day)] = hit = ClosePrice(False, None, "requested; Alpaca has not answered yet")
+            return hit
+
+    def fetch_closes(self) -> int:
+        """Fetch the closes asked for (poller thread). Returns how many were resolved."""
+        now = self.wall_clock()
+        with self._lock:
+            todo = [k for k, v in self._closes.items() if not v.ready and self._close_retry.get(k, 0.0) <= now]
+        done = 0
+        for sym, day in todo:
+            if cal.is_trading_day(day) and now < cal.close_ts(day) + 16 * 60:
+                continue  # not final yet (and consolidated data needs to be 15 minutes old)
+            try:
+                rows, feed = [], "sip" if self.data_feed == "iex" else self.data_feed
+                try:
+                    rows = self.rest.bars_range(sym, "1Day", day.isoformat(), (day + timedelta(days=1)).isoformat(),
+                                                feed, "raw", max_wait=30)
+                except ProviderError as e:
+                    if feed != "sip" or e.status not in (400, 403, 422):
+                        raise
+                    rows = self.rest.bars_range(sym, "1Day", day.isoformat(), (day + timedelta(days=1)).isoformat(),
+                                                "iex", "raw", max_wait=30)
+                    feed = "iex"
+            except ProviderError as e:
+                with self._lock:
+                    self._closes[(sym, day)] = ClosePrice(False, None, f"retrying: {e.message}")
+                    self._close_retry[(sym, day)] = now + 60.0
+                continue
+            bar = next((r for r in rows if (t := parse_ts(r.get("t"))) is not None and cal.ny_date(t) == day), None)
+            res = (ClosePrice(True, dec(bar["c"]), f"Alpaca {feed.upper()} daily bar") if bar is not None
+                   else ClosePrice(True, None, f"Alpaca has no daily bar for {sym} on {day.isoformat()}"))
+            with self._lock:
+                self._closes[(sym, day)] = res
+            done += 1
+        return done
+
+    # ---- corporate actions ---------------------------------------------------------------------
+    def corporate_actions(self, start, end) -> list:
+        """Ready actions for held symbols (never blocks). Raises ActionsPending until fetched; see alpaca_actions."""
+        return self.actions.actions_for(start, end)
+
+    def unsupported_actions(self, start, end) -> list:
+        return self.actions.notices_for(start, end)
+
+    def margin_holds(self, today, applied=(), since=None) -> dict:
+        return self.actions.holds(today, set(applied), since)
+
+    def _adjust_for_action(self, action) -> None:
+        """A split took effect. Alpaca's bars are requested split-adjusted, so the cached bars are dropped
+        and fetched again (already adjusted); the current quote, prints and stored state are scaled so
+        nothing shows the old price until the next update; the previous close is kept on the adjusted
+        basis (see _fix_prev_close); option listings and quotes on the old strikes are dropped."""
+        if action.kind != "split":
+            return
+        sym = action.symbol
+        f = Decimal(action.old) / Decimal(action.new)
+        with self._lock:
+            st = self._state.get(sym)
+            if st is not None:
+                for k in ("bid", "ask", "last", "open", "high", "low", "prev_close"):
+                    v = getattr(st, k)
+                    if v is not None and v > 0:  # an empty side stays empty: never invent a price
+                        setattr(st, k, (v * f).quantize(Decimal("0.0001")))
+                st.volume = st.volume / f
+                q = st.to_quote(self.wall_clock())
+                if q is not None:
+                    self.quotes[sym] = q
+            for p in self.prints.get(sym, ()):
+                p["price"] = (p["price"] * f).quantize(Decimal("0.0001"))
+            self._splits.setdefault(sym, {})[action.id] = (action.ex_date, f)
+            for key in [k for k in self._bar_cache if k[0] == sym]:
+                self._bar_cache.pop(key, None)
+            for key in [k for k in self._chain_cache if k[0] == sym]:
+                self._chain_cache.pop(key, None)
+            self._exp_cache.pop(sym, None)
+            for o in [o for o in self._opt if (c := parse_option(o)) is not None and c.underlying == sym]:
+                self._opt.pop(o, None)
+
+    def snapshot(self) -> dict:
+        """Saved in market.json: which corporate actions the feed has already reflected, and the splits
+        kept for previous-close consistency (so a restart neither re-applies nor forgets them)."""
+        return {"applied_actions": sorted(self.applied_actions),
+                "splits": {s: {i: [ex.isoformat(), str(f)] for i, (ex, f) in v.items()} for s, v in self._splits.items()}}
+
+    def restore(self, data: dict) -> None:
+        try:
+            self.applied_actions = set(data.get("applied_actions", []))
+            self._splits = {s: {i: (date.fromisoformat(ex), Decimal(f)) for i, (ex, f) in v.items()}
+                            for s, v in (data.get("splits") or {}).items()}
+        except (AttributeError, TypeError, ValueError):
+            return
 
     # ---- status ----------------------------------------------------------------------------------
     def status_info(self) -> dict:
@@ -910,23 +1239,27 @@ class AlpacaFeed(MarketDataProvider):
                 "stream": {"state": p.phase, "message": p.error, "streamed": len(p.streamed()), "cap": p.cap,
                            "polled": self._polled_count},
                 "stale": stale, "rest_error": self.rest.http.last_error, "assets": len(self.info),
-                "assets_error": self.assets_error, "fallback_reason": None}
+                "assets_error": self.assets_error, "corporate_actions": self.actions.status(), "fallback_reason": None}
 
 
 # ---------------------------------------------------------------------------------------------
 # Manual check: python -m app.marketdata.alpaca --check
 # ---------------------------------------------------------------------------------------------
-def _check(seconds: float = 8.0) -> int:
+def _check(seconds: float = 8.0, thin: str = "IEP", transport: Optional[Transport] = None,
+           connector=None, environ=None, out_dir: Optional[str] = None) -> int:
     import os
+    import tempfile
     from .config import load_dotenv, project_root
-    load_dotenv(project_root() / ".env")
-    key, secret = os.environ.get("APCA_API_KEY_ID", ""), os.environ.get("APCA_API_SECRET_KEY", "")
+    env = os.environ if environ is None else environ
+    load_dotenv(project_root() / ".env", env)
+    key, secret = env.get("APCA_API_KEY_ID", ""), env.get("APCA_API_SECRET_KEY", "")
     if not key or not secret:
         print("FAIL keys: APCA_API_KEY_ID and APCA_API_SECRET_KEY are not set (environment or .env)")
         return 1
-    feed_name = os.environ.get("PAPERDESK_ALPACA_FEED", "iex")
-    feed = AlpacaFeed(key, secret, feed=feed_name, options_feed=os.environ.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative"),
-                      trading_url=os.environ.get("APCA_API_BASE_URL", PAPER_TRADING_URL))
+    feed_name = env.get("PAPERDESK_ALPACA_FEED", "iex")
+    feed = AlpacaFeed(key, secret, feed=feed_name, options_feed=env.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative"),
+                      trading_url=env.get("APCA_API_BASE_URL", PAPER_TRADING_URL), transport=transport,
+                      connector=connector)
     results = []
 
     def item(name, fn):
@@ -937,7 +1270,7 @@ def _check(seconds: float = 8.0) -> int:
         except Exception as e:
             results.append(False)
             msg = e.message if isinstance(e, ProviderError) else repr(e)
-            print(f"FAIL {name}: {msg}")
+            print(f"FAIL {name}: {msg.replace(key, '<key>').replace(secret, '<secret>')}")
 
     def one_quote():
         feed.apply_snapshots(feed.rest.snapshots(["SPY"], feed.data_feed))
@@ -975,10 +1308,62 @@ def _check(seconds: float = 8.0) -> int:
         note = "" if got else " (no messages: the market may be closed)"
         return f"state {feed.protocol.phase}, {len(got)} messages in {seconds:.0f} s{note}"
 
+    def actions():
+        from .alpaca_actions import to_lifecycle
+        from .research import corporate_action_records
+        today = cal.ny_date(time.time())
+        resp = feed.rest.corporate_actions("AAPL,MSFT,SPY,NVDA,TSLA", (today - timedelta(days=400)).isoformat(),
+                                           (today + timedelta(days=90)).isoformat(), max_pages=20, strict=True)
+        recs = corporate_action_records(resp)
+        acts, notes = to_lifecycle(recs)
+        kinds = sorted({r["type"] for r in recs})
+        if not recs:
+            raise RuntimeError("no corporate actions returned for AAPL, MSFT, SPY, NVDA and TSLA over 400 days")
+        return (f"{len(recs)} records ({', '.join(kinds)}); {len(acts)} usable as dividends or splits, "
+                f"{len(notes)} shown as notices")
+
+    def listing():
+        lst = feed.option_listing("SPY")
+        if not lst:
+            raise RuntimeError("no SPY option contracts listed")
+        exps = sorted(lst)
+        odd = [d for d in exps if d.weekday() != 4]
+        n = sum(len(v) for v in lst.values())
+        return (f"{len(exps)} SPY expiries from {exps[0]} to {exps[-1]}, {n} standard contracts' strikes, "
+                f"{len(odd)} expiries not on a Friday (first {odd[0] if odd else 'none'})")
+
+    def thin_symbol():
+        snaps = feed.rest.snapshots([thin], feed.data_feed)
+        if thin not in snaps:
+            raise RuntimeError(f"no snapshot returned for {thin}")
+        feed.apply_snapshots(snaps)
+        q = (feed.step(time.time()) or [None])[0]
+        note = feed.quote_note(thin)
+        if q is None:
+            raise RuntimeError(f"the {thin} snapshot gave no usable price")
+        return (f"{thin} bid {q.bid} ask {q.ask} last {q.last} prev close {q.prev_close}"
+                f"{'; ' + note['note'] if note else ''}")
+
+    def replay_build():
+        from .replay.format import read_session
+        from .replay.provider import build_from_provider
+        day = cal.ny_date(time.time()) - timedelta(days=1)
+        while not cal.is_trading_day(day):
+            day -= timedelta(days=1)
+        d = out_dir or tempfile.mkdtemp(prefix="paperdesk-check-")
+        stats = build_from_provider(feed.rest, day, ["SPY"], os.path.join(d, "check.pdsession.gz"))
+        s = read_session(stats["path"])
+        return (f"{stats['events']} events for SPY on {day} ({stats['feeds'].get('SPY', '?').upper()} bars), "
+                f"source: {s.header.get('source')}; file {stats['path']}")
+
     item("assets", lambda: f"{feed.load_assets(max_age=0)} tradable symbols")
     item("quote", one_quote)
     item("bars", bar_set)
     item("option chain", chain)
+    item("option contracts", listing)
+    item("corporate actions", actions)
+    item("thin symbol snapshot", thin_symbol)
+    item("replay session from bars", replay_build)
     item("stream", stream)
     return 0 if all(results) else 1
 
@@ -986,5 +1371,6 @@ def _check(seconds: float = 8.0) -> int:
 if __name__ == "__main__":
     import sys
     if "--check" in sys.argv:
-        sys.exit(_check())
+        thin = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--thin=")), "IEP")
+        sys.exit(_check(thin=thin.upper()))
     print("usage: python -m app.marketdata.alpaca --check")

@@ -42,8 +42,26 @@ Conventions (documented choices):
   only, never leaving a short option uncovered that was covered before.
 - No margin check runs while any held symbol (or the underlying of a held option) has
   no price; the summary lists those symbols in `prices_unavailable` instead.
+- No margin check runs either while a held symbol has a split the feed knows about that is due
+  but not yet applied to the accounts, or while the start of the day waits for corporate action
+  data: the price may already be on the new basis while positions are not, which would look like a
+  large loss or gain. A held symbol with a corporate action PaperDesk cannot apply (merger,
+  spin-off, ...) in the last few days does not stop margin calls, but liquidation waits and says
+  why: the price jump may not be a real loss. Both show in the summary as `margin_paused`.
+  Prices the feed marks stale are listed in `stale_prices`; they still value the account.
 - Margin call and liquidation steps go to the events stream and the account's lifecycle
   log; the ledger only records money and position movements.
+- Corporate actions from a live feed (docs/DATA_PROVIDERS.md, "Corporate actions"): the feed
+  fetches them on its own thread. If the data for the next day is not in yet (the feed raises
+  `ActionsPending`), the day roll stops before that day (nothing of it is done, so nothing is done
+  twice) and is retried on a later tick; the day is never skipped. A feed that cannot supply them
+  at all (`ActionsUnavailable`) is reported once and the days roll on without them. A feed with
+  `late_actions` also announces actions found after their ex-date (providers can publish late):
+  they are applied on the next day roll, holders taken from the positions at that time, and
+  logged as late. An action is applied once: by id, and by its `revision_key` when the feed gives
+  one, so a re-issued or amended record is not applied again (the change is logged instead).
+  Kinds the lifecycle cannot process (mergers, spin-offs, ...) arrive as notices, shown on the
+  affected positions and in the account log.
 """
 from datetime import date, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -58,7 +76,7 @@ from ..options.symbology import multiplier, parse
 from ..risk import margin
 from . import settings as cfg
 from . import splits
-from .actions import DIVIDEND, SPLIT, CorporateAction
+from .actions import DIVIDEND, SPLIT, ActionsPending, ActionsUnavailable, CorporateAction
 from .days import Days
 
 DIVIDEND_INCOME = "income:dividends"
@@ -69,6 +87,8 @@ DAY_COUNT = Decimal(360)
 PDT_WINDOW = 5
 PDT_LIMIT = 3
 MAX_CATCH_UP_DAYS = 400
+LATE_DAYS = 10  # how far back a feed with late_actions is asked for actions published after their ex-date
+NOTICE_LIMIT = 5  # unsupported corporate action notices kept per symbol
 ACCRUAL_PLACES = Decimal("0.0000000001")
 FOUR = Decimal("0.0001")
 CLEAR_BUFFER = Decimal("0.02")  # a call clears at once when equity is 2% above maintenance
@@ -123,6 +143,12 @@ class LifecycleManager:
         self.last_date: Optional[date] = None
         self.applied: set = set()  # corporate action ids already applied to the accounts
         self.split_records: dict = {}  # id -> plain record of every applied split, to repair the feed
+        self.records: dict = {}  # id -> plain record of every applied action from a feed with revision keys
+        self.notices: dict = {}  # symbol -> [notice]: corporate actions PaperDesk could not apply
+        self.since: Optional[date] = None  # first day this lifecycle ran: late actions never reach before it
+        self.waiting: Optional[dict] = None  # {"day", "reason", "since"} while the day roll waits for the feed
+        self._unavailable_reported: Optional[str] = None
+        self._paused: dict = {}  # account id -> reason last reported for paused margin checks
         self._seq = count(1)
 
     @property
@@ -150,6 +176,26 @@ class LifecycleManager:
     def _missing_prices(self, pos: dict, marks: dict) -> list:
         return sorted(s for s, v in marks.items() if v <= 0)
 
+    def _holds(self, pos: dict) -> tuple:
+        """(reasons margin checks are paused, reasons liquidation is paused) for these positions."""
+        if not pos:
+            return [], []
+        unders = {(c.underlying if (c := parse(s)) else s) for s in pos}
+        checks, liq = [], []
+        if self.waiting is not None:
+            checks.append(f"the start of {self.waiting['day']} is waiting for corporate action data, so splits "
+                          f"and dividends for that day are not applied yet")
+        holds = {}
+        if hasattr(self.ex.feed, "margin_holds"):
+            try:
+                holds = self.ex.feed.margin_holds(self.today(), self.applied, self.since)
+            except Exception:  # a feed problem must not stop the tick
+                holds = {}
+        for sym in sorted(unders):
+            for h in holds.get(sym, ()):
+                (checks if h["kind"] == "split_pending" else liq).append(h["reason"])
+        return checks, liq
+
     def _state(self, account):
         """Positions, marks, equity (with dividends receivable or payable) and maintenance requirement."""
         pos = account.positions()
@@ -166,7 +212,7 @@ class LifecycleManager:
     def before_step(self, now: float) -> None:
         today = self.days.today(now)
         if self.last_date is None:
-            self.last_date = today
+            self.last_date = self.since = today
             self.ex.dirty = True
             return
         if today <= self.last_date:
@@ -174,16 +220,56 @@ class LifecycleManager:
         d = max(self.last_date, today - timedelta(days=MAX_CATCH_UP_DAYS))
         while d < today:
             nxt = d + timedelta(days=1)
+            # Ask the feed for this day only, after earlier days' actions were applied to it. This comes
+            # first: if the data is not in yet, nothing of day d's end or nxt's start has been done.
+            fetched = self._actions_for_day(nxt, now)
+            if fetched is None:
+                break  # wait for the feed; a later tick retries from the same day
+            acts, notices = fetched
             for a in list(self.ex.accounts.values()):
                 self._accrue(a, d)
                 if nxt.month != d.month:
                     self._post_accruals(a, now, d)
-            # Ask the feed for this day only, after earlier days' actions were applied to it.
-            acts = [x for x in self.ex.feed.corporate_actions(nxt, nxt) if x.ex_date == nxt]
-            self._start_of_day(nxt, sorted(acts, key=lambda x: (x.kind != SPLIT, x.symbol)), now)
+            self._start_of_day(nxt, sorted(acts, key=lambda x: (x.kind != SPLIT, x.ex_date, x.symbol)), now)
+            self._unsupported(nxt, notices, now)
             d = nxt
             self.last_date = d
         self.ex.dirty = True
+
+    def _actions_for_day(self, day: date, now: float):
+        """(actions effective on `day`, notices) from the feed, or None while the feed is not ready."""
+        feed = self.ex.feed
+        late = bool(getattr(feed, "late_actions", False))
+        start = day
+        if late and self.since is not None:
+            start = max(day - timedelta(days=LATE_DAYS), self.since + timedelta(days=1))
+        try:
+            acts = feed.corporate_actions(start, day)
+        except ActionsPending as e:
+            if self.waiting is None or self.waiting["day"] != day.isoformat() or self.waiting["reason"] != e.reason:
+                self.waiting = {"day": day.isoformat(), "reason": e.reason, "since": now}
+                self._event(None, "corporate_actions_wait",
+                            f"The start of {day.isoformat()} is waiting for corporate action data: {e.reason} "
+                            f"Settlement, dividends and splits for that day follow once it arrives.")
+            return None
+        except ActionsUnavailable as e:
+            acts = []
+            if self._unavailable_reported != e.reason:
+                self._unavailable_reported = e.reason
+                self._event(None, "corporate_actions_unavailable",
+                            f"Corporate actions are not available, so dividends and splits are not applied: {e.reason}")
+        if self.waiting is not None:
+            self.waiting = None
+        # Earlier ex-dates (late feeds only) are passed on every day of the window: one never applied yet is
+        # applied late, one already applied is skipped (and a changed record is logged) in _start_of_day.
+        acts = [x for x in acts if x.ex_date == day or (late and start <= x.ex_date < day)]
+        notices = []
+        if hasattr(feed, "unsupported_actions"):
+            try:
+                notices = feed.unsupported_actions(start, day)
+            except (ActionsPending, ActionsUnavailable):
+                notices = []
+        return acts, notices
 
     def _start_of_day(self, day: date, actions: list, now: float) -> None:
         iso = day.isoformat()
@@ -192,8 +278,12 @@ class LifecycleManager:
             a.life.unsettled = [e for e in a.life.unsettled if e[0] > iso]
             a.life.day_trades = [e for e in a.life.day_trades if e[0] >= keep_from]
         for act in actions:
-            if act.id in self.applied:
+            if self._already_applied(act, now):
                 continue
+            if act.ex_date < day:
+                self._event(None, "corporate_action_late",
+                            f"The {act.describe()} (ex-date {act.ex_date.isoformat()}) was published late by the data "
+                            f"provider and is applied now; holders are the positions at the start of {iso}.")
             if act.kind == SPLIT:
                 self._apply_split(act, now)
                 self.split_records[act.id] = act.to_plain()
@@ -202,9 +292,55 @@ class LifecycleManager:
                 self._adjust_orders_for_dividend(act, now)
             self.ex.feed.apply_corporate_action(act)
             self.applied.add(act.id)
+            if act.revision_key:
+                self.applied.add(act.revision_key)
+                self.records[act.id] = act.to_plain()
             self.ex._last_market_save = float("-inf")  # save the adjusted market with the accounts
         for a in self.ex.accounts.values():
             self._pay_dividends(a, day, now)
+
+    def _already_applied(self, act: CorporateAction, now: float) -> bool:
+        """True when this action (or an earlier record of the same event) was applied. A changed record
+        is not applied a second time; the difference is logged once."""
+        known = self.records.get(act.id)
+        if act.id not in self.applied and not (act.revision_key and act.revision_key in self.applied):
+            return False
+        if known is None and act.revision_key:
+            known = next((r for r in self.records.values() if r.get("revision_key") == act.revision_key), None)
+        if known is not None:
+            before = CorporateAction.from_plain(known)
+            mark = f"amended:{act.id}:{act.to_plain()['amount']}:{act.new}:{act.old}:{act.pay_date}"
+            if not before.same_terms(act) and mark not in self.applied:
+                self.applied.add(mark)
+                self._event(None, "corporate_action_amended",
+                            f"The data provider changed the {before.describe()} (ex-date {before.ex_date.isoformat()}) "
+                            f"after it was applied; it now reads {act.describe()}"
+                            + (f", paid {act.pay_date.isoformat()}" if act.pay_date else "")
+                            + ". The original terms were kept; nothing was applied twice.")
+        return True
+
+    def _unsupported(self, day: date, notices: list, now: float) -> None:
+        """Corporate actions PaperDesk cannot apply: shown on the affected positions and logged, never silent."""
+        iso = day.isoformat()
+        for n in notices:
+            key = f"notice:{n['id']}"
+            if key in self.applied or (n.get("date") or iso) > iso:
+                continue
+            self.applied.add(key)
+            sym = n["symbol"]
+            row = {"id": n["id"], "type": n.get("type"), "date": n.get("date"), "message": n["message"]}
+            self.notices[sym] = (self.notices.get(sym, []) + [row])[-NOTICE_LIMIT:]
+            for a in self.ex.accounts.values():
+                held = any(s == sym or ((c := parse(s)) is not None and c.underlying == sym) for s in a.lots)
+                ordered = any(o.account_id == a.id and (o.symbol == sym or ((oc := parse(o.symbol)) is not None and oc.underlying == sym))
+                              for o in self.ex.engine.active_orders())
+                if held or ordered:
+                    self._log(a, now, "corporate_action_unsupported", n["message"])
+
+    def position_notices(self, symbol: str) -> list:
+        """Notices for a position: its own symbol's, and for an option its underlying's."""
+        c = parse(symbol)
+        return list(self.notices.get(symbol, [])) + (list(self.notices.get(c.underlying, [])) if c else [])
 
     # ---- interest and borrow fees ---------------------------------------------------
     def _accrue(self, a, day: date) -> None:
@@ -473,7 +609,17 @@ class LifecycleManager:
         pos = a.positions()
         missing = self._missing_prices(pos, self.ex._marks(pos)) if pos else []
         out["prices_unavailable"] = missing
-        a.margin_call = a.type == "margin" and not missing and out["equity"] < out["maintenance_requirement"]
+        checks, liq_holds = self._holds(pos)
+        out["margin_paused"] = checks + liq_holds
+        stale = set()
+        for held in pos:
+            for sym in (held, c.underlying) if (c := parse(held)) else (held,):
+                q = self.ex.quote(sym)
+                if q is not None and q.stale:
+                    stale.add(sym)
+        out["stale_prices"] = sorted(stale)
+        a.margin_call = (a.type == "margin" and not missing and not checks
+                         and out["equity"] < out["maintenance_requirement"])
         out["margin_call"] = a.margin_call
         n = self.day_trade_count(a)
         pdt_on = a.type == "margin" and s["pattern_day_trader"]
@@ -501,6 +647,14 @@ class LifecycleManager:
                     self._event(a, "prices_unavailable", f"Margin checks paused: no price for {', '.join(missing)}.")
                 continue
             life.prices_missing = []
+            checks, liq_holds = self._holds(pos)
+            if checks:  # a known split is not applied yet: the numbers would be wrong, so do not act on them
+                key = "; ".join(checks)
+                if self._paused.get(a.id) != key:
+                    self._paused[a.id] = key
+                    self._event(a, "margin_paused", f"Margin checks paused: {key}.")
+                continue
+            self._paused.pop(a.id, None)
             if pos and eq < maint:
                 life.margin_call_ok_since = None
                 if life.margin_call_since is None:
@@ -513,7 +667,13 @@ class LifecycleManager:
                               f"(deficit {_fmt(maint - eq)}).{tail}")
                 elif (a.settings["margin_call_liquidation"] and self.ex.session(now) == "regular"
                       and now >= life.margin_call_since + float(cfg.number(a.settings, "margin_call_grace_hours")) * 3600):
-                    self.liquidate(a, now)
+                    if liq_holds:
+                        if not life.liquidation_paused:
+                            life.liquidation_paused = True
+                            self._log(a, now, "liquidation", "Margin call liquidation paused: "
+                                      + "; ".join(liq_holds) + ". Close or adjust the position yourself if needed.")
+                    else:
+                        self.liquidate(a, now)
             elif life.margin_call_since is not None:
                 if not pos or eq >= maint * (1 + CLEAR_BUFFER):
                     self._clear_call(a, now, eq, maint)
@@ -569,8 +729,8 @@ class LifecycleManager:
             best = fallback = None
             for sym, q in pos.items():
                 quote = ex.quote(sym)
-                if quote is None or (quote.bid if q > 0 else quote.ask) <= 0:
-                    continue  # nothing to sell into (or buy from)
+                if quote is None or quote.stale or (quote.bid if q > 0 else quote.ask) <= 0:
+                    continue  # nothing to sell into (or buy from), or only a stale quote
                 short_option = q < 0 and parse(sym) is not None
                 without = {k: v for k, v in pos.items() if k != sym}
                 marginal = maint - margin.requirement(without, marks, maintenance=True)
@@ -642,7 +802,8 @@ class LifecycleManager:
         (requirement after, underlying, legs, units) for the smallest close that meets the call, else
         the one leaving the lowest requirement below the current one, or None."""
         ex = self.ex
-        usable = lambda sym, side: (q := ex.quote(sym)) is not None and (q.ask if side == m.BUY else q.bid) > 0
+        usable = lambda sym, side: (q := ex.quote(sym)) is not None and not q.stale and \
+            (q.ask if side == m.BUY else q.bid) > 0
         best = None
         for s_sym, s_q in pos.items():
             sc = parse(s_sym)
@@ -688,9 +849,16 @@ class LifecycleManager:
     def to_plain(self) -> dict:
         n = next(self._seq)
         self._seq = count(n)
-        return {"last_date": self.last_date.isoformat() if self.last_date else None,
-                "applied": sorted(self.applied), "seq": n,
-                "splits": [self.split_records[k] for k in sorted(self.split_records)]}
+        out = {"last_date": self.last_date.isoformat() if self.last_date else None,
+               "applied": sorted(self.applied), "seq": n,
+               "splits": [self.split_records[k] for k in sorted(self.split_records)]}
+        if self.since is not None:
+            out["since"] = self.since.isoformat()
+        if self.records:
+            out["records"] = [self.records[k] for k in sorted(self.records)]
+        if self.notices:
+            out["notices"] = self.notices
+        return out
 
     def restore(self, d) -> None:
         if not isinstance(d, dict):
@@ -699,6 +867,10 @@ class LifecycleManager:
         self.applied = set(d.get("applied", []))
         self._seq = count(int(d.get("seq", 1)))
         self.split_records = {r["id"]: r for r in d.get("splits", [])}
+        self.records = {r["id"]: r for r in d.get("records", [])}
+        self.notices = {k: list(v) for k, v in (d.get("notices") or {}).items()}
+        # State written before `since` existed: late actions never reach back before the saved day.
+        self.since = date.fromisoformat(d["since"]) if d.get("since") else self.last_date
         self.repair_feed()
 
     def repair_feed(self) -> None:
@@ -713,5 +885,10 @@ class LifecycleManager:
     # ---- reporting ------------------------------------------------------------------------------
     def upcoming(self, days: int = 120, symbol: Optional[str] = None) -> list:
         today = self.today()
-        acts = self.ex.feed.corporate_actions(today - timedelta(days=30), today + timedelta(days=days))
+        try:
+            acts = self.ex.feed.corporate_actions(today - timedelta(days=30), today + timedelta(days=days))
+        except ActionsPending as e:  # show what the feed has so far
+            acts = e.known
+        except ActionsUnavailable:
+            acts = []
         return sorted((x for x in acts if symbol is None or x.symbol == symbol), key=lambda x: (x.ex_date, x.symbol))

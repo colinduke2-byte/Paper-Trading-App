@@ -42,7 +42,9 @@ function Positions({ positions, onSelect, onClose }: any) {
       <tbody>
         {positions.map((x: any) => (
           <tr key={x.symbol}>
-            <td><button className="link" onClick={() => onSelect(x.underlying || x.symbol)}>{x.description}</button></td>
+            <td><button className="link" onClick={() => onSelect(x.underlying || x.symbol)}>{x.description}</button>
+              {x.notices?.length ? <span className="tag" title={x.notices.map((n: any) => n.message).join("\n")}> corporate action</span> : null}
+              {x.price_note ? <span className="tag" title={x.price_note}>{x.price_source === "model" ? " model price" : " price note"}</span> : null}</td>
             <td className={"num " + tone(x.qty)}>{qty(x.qty)}</td>
             <td className="num">{money(x.avg_cost)}</td>
             <td className="num">{money(x.mark)}</td>
