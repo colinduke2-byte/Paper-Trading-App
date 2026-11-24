@@ -6,7 +6,8 @@ import { feedBanner, Research } from "./Research";
 import { Ticket, TicketSeed } from "./Ticket";
 import { jumpKey, modeKey, ReplayBar, ReplayButton, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
-import { api, isOption, money, pct, signed, store, time, tone, underlyingOf, usd } from "./util";
+import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
+import { SignOut } from "./Login";
 
 type Toast = { id: number; text: string; bad?: boolean };
 
@@ -97,7 +98,13 @@ export default function App() {
           }
         }
       };
-      sock.onclose = () => { setConnected(false); if (!closed) { retry = setTimeout(connect, delay); delay = Math.min(delay * 2, 8000); } };
+      sock.onclose = (ev) => {
+        setConnected(false);
+        if (closed) return;
+        if (ev.code === 4401) { signedOut(); return; } // session ended: back to the sign-in screen, no retry
+        retry = setTimeout(() => sessionOk().then((ok) => { if (closed) return; if (ok) connect(); else signedOut(); }), delay);
+        delay = Math.min(delay * 2, 8000);
+      };
       sock.onerror = () => sock.close();
     };
     connect();
@@ -164,6 +171,7 @@ export default function App() {
           <button className="ghost sm" onClick={() => setDialog("reset")}>Reset</button>
           <ReplayButton status={status} onOpen={() => setReplayPicker(true)} />
           <button className="ghost sm" onClick={() => setSettingsOpen(true)} disabled={!accountId}>Settings</button>
+          <SignOut />
         </div>
       </header>
       <ReplayBar status={status} onStatus={setStatus} notify={notify} />
