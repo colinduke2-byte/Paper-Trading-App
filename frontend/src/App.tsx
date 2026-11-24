@@ -89,7 +89,7 @@ export default function App() {
           setRefreshKey((k) => k + 1);
           for (const e of m.events) {
             if (e.type === "alert") notify(`Alert: ${e.alert.symbol} ${e.alert.op === "above" ? "rose to" : "fell to"} ${money(e.last)}`);
-            if (e.type === "fill" && e.fill.kind !== "trade") notify(`Option ${e.fill.kind}: ${e.fill.side} ${e.fill.qty} ${e.fill.symbol} at ${money(e.fill.price)}`);
+            if (e.type === "fill" && e.fill.kind !== "trade") notify(`${e.fill.kind === "reinvestment" ? "Dividend reinvestment" : e.fill.kind === "split_settlement" ? "Split settlement" : `Option ${e.fill.kind}`}: ${e.fill.side} ${e.fill.qty} ${e.fill.symbol} at ${money(e.fill.price)}`);
             if (e.type === "order" && e.order.status === "filled" && e.order.parent_id) notify(`Filled: ${e.order.role?.replace("_", " ") || "order"} on ${e.order.symbol} at ${money(e.order.avg_fill_price)}`);
           }
         }

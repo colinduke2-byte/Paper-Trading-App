@@ -464,6 +464,11 @@ class Exchange:
         if o.status != m.HELD and not self._worst_case(a, []).ok and not self._reduces_risk_after(a, o):
             o.qty, o.limit_price, o.stop_price = old
             raise OrderRejected("insufficient buying power for the change")
+        if o.status != m.HELD:  # pattern day trader and settled-cash rules, as on submit
+            rule = self.lifecycle.pre_trade(a, o, None if self._reduces_risk_after(a, o) else self._worst_case(a, []))
+            if rule:
+                o.qty, o.limit_price, o.stop_price = old
+                raise OrderRejected(rule)
         return o
 
     def _reduces_risk_after(self, account: Account, o: Order) -> bool:
@@ -554,6 +559,7 @@ class Exchange:
                     f = Fill(id=f"X{next(self._expiry_seq):08d}", order_id=None, account_id=a.id, symbol=symbol,
                              side=side, qty=q, price=price, ts=now, kind=kind)
                     a.apply_fill(f, multiplier(symbol))
+                    self.lifecycle.on_fill(a, f)  # exercise and assignment proceeds settle T+1
                     self.events.append({"type": "fill", "account_id": a.id, "fill": f})
 
                 if itm >= CENT:

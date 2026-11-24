@@ -44,7 +44,8 @@ def register(app, ctx):
             "pending_dividends": [dict(p, qty=D(p["qty"]), rate=D(p["rate"]), amount=D(p["amount"]))
                                   for p in life.pending_dividends],
             "accrued_interest": life.accrued_interest, "accrued_borrow_fee": life.accrued_borrow,
-            "margin_call_since": life.margin_call_since})
+            "margin_call_since": life.margin_call_since, "prices_unavailable": life.prices_missing,
+            "log": [{"ts": t, "kind": k, "message": msg} for t, k, msg in life.log[-100:]][::-1]})
 
     @app.get("/api/corporate-actions")
     def corporate_actions(symbol: str = "", days: int = Query(120, ge=1, le=730)):

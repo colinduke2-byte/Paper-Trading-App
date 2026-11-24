@@ -67,6 +67,9 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
             {summary.pending_dividends ? <div style={S.stat}><span className="muted">Dividends pending</span><b>{usd(summary.pending_dividends)}</b></div> : null}
           </div>
         )}
+        {summary?.prices_unavailable?.length > 0 && (
+          <div className="notice" role="status">Prices unavailable for {summary.prices_unavailable.join(", ")}: margin checks are paused until they return.</div>
+        )}
         {summary?.liquidation_at && (
           <div className="notice bad" role="alert">Margin call: positions will be liquidated from {dateTime(summary.liquidation_at)} unless it is met.</div>
         )}

@@ -11,6 +11,7 @@ from app.ledger.account import Account
 from app.lifecycle import settings as cfg
 from app.lifecycle import splits
 from app.lifecycle.actions import dividend, split
+from app.lifecycle.manager import uncovered
 from app.lifecycle.state import AccountLife
 from app.options import chain
 from app.options.symbology import build, parse
@@ -141,12 +142,17 @@ def test_ledger_balances_through_any_lifecycle_sequence(ops, drip, kind):
     assert b.settings == a.settings
 
 
-@settings(max_examples=120, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+EXPIRIES = chain.expirations(date(2026, 11, 24))
+
+
+@settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(cash=st.integers(-200000, 200000),
        stocks=st.lists(st.tuples(st.sampled_from(["ABC", "XYZ", "QRS"]), st.integers(-800, 800).filter(bool),
                                  st.integers(500, 30000)), min_size=1, max_size=4),
-       short_calls=st.integers(0, 5), strike=st.sampled_from(["40", "60", "80", "100", "120"]))
-def test_liquidation_never_increases_the_requirement(cash, stocks, short_calls, strike):
+       options=st.lists(st.tuples(st.sampled_from(["ABC", "XYZ"]), st.sampled_from("CP"),
+                                  st.sampled_from([-10, -5, 0, 5, 10]), st.integers(1, len(EXPIRIES) - 1),
+                                  st.integers(-5, 5).filter(bool)), max_size=4))
+def test_liquidation_never_increases_the_requirement_or_uncovers_a_short(cash, stocks, options):
     prices = {"ABC": D("60"), "XYZ": D("25"), "QRS": D("140")}
     ex, feed, clock = make_exchange(**{s: p for s, p in prices.items()})
     for s, p in prices.items():
@@ -156,17 +162,23 @@ def test_liquidation_never_increases_the_requirement(cash, stocks, short_calls, 
     a.ledger.post(0, "deposit", "test", [("cash", D(cash)), ("equity:capital", -D(cash))])
     for i, (sym, qty, entry) in enumerate(stocks):
         a.apply_fill(_fill(i, "buy" if qty > 0 else "sell", Decimal(abs(qty)), Decimal(entry) / 100, sym), 1)
-    call = build("ABC", EXPIRY, "C", D(strike))
-    if short_calls:
-        a.apply_fill(_fill(50, "sell", Decimal(short_calls), D("2.00"), call), 100)
+    for i, (u, kind, off, e, qty) in enumerate(options):
+        osym = build(u, EXPIRIES[e], kind, prices[u] + off)
+        mark = ex.mark(osym)
+        if mark > 0:
+            a.apply_fill(_fill(60 + i, "buy" if qty > 0 else "sell", Decimal(abs(qty)), mark, osym), 100)
     ex.tick()
+    before = uncovered(a.positions())
     steps = ex.lifecycle.liquidate(a, clock.now())
     for st_ in steps:
         assert st_["requirement_after"] <= st_["requirement_before"]
         assert st_["status"] == "filled"
+        # a short option that was covered before liquidation is never left uncovered
+        assert all(v <= before.get(k, 0) for k, v in uncovered(st_["positions"]).items())
     pos = a.positions()
     marks = ex._marks(pos)
-    assert not pos or margin.equity(a.cash, pos, marks) >= margin.requirement(pos, marks, maintenance=True)
+    stuck = all((ex.quote(s).bid if q > 0 else ex.quote(s).ask) <= 0 for s, q in pos.items())
+    assert not pos or stuck or margin.equity(a.cash, pos, marks) >= margin.requirement(pos, marks, maintenance=True)
     ledger_ok(a)
 
 
@@ -176,7 +188,11 @@ life_st = st.builds(
     day_trades=st.lists(st.tuples(st.dates().map(date.isoformat), st.sampled_from(["ABC", "XYZ"]),
                                   st.text(max_size=5)).map(list), max_size=4),
     opened_date=st.one_of(st.none(), st.dates().map(date.isoformat)),
-    opened=st.dictionaries(st.sampled_from(["ABC", "XYZ"]), cents_st),
+    opened=st.dictionaries(st.sampled_from(["ABC", "XYZ"]), st.lists(
+        st.tuples(st.one_of(st.none(), st.text(max_size=5)), cents_st, st.booleans()).map(list), max_size=3)),
+    liquidation_paused=st.booleans(),
+    log=st.lists(st.tuples(st.floats(0, 2e9), st.sampled_from(["margin_call", "liquidation"]),
+                           st.text(max_size=20)).map(list), max_size=3),
     accrued_interest=st.integers(-10**9, 10**9).map(lambda n: Decimal(n) / 10**10),
     accrued_borrow=cents_st, margin_call_since=st.one_of(st.none(), st.floats(0, 2e9)),
 )
@@ -187,7 +203,7 @@ life_st = st.builds(
 def test_account_lifecycle_state_round_trips_through_json(life, rate, flags):
     a = Account("A1", "t", "margin", D("1000"), 0)
     a.life = life
-    a.settings = cfg.update(a.settings, {"margin_interest_rate": rate, "dividends": flags[0],
+    a.settings = cfg.update(a.settings, {"margin_interest_rate": rate, "dividend_reinvestment": flags[0],
                                          "pattern_day_trader": flags[1], "settlement": flags[2]})
     b = Account.from_plain(json.loads(json.dumps(a.to_plain())))
     assert b.life == a.life and b.settings == a.settings

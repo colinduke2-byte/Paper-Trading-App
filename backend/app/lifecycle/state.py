@@ -18,13 +18,17 @@ class AccountLife:
     pending_dividends: list = field(default_factory=list)
     # [trade date ISO, symbol, order id]: one entry per day trade
     day_trades: list = field(default_factory=list)
-    # quantity opened today per symbol, for day-trade detection
+    # lots opened today per symbol, for day-trade detection: [opening order id, open qty, counted]
     opened_date: Optional[str] = None
     opened: dict = field(default_factory=dict)
     accrued_interest: Decimal = ZERO
     accrued_borrow: Decimal = ZERO
     margin_call_since: Optional[float] = None
     margin_call_deficit: Decimal = ZERO
+    margin_call_ok_since: Optional[float] = None  # equity back at or above maintenance since
+    liquidation_paused: bool = False
+    prices_missing: list = field(default_factory=list)
+    log: list = field(default_factory=list)  # [ts, kind, message]: margin calls, liquidation, adjustments
 
     def unsettled_total(self) -> Decimal:
         return sum((D(a) for _, a, _ in self.unsettled), ZERO)
@@ -33,9 +37,11 @@ class AccountLife:
         return {"unsettled": [[d, str(a), r] for d, a, r in self.unsettled],
                 "pending_dividends": self.pending_dividends,
                 "day_trades": self.day_trades, "opened_date": self.opened_date,
-                "opened": {s: str(q) for s, q in self.opened.items()},
+                "opened": {s: [[i, str(q), c] for i, q, c in lots] for s, lots in self.opened.items()},
                 "accrued_interest": str(self.accrued_interest), "accrued_borrow": str(self.accrued_borrow),
-                "margin_call_since": self.margin_call_since, "margin_call_deficit": str(self.margin_call_deficit)}
+                "margin_call_since": self.margin_call_since, "margin_call_deficit": str(self.margin_call_deficit),
+                "margin_call_ok_since": self.margin_call_ok_since, "liquidation_paused": self.liquidation_paused,
+                "prices_missing": self.prices_missing, "log": self.log}
 
     @classmethod
     def from_plain(cls, d) -> "AccountLife":
@@ -44,7 +50,16 @@ class AccountLife:
         return cls(unsettled=[[x, D(a), r] for x, a, r in d.get("unsettled", [])],
                    pending_dividends=list(d.get("pending_dividends", [])),
                    day_trades=[list(x) for x in d.get("day_trades", [])],
-                   opened_date=d.get("opened_date"), opened={s: D(q) for s, q in d.get("opened", {}).items()},
+                   opened_date=d.get("opened_date"), opened={s: _lots(v) for s, v in d.get("opened", {}).items()},
                    accrued_interest=D(d.get("accrued_interest", "0")), accrued_borrow=D(d.get("accrued_borrow", "0")),
                    margin_call_since=d.get("margin_call_since"),
-                   margin_call_deficit=D(d.get("margin_call_deficit", "0")))
+                   margin_call_deficit=D(d.get("margin_call_deficit", "0")),
+                   margin_call_ok_since=d.get("margin_call_ok_since"),
+                   liquidation_paused=bool(d.get("liquidation_paused", False)),
+                   prices_missing=list(d.get("prices_missing", [])), log=[list(x) for x in d.get("log", [])])
+
+
+def _lots(v) -> list:
+    if isinstance(v, (str, int)):  # format before opening lots were tracked: one uncounted lot
+        return [[None, D(v), False]]
+    return [[i, D(q), bool(c)] for i, q, c in v]

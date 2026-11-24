@@ -1,16 +1,16 @@
 """Per-account lifecycle settings: a small JSON object stored on the account.
 
-Numbers are stored as strings so they stay exact Decimals. Every rule can be turned
-off. Defaults are typical of a US retail broker.
+Numbers are stored as strings so they stay exact Decimals, with at most 4 decimal
+places. Every rule can be turned off except cash dividends, which are always paid
+(the price always drops by the dividend on the ex-date). Defaults are typical of a
+US retail broker.
 """
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from ..core.money import parse
 
 # key: (kind, default, label, help text, (min, max) for numbers)
 SPEC = {
-    "dividends": ("bool", True, "Cash dividends",
-                  "Credit dividends on long stock and charge them on short stock.", None),
     "dividend_reinvestment": ("bool", False, "Reinvest dividends",
                               "Buy more shares with each dividend received (fractional shares allowed).", None),
     "settlement": ("bool", True, "T+1 settlement",
@@ -23,7 +23,7 @@ SPEC = {
                        "Equity needed to day trade without the 3-trade limit.", ("0", "100000000")),
     "margin_interest": ("bool", True, "Margin interest",
                         "Charge interest on borrowed cash (a negative cash balance) in margin accounts.", None),
-    "margin_interest_rate": ("number", "8.0", "Margin interest rate (% a year)",
+    "margin_interest_rate": ("number", "8", "Margin interest rate (% a year)",
                              "Accrued daily on the debit balance (actual/360), posted on the first day of each month.",
                              ("0", "50")),
     "borrow_fee": ("bool", True, "Short borrow fee",
@@ -65,9 +65,14 @@ def _coerce(key: str, value):
     except (ValueError, InvalidOperation, ArithmeticError):
         raise ValueError(f"{label} must be a number")
     lo, hi = Decimal(bounds[0]), Decimal(bounds[1])
+    if not d.is_finite() or abs(d.adjusted()) > 20 and d != 0:
+        raise ValueError(f"{label} must be a plain number between {lo} and {hi}")
     if d < lo or d > hi:
         raise ValueError(f"{label} must be between {lo} and {hi}")
-    return str(d)
+    d = d.quantize(Decimal("0.0001"), ROUND_HALF_UP) + 0  # at most 4 decimals; "-0" becomes "0"
+    if d < lo:
+        raise ValueError(f"{label} must be between {lo} and {hi}")
+    return format(d.normalize(), "f")
 
 
 def update(current: dict, changes: dict) -> dict:
