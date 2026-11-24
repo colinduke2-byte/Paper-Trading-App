@@ -619,3 +619,109 @@ def test_liquidation_of_spread_covered_call_and_calendar_never_raises_requiremen
     marks = ex._marks(pos)
     assert not pos or margin.equity(acc.cash, pos, marks) >= margin.requirement(pos, marks, maintenance=True)
     ledger_ok(acc)
+
+
+# ---- access mode (PR 7) x the merged routes ------------------------------------------------------------------
+ACCESS_PASS = "integration passcode 8642"
+FEATURE_MODULES = ("routes_reports", "routes_research", "routes_settings", "routes_multileg", "routes_replay")
+
+
+def locked_app(tmp_path, monkeypatch, run_loop=False):
+    import time
+    monkeypatch.setenv("PAPERDESK_PASSCODE", ACCESS_PASS)
+    monkeypatch.setenv("PAPERDESK_LOOPBACK_BYPASS", "0")
+    ex = Exchange(SyntheticFeed(seed=3, now=time.time()), data_dir=str(tmp_path / "live"))
+    ex.create_account("Margin", "margin")
+    ex.tick()
+    app = create_app(ex, run_loop=run_loop, tick_seconds=0.02, replay_tick_seconds=0.02)
+    # a browser on this computer: loopback client and host, bypass switched off
+    return TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8000"), app, ex
+
+
+def feature_routes(app):
+    from fastapi.routing import APIRoute
+    out = []
+    for r in app.routes:
+        if isinstance(r, APIRoute) and r.endpoint.__module__.rsplit(".", 1)[-1] in FEATURE_MODULES:
+            out += [(m, r.path) for m in sorted(r.methods)]
+    return out
+
+
+def test_access_every_feature_route_needs_a_session_and_works_with_one(tmp_path, monkeypatch):
+    c, app, ex = locked_app(tmp_path, monkeypatch)
+    routes = feature_routes(app)
+    assert {p.split("/")[2] for _, p in routes} >= {"accounts", "research", "replay", "corporate-actions"}
+    assert len(routes) >= 30
+    for method, path in routes:
+        url = path.replace("{aid}", "A0001").replace("{jid}", "J1").replace("{month}", "2026-11") \
+                  .replace("{kind}", "fills.csv").replace("{symbol}", "NVLX")
+        r = c.request(method, url, json={} if method in ("POST", "PUT", "PATCH") else None)
+        assert r.status_code == 401, (method, url, r.status_code)
+        assert "A0001" not in r.text and "Margin" not in r.text
+    assert c.post("/api/auth/login", json={"passcode": ACCESS_PASS}).json() == {"ok": True}
+    exp = c.get("/api/options/expirations/NVLX").json()[0]["date"]
+    rows = c.get("/api/options/chain/NVLX", params={"expiry": exp}).json()["rows"]
+    low, mid = rows[len(rows) // 2 - 1], rows[len(rows) // 2]
+    legs = [leg(low["call"]["symbol"], "buy"), leg(mid["call"]["symbol"], "sell")]
+    month = cal.ny_date(ex.now()).strftime("%Y-%m")
+    checks = [
+        ("GET", "/api/accounts/A0001/analytics", None), ("GET", "/api/accounts/A0001/gains", None),
+        ("PUT", "/api/accounts/A0001/lot-method", {"method": "lifo"}),
+        ("GET", "/api/accounts/A0001/statements", None), ("GET", f"/api/accounts/A0001/statements/{month}", None),
+        ("GET", f"/api/accounts/A0001/statements/{month}/html", None),
+        ("GET", "/api/accounts/A0001/export/fills.csv", None), ("GET", "/api/accounts/A0001/journal", None),
+        ("GET", "/api/research/sources", None), ("GET", "/api/research/news/NVLX", None),
+        ("GET", "/api/research/fundamentals/NVLX", None),
+        ("GET", "/api/accounts/A0001/settings", None), ("PUT", "/api/accounts/A0001/settings", {"margin_interest_rate": "7"}),
+        ("GET", "/api/accounts/A0001/lifecycle", None), ("GET", "/api/corporate-actions", None),
+        ("POST", "/api/accounts/A0001/multileg/preview", {"legs": legs}),
+        ("POST", "/api/accounts/A0001/multileg", {"legs": legs}),
+        ("GET", "/api/replay/sessions", None), ("POST", "/api/replay/start", {"session": SAMPLES[0][0]}),
+        ("POST", "/api/replay/step", {"seconds": 60}), ("GET", "/api/replay/status", None),
+        ("POST", "/api/replay/exit", None),
+    ]
+    for method, url, body in checks:
+        r = c.request(method, url, json=body)
+        assert r.status_code == 200, (method, url, r.status_code, r.text[:200])
+    # the statement page is served under the CSP: no inline script, the print button uses /print.js
+    page = c.get(f"/api/accounts/A0001/statements/{month}/html")
+    assert "script-src 'self'" in page.headers["content-security-policy"]
+    assert "onclick" not in page.text and '<script src="/print.js"></script>' in page.text
+    assert "<script>" not in page.text
+    assert c.get("/print.js").status_code == 200
+
+
+def test_access_websocket_keeps_streaming_across_replay_mode_switches(tmp_path, monkeypatch):
+    c, app, ex = locked_app(tmp_path, monkeypatch, run_loop=True)
+    with c:
+        assert c.post("/api/auth/login", json={"passcode": ACCESS_PASS}).json() == {"ok": True}
+        from app.api import auth
+        cookie = f"{auth.COOKIE}={c.cookies[auth.COOKIE]}"  # the test client's ws URL does not match the jar
+        with c.websocket_connect("/ws", headers={"host": "127.0.0.1:8000", "origin": "http://127.0.0.1:8000",
+                                                 "cookie": cookie}) as ws:
+            ws.send_json({"symbols": ["NVLX"]})
+
+            def next_tick(mode):
+                for _ in range(400):
+                    msg = ws.receive_json()
+                    if msg.get("type") == "tick" and msg["status"]["mode"] == mode:
+                        return msg
+                raise AssertionError(f"no {mode} tick")
+
+            assert next_tick("live")["status"]["replay"] is None
+            assert c.post("/api/replay/start", json={"session": SAMPLES[0][0]}).status_code == 200
+            assert next_tick("replay")["status"]["replay"]["active"]
+            assert c.post("/api/replay/exit").status_code == 200
+            assert next_tick("live")["status"]["feed"] == "synthetic"
+
+
+def test_access_host_check_accepts_the_hosts_the_e2e_ci_and_docker_flows_use(tmp_path, monkeypatch):
+    # e2e/playwright.config.ts and the CI jobs open http://127.0.0.1:<port>; docker compose publishes on
+    # 127.0.0.1 and the README says http://127.0.0.1:8000 or localhost. With an Alpaca feed the server is
+    # the same; only the data directory moves (data/alpaca), so the session store follows ctx.live.
+    c, app, ex = locked_app(tmp_path, monkeypatch)
+    for host in ("127.0.0.1:8000", "127.0.0.1:43123", "localhost:8000", "localhost"):
+        assert c.get("/api/auth/state", headers={"host": host}).status_code == 200, host
+    assert c.get("/api/auth/state", headers={"host": "evil.example"}).status_code == 421
+    assert c.post("/api/auth/login", json={"passcode": ACCESS_PASS}, headers={"host": "localhost:8000"}).json()["ok"]
+    assert app.state.access.sessions.path.startswith(str(tmp_path / "live"))
