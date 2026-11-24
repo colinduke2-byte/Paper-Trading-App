@@ -164,7 +164,8 @@ def test_buy_and_sell_on_a_weekend_in_us_session_mode():
     ({"qty": "0.0005"}, "the minimum order for SIMCOIN/USD is 0.001"),
     ({"qty": "1", "notional": "100"}, "not both"),
     ({"qty": None, "notional": "10.001"}, "more than 2 decimal places"),
-    ({"qty": None, "notional": "10", "type": "stop", "stop_price": "41000"}, "enter a quantity for stop orders"),
+    ({"qty": None, "notional": "10", "type": "stop_limit", "stop_price": "41000", "limit_price": "41000"},
+     "enter a quantity for stop orders"),
     ({"qty": None, "notional": "20"}, "minimum order"),
 ])
 def test_rejected_crypto_orders_name_the_cause(req, message):
@@ -608,3 +609,81 @@ def test_offset_clock_and_clock_start_setting(tmp_path, monkeypatch):
     monkeypatch.setenv("PAPERDESK_ENV_FILE", "")
     ex = default_exchange()
     assert abs(ex.now() - SAT) < 60 and ex.session() == "closed" and ex.session_for(COIN) == "regular"
+
+
+# ---------------------------------------------------------------------------------------------
+# Review fixes
+# ---------------------------------------------------------------------------------------------
+def test_crypto_stop_buy_needs_a_limit():
+    ex, feed, clock, m, c = make()
+    for acct in (m, c):
+        with pytest.raises(OrderRejected, match="a crypto stop order to buy needs a limit price"):
+            ex.submit(acct.id, {"symbol": COIN, "side": "buy", "type": "stop", "qty": "2.4", "stop_price": "41000.00",
+                                "tif": "gtc"})
+    # A stop-limit buy is checked at its limit, so a gap above the stop cannot overspend.
+    with pytest.raises(OrderRejected, match="insufficient cash"):
+        ex.submit(c.id, {"symbol": COIN, "side": "buy", "type": "stop_limit", "qty": "2.4", "stop_price": "41000.00",
+                         "limit_price": "60000.00", "tif": "gtc"})
+    [o] = ex.submit(c.id, {"symbol": COIN, "side": "buy", "type": "stop_limit", "qty": "2.4", "stop_price": "41000.00",
+                           "limit_price": "41500.00", "tif": "gtc"})
+    move(ex, feed, clock, "60000.00")
+    assert o.status == "working" and c.cash == D("100000")  # triggered, but the market is above the limit
+
+
+@pytest.mark.parametrize("kind", ["cash", "margin"])
+def test_a_crypto_buy_fill_is_capped_to_the_cash_at_fill_time(kind):
+    ex, feed, clock, m, c = make()
+    acct = m if kind == "margin" else c
+    [o] = ex.submit(acct.id, {"symbol": COIN, "side": "buy", "type": "limit", "qty": "2.49", "limit_price": "39999.00",
+                              "tif": "gtc"})
+    from app.lifecycle import settings as cfg
+    acct.settings = cfg.merged({**acct.settings, "crypto_fee_rate": "5"})  # bypasses the settings check on purpose
+    move(ex, feed, clock, "39999.00")
+    assert acct.cash >= 0 and o.status == "canceled" and "never bought with borrowed money" in o.reason
+    assert D(0) < o.filled_qty < D("2.49") and o.filled_qty == acct.position(COIN)
+    assert assets.on_step(o.filled_qty, D("0.0001")) and acct.fills[-1].qty == o.filled_qty
+    assert not acct.margin_call and ex.summary(acct.id)["margin_call"] is False
+
+
+actions = st.lists(st.tuples(
+    st.sampled_from(["market", "limit", "stop_limit", "stop", "notional_market", "notional_limit"]),
+    st.sampled_from(["buy", "sell"]), st.integers(min_value=1, max_value=300000),
+    st.integers(min_value=-40, max_value=40), st.integers(min_value=-35, max_value=35)), min_size=1, max_size=20)
+
+
+@settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(actions, st.sampled_from(["0", "0.25", "2"]), st.sampled_from(["cash", "margin"]))
+def test_price_gaps_never_make_cash_negative_or_a_short(seq, rate, kind):
+    """Orders of every allowed type rest while the price gaps by up to 35% between entry and fill."""
+    from app.lifecycle import settings as cfg
+    ex, feed, clock, m, c = make(cash=D("20000"), qinc="0.00001", mn="0.00001")
+    acct = m if kind == "margin" else c
+    acct.settings = cfg.update(acct.settings, {"crypto_fee_rate": rate})
+    price = D("40000.00")
+    for typ, side, units, off_pct, gap_pct in seq:
+        ref = (price * (100 + off_pct) / 100).quantize(D("0.01"))
+        req = {"symbol": COIN, "side": side, "tif": "gtc"}
+        frac = D(units % 10 + 90) / 100 if units % 2 else D(units % 100 + 1) / 100  # often nearly all the cash
+        budget = acct.cash * frac if side == "buy" else acct.position(COIN) * ref * frac
+        if typ.startswith("notional"):
+            req.update(notional=str(max(budget, D(1)).quantize(D("0.01"))), type=typ.split("_")[1])
+        else:
+            req.update(qty=str(max(assets.floor_to(budget / ref, D("0.00001")), D("0.00001"))), type=typ)
+        if req["type"] in ("limit", "stop_limit"):
+            req["limit_price"] = str(ref)
+        if req["type"] in ("stop", "stop_limit"):
+            req["stop_price"] = str(ref)
+        if req["type"] == "market":
+            req["tif"] = "day"
+        try:
+            ex.submit(acct.id, req)
+        except OrderRejected:
+            pass
+        if gap_pct % 5 == 0:  # the fee rate is raised under resting orders (bypassing the settings check)
+            acct.settings = cfg.merged({**acct.settings, "crypto_fee_rate": "5"})
+        move(ex, feed, clock, str(ref))  # first trade at the order's own level (fills limits at the limit) ...
+        price = max((ref * (100 + gap_pct) / 100).quantize(D("0.01")), D("1.00"))
+        move(ex, feed, clock, str(price))  # ... then gap past it
+        assert acct.cash >= 0 and acct.position(COIN) >= 0, (acct.cash, acct.position(COIN))
+    assert all(sum(v for _, v in t.postings) == 0 for t in acct.ledger.transactions)
+    assert acct.ledger.recompute() == acct.ledger.balances

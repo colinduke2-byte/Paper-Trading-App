@@ -526,6 +526,9 @@ class Exchange:
             raise OrderRejected("on-open and on-close orders do not apply to crypto, which trades 24 hours a day")
         if typ not in CRYPTO_TYPES:
             raise OrderRejected("crypto orders can be market, limit, stop or stop-limit orders")
+        if typ == m.STOP and side == m.BUY:
+            raise OrderRejected("a crypto stop order to buy needs a limit price (use stop-limit): a market fill above "
+                                "the stop could cost more than your cash")
         if tif not in CRYPTO_TIFS:
             raise OrderRejected("crypto orders can be day, good-till-canceled or immediate-or-cancel orders")
         if req.get("extended_hours"):
@@ -1162,6 +1165,8 @@ class Exchange:
                 acct = self.accounts.get(obj.account_id)
                 if acct is None:
                     continue
+                if is_crypto(obj.symbol) and obj.side == m.BUY and obj.kind == "trade" and not self._cap_crypto_buy(acct, obj):
+                    continue
                 obj.fee = self._fee(obj.symbol, obj.qty, obj.price, acct)
                 acct.apply_fill(obj, multiplier(obj.symbol))
                 self.lifecycle.on_fill(acct, obj)
@@ -1172,6 +1177,43 @@ class Exchange:
             else:
                 self.events.append({"type": "order", "account_id": obj.account_id, "order": obj})
             self.dirty = True
+
+    def _affordable(self, acct: Account, symbol: str, price: Decimal) -> Decimal:
+        """The most of a crypto pair cash can pay for at this price, fee included (never a loan)."""
+        step = self.crypto_spec(symbol).qty_increment
+        cash = max(acct.cash, ZERO)
+        if price <= 0:
+            return ZERO
+        q = assets.floor_to(cash / (price * (1 + self.crypto_fee_rate(acct) / 100)), step)
+        while q > 0 and cents(q * price) + self._fee(symbol, q, price, acct) > cash:
+            q -= step
+        return max(q, ZERO)
+
+    def _cap_crypto_buy(self, acct: Account, fill: Fill) -> bool:
+        """Fill-time guard: a crypto purchase never takes cash below zero, whatever happened since entry.
+
+        A fill larger than the cash affords is cut to what it affords and the rest of the order is canceled.
+        Returns False when nothing at all can be bought (the fill is dropped).
+        """
+        can = self._affordable(acct, fill.symbol, fill.price)
+        if fill.qty <= can:
+            return True
+        order = self.engine.orders.get(fill.order_id)
+        cut = fill.qty - can
+        fill.qty = can
+        if order is not None:
+            order.filled_qty -= cut
+            notional = sum((f.qty * f.price for f in acct.fills if f.order_id == order.id), ZERO) + can * fill.price
+            order.avg_fill_price = (notional / order.filled_qty).quantize(Decimal("1e-9")).normalize() if order.filled_qty else None
+            if order.avg_fill_price is not None and order.avg_fill_price.as_tuple().exponent > 0:
+                order.avg_fill_price = order.avg_fill_price.quantize(Decimal(1))
+            order.status = m.PARTIAL if order.filled_qty > 0 else m.WORKING
+            reason = (f"canceled: the price moved to {fill.price.normalize():f} and cash ({_amt(acct.cash)}) pays for "
+                      f"{'only ' + format(can.normalize(), 'f') if can > 0 else 'none'} of the remaining "
+                      f"{(can + cut).normalize():f} including the fee; crypto is never bought with borrowed money")
+            self.engine.cancel(order.id, fill.ts, reason)
+            self.events.append({"type": "order", "account_id": order.account_id, "order": order})
+        return can > 0
 
     # ---- the heartbeat -----------------------------------------------------
     def tick(self) -> list:
