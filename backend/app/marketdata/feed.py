@@ -1,10 +1,11 @@
 """Market data provider interface, bar storage and the scripted test feed."""
 from collections import deque
+from dataclasses import replace
 from decimal import Decimal
 from typing import Optional
 
 from ..core.models import Quote
-from ..core.money import CENT, ZERO, D
+from ..core.money import CENT, ZERO, D, cents
 
 TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400, "1w": 604800}
 
@@ -66,6 +67,7 @@ class MarketDataProvider:
         self.quotes: dict[str, Quote] = {}
         self.info: dict[str, dict] = {}
         self.prints: dict[str, deque] = {}
+        self.applied_actions: set = set()  # ids of corporate actions already reflected in prices
 
     def symbols(self) -> dict:
         return self.info
@@ -116,6 +118,39 @@ class MarketDataProvider:
     def restore(self, data: dict) -> None:
         pass
 
+    # ---- corporate actions (app.lifecycle.actions.CorporateAction records) -----------
+    def corporate_actions(self, start, end) -> list:
+        """Scheduled actions with an ex-date between start and end (dates, inclusive). Default: none."""
+        return []
+
+    def apply_corporate_action(self, action) -> None:
+        """Called once when an action takes effect, so the feed can adjust its prices and history."""
+        if action.id in self.applied_actions:
+            return
+        self.applied_actions.add(action.id)
+        self._adjust_for_action(action)
+
+    def _adjust_for_action(self, action) -> None:
+        pass
+
+
+def adjust_for_split(feed: MarketDataProvider, action) -> None:
+    """Split-adjust a feed's current quote and stored bars (prices x old/new, volume x new/old)."""
+    sym, n, o = action.symbol, Decimal(action.new), Decimal(action.old)
+    px = lambda v: max(cents(v * o / n), CENT) if v is not None else None
+    q = feed.quotes.get(sym)
+    if q is not None:
+        bid, ask = px(q.bid), px(q.ask)
+        feed.quotes[sym] = replace(q, bid=bid, ask=max(ask, bid + CENT), last=px(q.last), open=px(q.open),
+                                   high=px(q.high), low=px(q.low), prev_close=px(q.prev_close), volume=q.volume * n / o)
+    f, vf = float(o / n), float(n / o)
+    for rows in (feed.store.daily.get(sym, []), feed.store.minutes.get(sym, [])):
+        for r in rows:
+            r[1], r[2], r[3], r[4] = (round(v * f, 4) for v in r[1:5])
+            r[5] = r[5] * vf
+    for p in feed.prints.get(sym, ()):
+        p["price"] = px(p["price"])
+
 
 class SimFeed(MarketDataProvider):
     """Scripted feed for tests: quotes appear only when the test sets them."""
@@ -125,6 +160,18 @@ class SimFeed(MarketDataProvider):
         super().__init__()
         self.info = symbols or {}
         self._pending: list[Quote] = []
+        self.actions: list = []
+
+    def schedule(self, action) -> None:
+        """Announce a corporate action (tests use this)."""
+        self.actions.append(action)
+
+    def corporate_actions(self, start, end) -> list:
+        return [a for a in self.actions if start <= a.ex_date <= end]
+
+    def _adjust_for_action(self, action) -> None:
+        if action.kind == "split":
+            adjust_for_split(self, action)
 
     def set_quote(self, symbol: str, bid, ask, last=None, bid_size=1000, ask_size=1000, last_size=100,
                   trade: bool = True, ts: float = 0.0) -> Quote:

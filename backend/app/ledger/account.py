@@ -4,6 +4,8 @@ from decimal import Decimal
 
 from ..core.models import BUY, Fill, from_plain, to_plain
 from ..core.money import ZERO, D, cents
+from ..lifecycle import settings as lifecycle_settings
+from ..lifecycle.state import AccountLife
 from ..options.symbology import describe
 from .ledger import CAPITAL, CASH, FEES, REALIZED, Ledger, position_account
 
@@ -30,6 +32,8 @@ class Account:
         self.equity_history: list[list] = []  # [ts, equity]
         self.day_start_equity = self.starting_cash
         self.margin_call = False
+        self.settings = lifecycle_settings.defaults()  # per-account rule toggles and rates
+        self.life = AccountLife()  # settlement, day trades, accruals, dividends, margin call
         self.ledger.post(ts, "deposit", "Opening balance", [(CASH, self.starting_cash), (CAPITAL, -self.starting_cash)])
 
     # ---- derived state -------------------------------------------------
@@ -105,7 +109,8 @@ class Account:
                 "created_at": self.created_at, "ledger": self.ledger.to_plain(),
                 "lots": {s: [[str(l.qty), str(l.price), l.ts, str(l.cost)] for l in ls] for s, ls in self.lots.items()},
                 "fills": [to_plain(f) for f in self.fills], "closed": self.closed,
-                "equity_history": self.equity_history, "day_start_equity": str(self.day_start_equity)}
+                "equity_history": self.equity_history, "day_start_equity": str(self.day_start_equity),
+                "settings": self.settings, "lifecycle": self.life.to_plain()}
 
     @classmethod
     def from_plain(cls, d: dict) -> "Account":
@@ -120,4 +125,6 @@ class Account:
         a.equity_history = d.get("equity_history", [])
         a.day_start_equity = D(d.get("day_start_equity", d["starting_cash"]))
         a.margin_call = False
+        a.settings = lifecycle_settings.merged(d.get("settings"))
+        a.life = AccountLife.from_plain(d.get("lifecycle"))
         return a

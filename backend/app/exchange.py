@@ -12,6 +12,7 @@ from .core.clock import Clock
 from .core.models import Fill, Order, Quote, from_plain, to_plain
 from .core.money import CENT, ZERO, D, cents, parse as parse_num
 from .ledger.account import Account
+from .lifecycle.manager import LifecycleManager
 from .marketdata.feed import MarketDataProvider
 from .matching.engine import FillConfig, MatchingEngine
 from .options import chain as optchain
@@ -49,6 +50,7 @@ class Exchange:
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
         self.dirty = False
+        self.lifecycle = LifecycleManager(self)  # corporate actions, settlement, interest, PDT, margin calls
 
     # ---- time and market state -----------------------------------------
     def now(self) -> float:
@@ -106,6 +108,7 @@ class Exchange:
                 self.engine.cancel(o.id, self.now(), "account reset")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
         new = Account(old.id, old.name, old.type, D(starting_cash) if starting_cash is not None else old.starting_cash, self.now())
+        new.settings = dict(old.settings)  # a reset keeps the account's rule settings
         self.accounts[old.id] = new
         self.dirty = True
         return new
@@ -144,13 +147,15 @@ class Exchange:
         cost = sum((a.cost_basis(s) for s in pos), ZERO)
         unrealized = cents(long_mv + short_mv - cost)
         a.margin_call = a.type == "margin" and eq < maint
-        return {"id": a.id, "name": a.name, "type": a.type, "starting_cash": a.starting_cash, "cash": a.cash,
+        out = {"id": a.id, "name": a.name, "type": a.type, "starting_cash": a.starting_cash, "cash": a.cash,
                 "equity": eq, "long_market_value": cents(long_mv), "short_market_value": cents(short_mv),
                 "initial_requirement": init, "maintenance_requirement": maint,
                 "excess_liquidity": cents(eq - maint), "buying_power": bp["stock"], "option_buying_power": bp["option"],
                 "realized_pnl": a.realized, "unrealized_pnl": unrealized, "fees": a.fees_paid,
                 "total_pnl": cents(eq - a.starting_cash), "day_pnl": cents(eq - a.day_start_equity),
                 "margin_call": a.margin_call}
+        self.lifecycle.extend_summary(a, out)
+        return out
 
     def positions(self, account_id: str) -> list:
         a = self.account(account_id)
@@ -230,7 +235,7 @@ class Exchange:
                 raise OrderRejected(f"unknown symbol {symbol or '(blank)'}")
             if contract.expiry_ts <= self.now():
                 raise OrderRejected("this option has expired")
-            if contract.strike <= 0 or (contract.strike * 2) % 1 != 0:
+            if contract.strike <= 0 or ((contract.strike * 2) % 1 != 0 and account.position(symbol) == 0):
                 raise OrderRejected("strike is not listed")
             if contract.expiry not in optchain.expirations(cal.ny_date(self.now())) and account.position(symbol) == 0:
                 raise OrderRejected("expiry is not listed")
@@ -374,6 +379,8 @@ class Exchange:
         closing = self._reduces_risk(a, entry)
         worst = self._worst_case(a, [entry])
         ok = closing or worst.ok
+        rule = self.lifecycle.pre_trade(a, entry, None if closing else worst) if ok else None
+        ok = ok and rule is None
         pos = a.position(entry.symbol)
         after_pos = pos + (entry.qty if entry.side == m.BUY else -entry.qty)
         if a.type == "margin":
@@ -389,7 +396,7 @@ class Exchange:
             warnings.append("Market orders fill at the available price, which can differ from the estimate.")
         if self.session() != "regular" and not entry.extended_hours:
             warnings.append("The market is closed; the order will wait for the regular session.")
-        return {"ok": ok, "reason": None if ok else worst.reason, "symbol": entry.symbol,
+        return {"ok": ok, "reason": None if ok else rule or worst.reason, "symbol": entry.symbol,
                 "description": describe(entry.symbol), "side": entry.side, "qty": entry.qty,
                 "estimated_price": price, "estimated_notional": notional, "estimated_fees": fee,
                 "estimated_total": notional + fee if entry.side == m.BUY else notional - fee,
@@ -404,10 +411,14 @@ class Exchange:
                     return [o] + [c for c in self.engine.orders.values() if c.parent_id == o.id]
         orders = self._validate(a, req)
         entry = orders[0]
+        worst = None
         if not self._reduces_risk(a, entry):
             worst = self._worst_case(a, [entry])
             if not worst.ok:
                 raise OrderRejected(worst.reason or "order rejected by risk check")
+        rule = self.lifecycle.pre_trade(a, entry, worst)  # pattern day trader and settled-cash rules
+        if rule:
+            raise OrderRejected(rule)
         now, q = self.now(), self.quote(entry.symbol)
         if len(orders) > 1:
             events = self.engine.submit_bracket(entry, orders[1:], q, now, self.session(now))
@@ -468,6 +479,7 @@ class Exchange:
                     continue
                 obj.fee = self._fee(obj.symbol, obj.qty)
                 acct.apply_fill(obj, multiplier(obj.symbol))
+                self.lifecycle.on_fill(acct, obj)
                 order = self.engine.orders.get(obj.order_id)
                 if order:
                     order.fees += obj.fee
@@ -482,6 +494,7 @@ class Exchange:
         now = self.now()
         sess = self.session(now)
         self._roll_sessions(now, sess)
+        self.lifecycle.before_step(now)  # day roll: accruals, settlement, corporate actions, dividends
         quotes = self.feed.step(now)
         active_symbols = {o.symbol for o in self.engine.orders.values() if o.status in (m.WORKING, m.PARTIAL)}
         for q in quotes:
@@ -493,6 +506,7 @@ class Exchange:
             if c and c.underlying in changed and c.expiry_ts > now:
                 self._handle(self.engine.on_quote(self.quote(sym), now, sess))
         self._process_expirations(now)
+        self.lifecycle.after_step(now)  # margin calls and liquidation
         self._check_alerts(quotes, now)
         if now - self._last_equity_sample >= 60:
             self._last_equity_sample = now
@@ -610,7 +624,7 @@ class Exchange:
                 "accounts": [a.to_plain() for a in self.accounts.values()],
                 "orders": [to_plain(o) for o in self.engine.orders.values()],
                 "watchlists": self.watchlists, "alerts": self.alerts,
-                "seq": self._peek_sequences()})
+                "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})
         now = self.now()
         if force or now - self._last_market_save >= 60:
             self._last_market_save = now
@@ -648,4 +662,5 @@ class Exchange:
         self.watchlists, self.alerts = data.get("watchlists", {}), data.get("alerts", [])
         self._order_seq, self._acct_seq = count(seq["order"]), count(seq["account"])
         self._alert_seq, self._expiry_seq = count(seq["alert"]), count(seq["expiry"])
+        self.lifecycle.restore(data.get("lifecycle"))
         return True
