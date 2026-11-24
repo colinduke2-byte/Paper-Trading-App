@@ -72,8 +72,12 @@ def wanted_symbols(ex, clients=None) -> list:
         out.extend(sorted(a.positions()))
     for sub in list((clients or {}).values()):
         out.extend(sub.get("symbols") or [])
-    for syms in list(ex.watchlists.values()):
-        out.extend(syms)
+    # Watchlists a browser is showing (declared by routes_discovery) come before the others, so the
+    # visible list is streamed; when lists are being shown, the hidden ones are not polled at all.
+    shown = getattr(ex, "watchlists_shown", None)
+    names = [n for n in (shown() if callable(shown) else []) if n in ex.watchlists] or list(ex.watchlists)
+    for name in names:
+        out.extend(ex.watchlists.get(name) or [])
     return list(dict.fromkeys(out))
 
 
