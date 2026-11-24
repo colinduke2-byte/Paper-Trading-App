@@ -309,7 +309,7 @@ def test_t_plus_1_settlement_and_settled_cash_rule():
            (D("9999.50"), D("5000.00"), D("4999.50"), D("5000.00"))
     with pytest.raises(OrderRejected, match="Cash accounts can only buy with settled cash") as err:
         ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 60})
-    assert "need 6,000.00, but settled cash is 5,000.00" in str(err.value) and "2026-11-25" in str(err.value)
+    assert "need $6,000.00, but only $5,000.00 is settled" in str(err.value) and "Wed 25 Nov 2026" in str(err.value)
     pre = ex.preview(a, {"symbol": "ABC", "side": "buy", "qty": 60})
     assert not pre["ok"] and "settled cash" in pre["reason"]
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 40})  # 4,000 of settled cash is fine
@@ -362,9 +362,9 @@ def test_pattern_day_trader_blocks_opening_orders_after_three_day_trades_under_2
     for _ in range(3):
         _round_trip(ex, a)
     assert ex.summary(a)["day_trades"] == 3 and ex.summary(a)["day_trades_left"] == 0
-    msg = ("Pattern day trader rule: this account has made 3 day trades in the last 5 business days and its equity "
-           "(19,999.70) is below 25,000.00, so it cannot open new positions that could become a 4th day trade. "
-           "Closing orders are still allowed. New opening orders are allowed again on 2026-11-30.")
+    msg = ("Pattern day trader rule: this account made 3 day trades in the last 5 business days and its value "
+           "($19,999.70) is under $25,000.00, so it can't open new positions that could become a 4th day trade. "
+           "Closing positions is still allowed. You can open new positions again on Mon 30 Nov 2026.")
     with pytest.raises(OrderRejected) as err:
         ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
     assert str(err.value) == msg

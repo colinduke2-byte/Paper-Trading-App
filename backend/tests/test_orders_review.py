@@ -575,7 +575,7 @@ def test_huge_numbers_are_rejected_not_crashed_on():
             dict(single, triggers=[dict(single, type="limit", limit_price="1e30")])]
     for req in huge:
         for call in (ex.submit, ex.preview):
-            with pytest.raises(OrderRejected, match="too large|quantity must be"):
+            with pytest.raises(OrderRejected, match="too large|number of (shares|contracts)"):
                 call(a, req)
     with pytest.raises(OrderRejected, match="too large"):
         ex.preview_multileg(a, huge[6])

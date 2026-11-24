@@ -87,6 +87,22 @@ def _fmt(x: Decimal) -> str:
     return f"{cents(x):,.2f}"
 
 
+def _usd(x: Decimal) -> str:
+    """Dollars for messages people read: $1,234.56 or -$1,234.56."""
+    c = cents(x)
+    return f"-${-c:,.2f}" if c < 0 else f"${c:,.2f}"
+
+
+def _day(d) -> str:
+    """A date for messages people read: "Wed 25 Nov 2026" (accepts a date or an ISO string)."""
+    if isinstance(d, str):
+        try:
+            d = date.fromisoformat(d[:10])
+        except ValueError:
+            return d
+    return f"{d:%a} {d.day} {d:%b %Y}"
+
+
 def uncovered(pos: dict) -> dict:
     """Short option contracts not covered, per (underlying, 'C' or 'P').
 
@@ -438,20 +454,20 @@ class LifecycleManager:
             _, _, eq, _ = self._state(a)
             n = self.day_trade_count(a)
             release = self._pdt_release_date(a)
-            when = f" New opening orders are allowed again on {release.isoformat()}." if release else ""
-            return (f"Pattern day trader rule: this account has made {n} day trades in the last {PDT_WINDOW} "
-                    f"business days and its equity ({_fmt(eq)}) is below {_fmt(cfg.number(s, 'pdt_min_equity'))}, "
-                    f"so it cannot open new positions that could become a {_ordinal(n + 1)} day trade. "
-                    f"Closing orders are still allowed.{when}")
+            when = f" You can open new positions again on {_day(release)}." if release else ""
+            return (f"Pattern day trader rule: this account made {n} day trades in the last {PDT_WINDOW} "
+                    f"business days and its value ({_usd(eq)}) is under {_usd(cfg.number(s, 'pdt_min_equity'))}, "
+                    f"so it can't open new positions that could become a {_ordinal(n + 1)} day trade. "
+                    f"Closing positions is still allowed.{when}")
         if a.type == "cash" and worst is not None and s["settlement"] and s["settled_cash_only"]:
             unsettled = a.life.unsettled_total()
             if unsettled > 0 and worst.cash_after - unsettled < worst.requirement:
                 needed = a.cash - worst.cash_after + worst.requirement
                 available = max(a.cash - unsettled, ZERO)
                 first = min(e[0] for e in a.life.unsettled)
-                return (f"Cash accounts can only buy with settled cash: this order and your open orders need "
-                        f"{_fmt(needed)}, but settled cash is {_fmt(available)}. {_fmt(unsettled)} from recent sales "
-                        f"is still settling (next settlement {first}).")
+                return (f"Cash accounts can only buy with settled cash. This order and your open orders need "
+                        f"{_usd(needed)}, but only {_usd(available)} is settled. {_usd(unsettled)} from recent sales "
+                        f"settles on {_day(first)}.")
         return None
 
     # ---- summary -------------------------------------------------------------------------

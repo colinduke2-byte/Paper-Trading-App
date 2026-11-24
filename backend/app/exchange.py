@@ -143,7 +143,7 @@ class Exchange:
     def delete_account(self, account_id: str) -> None:
         self.account(account_id)
         if len(self.accounts) == 1:
-            raise ValueError("cannot delete the only account")
+            raise ValueError("You can't delete your only account. Create another one first.")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
         del self.accounts[account_id]
         self.dirty = True
@@ -403,13 +403,14 @@ class Exchange:
             raise OrderRejected(f"{linked} orders cannot be immediate-or-cancel or fill-or-kill")
         expire_at, good_till = self._good_till(req, tif)
         if qty <= 0 or qty > MAX_QTY:
-            raise OrderRejected("quantity must be positive and at most 1,000,000")
+            raise OrderRejected(f"Enter a number of {'contracts' if contract else 'shares'} from 1 to 1,000,000.")
         if contract and qty != qty.to_integral_value():
             raise OrderRejected("options trade in whole contracts")
         if qty != qty.quantize(Decimal("0.0001")):
             raise OrderRejected("quantity supports at most 4 decimal places")
         if qty != qty.to_integral_value() and (typ not in (m.MARKET, m.LIMIT) or tif != m.DAY):
-            raise OrderRejected("fractional shares are limited to market and limit day orders")
+            raise OrderRejected("Fractional shares can only be traded with Market or Limit orders that last one day "
+                                "(time in force: Day).")
         for label, v in (("limit price", limit), ("stop price", stop), ("trail amount", trail_amt),
                          ("trail percent", trail_pct), ("take profit", take_profit), ("stop loss", stop_loss)):
             if v is not None and v <= 0:
@@ -427,7 +428,7 @@ class Exchange:
             if trail_pct is not None and trail_pct >= 100:
                 raise OrderRejected("trail percent must be below 100")
         if typ in (m.STOP, m.STOP_LIMIT, m.TRAILING_STOP) and tif in (m.IOC, m.FOK):
-            raise OrderRejected("stop orders cannot be immediate-or-cancel or fill-or-kill")
+            raise OrderRejected("Stop orders can't use Immediate or cancel or Fill or kill. Choose Day or Good till canceled.")
         if typ not in (m.LIMIT, m.STOP_LIMIT, m.LOO, m.LOC):
             limit = None
         if typ not in (m.STOP, m.STOP_LIMIT):
@@ -444,15 +445,19 @@ class Exchange:
         orders = [entry]
         if take_profit is not None or stop_loss is not None:
             if typ not in (m.MARKET, m.LIMIT) or tif in (m.IOC, m.FOK) or qty != qty.to_integral_value():
-                raise OrderRejected("bracket orders need a whole-share market or limit entry (day, GTC or GTD)")
+                raise OrderRejected("Take profit and stop loss can only be attached to a whole-share Market or Limit order "
+                                    "with time in force Day, Good till canceled or Good till date.")
             ref = limit if limit is not None else (self.quote(symbol).last if self.quote(symbol) else None)
             exit_side = m.SELL if side == m.BUY else m.BUY
             better = (lambda a, b: a > b) if side == m.BUY else (lambda a, b: a < b)
             if ref is not None:
+                above, below = ("above", "below") if side == m.BUY else ("below", "above")
                 if take_profit is not None and not better(take_profit, ref):
-                    raise OrderRejected("take profit must be on the profitable side of the entry price")
+                    raise OrderRejected(f"The take-profit price must be {above} the entry price (about ${ref:,.2f}) "
+                                        f"for a {side}.")
                 if stop_loss is not None and not better(ref, stop_loss):
-                    raise OrderRejected("stop loss must be on the losing side of the entry price")
+                    raise OrderRejected(f"The stop-loss price must be {below} the entry price (about ${ref:,.2f}) "
+                                        f"for a {side}.")
             if take_profit is not None:
                 orders.append(Order(id=oid(), account_id=account.id, symbol=symbol, side=exit_side, qty=qty, type=m.LIMIT,
                                     limit_price=take_profit, tif=m.GTC, role="take_profit"))
@@ -467,7 +472,8 @@ class Exchange:
     def _estimate_price(self, o: Order) -> Decimal:
         q = self.quote(o.symbol)
         if q is None or q.ask <= 0:
-            raise OrderRejected(f"no quote available for {o.symbol}")
+            raise OrderRejected(f"There is no price for {describe(o.symbol)} right now, so the order can't be checked. "
+                                "Try again in a moment.")
         if o.limit_price is not None:
             if o.side == m.BUY:
                 return o.limit_price

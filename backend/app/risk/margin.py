@@ -315,7 +315,7 @@ def evaluate(account_type: str, cash: Decimal, positions: dict, marks: dict) -> 
         return Evaluation(ok, None if ok else "insufficient buying power", eq, req)
     # Cash account
     if any(qty < 0 and not parse(sym) for sym, qty in positions.items()):
-        return Evaluation(False, "short selling needs a margin account", eq, ZERO, structural=True)
+        return Evaluation(False, "Cash accounts can't sell shares they don't own: short selling needs a margin account.", eq, ZERO, structural=True)
     secured = ZERO
     for underlying, opts in _books(positions).items():
         # Assignment settles in shares, so a long option covers nothing here: a short call
@@ -323,7 +323,7 @@ def evaluate(account_type: str, cash: Decimal, positions: dict, marks: dict) -> 
         for sym, n in _after_stock(positions.get(underlying, ZERO), opts).items():
             c = parse(sym)
             if c.kind == "C":
-                return Evaluation(False, "uncovered calls need a margin account", eq, ZERO, structural=True)
+                return Evaluation(False, "A cash account can only sell calls on shares it owns (100 per contract): uncovered calls need a margin account.", eq, ZERO, structural=True)
             secured += n * c.strike * H
     secured = cents(secured)
     if cash < secured:
