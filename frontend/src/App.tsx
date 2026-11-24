@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Chart } from "./Chart";
+import { Chart, SHORTCUTS_EVENT } from "./Chart";
+import { Shortcuts } from "./chart/Shortcuts";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
 import { feedBanner, Research } from "./Research";
@@ -164,6 +165,7 @@ export default function App() {
     { label: "Reset", onClick: () => setDialog("reset") },
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
+    { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
   ];
   const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
@@ -189,9 +191,12 @@ export default function App() {
       ))}
     </div>
   );
+  const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const mainView = (
     <div className="view">
-      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
+      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol}
+        accountId={accountId} notify={notify} onOrdersChanged={() => setRefreshKey((k) => k + 1)} scope={status?.replay ? `replay:${status.replay.session_id}` : "live"}
+        onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
       {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
@@ -207,9 +212,10 @@ export default function App() {
   );
   const depth = <DepthTape symbol={underlyingOf(symbol)} />;
   const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
-  const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const overlays = (
     <>
+      <Shortcuts symbols={watch} symbol={symbol} onSelect={setSymbol} accountId={accountId} orders={orders} notify={notify}
+        onChanged={() => setRefreshKey((k) => k + 1)} onTicket={small ? () => setScreen("Trade") : undefined} />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
