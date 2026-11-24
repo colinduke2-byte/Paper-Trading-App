@@ -54,15 +54,17 @@ def order_row(o) -> dict:
 
 
 def default_exchange() -> Exchange:
+    from ..marketdata.config import attach, select_feed
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
-    mode = os.environ.get("PAPERDESK_SESSIONS", "always")
-    feed = SyntheticFeed(seed=int(os.environ.get("PAPERDESK_SEED", "7")), now=time.time(), always_open=mode == "always")
-    ex = Exchange(feed, data_dir=data_dir, session_mode=mode)
+    # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
+    sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
+    ex = Exchange(sel.feed, data_dir=sel.data_dir, session_mode=sel.session_mode)
+    attach(sel, ex)
     if not ex.load() or not ex.accounts:
         ex.create_account("Margin account", "margin", Decimal("100000"))
         ex.create_account("Cash account", "cash", Decimal("25000"))
     if not ex.watchlists:
-        ex.watchlists = {"Main": ["MKTX", "TECX", "NVLX", "ORBT", "PXLR", "AUTO", "FNBK", "ENRG", "RETL", "STRM"]}
+        ex.watchlists = {"Main": sel.watchlist or ["MKTX", "TECX", "NVLX", "ORBT", "PXLR", "AUTO", "FNBK", "ENRG", "RETL", "STRM"]}
     return ex
 
 
@@ -126,7 +128,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         rp = ctx.replay
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
-                "paper": True, "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
+                "paper": True, **plain(ex.feed.status_info()),
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
 
     async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()
@@ -243,6 +246,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         ex = ctx.ex
         symbol = _stock(symbol)
         info, q = ex.feed.symbols()[symbol], ex.feed.quote(symbol)
+        if q is None:
+            raise KeyError(f"no quote has arrived for {symbol} yet")
         last = float(q.last)
         daily = ex.feed.bars(symbol, "1d", 252)
         eps, div = info.get("eps", 0), info.get("dividend", 0)
@@ -305,7 +310,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         ex = ctx.ex
         _stock(symbol)
         today = cal.ny_date(ex.now())
-        return [{"date": d.isoformat(), "dte": (d - today).days} for d in optchain.expirations(today)
+        listed = ex.feed.option_expirations(symbol.upper()) or optchain.expirations(today)
+        return [{"date": d.isoformat(), "dte": (d - today).days} for d in listed
                 if cal.close_ts(d) > ex.now()]
 
     @app.get("/api/options/chain/{symbol}")
@@ -316,10 +322,16 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             exp = date.fromisoformat(expiry)
         except ValueError:
             raise ValueError("expiry must be YYYY-MM-DD")
-        if exp not in optchain.expirations(cal.ny_date(ex.now())):
+        if exp not in (ex.feed.option_expirations(symbol) or optchain.expirations(cal.ny_date(ex.now()))):
             raise KeyError("expiry is not listed")
+        provided = ex.feed.option_chain(symbol, exp, ex.now())
+        if provided is not None:
+            return plain(provided)
         q = ex.feed.quote(symbol)
+        if q is None:
+            raise KeyError(f"no quote has arrived for {symbol} yet")
         return {"underlying": symbol, "expiry": expiry, "spot": float(q.last), "simulated": True,
+                "source": "model", "source_label": "model prices, not market data",
                 "rows": plain(optchain.chain(symbol, exp, float(q.last), ex.feed.base_vol(symbol), ex.now()))}
 
     # ---- accounts ------------------------------------------------------------

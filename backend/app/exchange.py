@@ -69,6 +69,9 @@ class Exchange:
         c = parse_option(symbol)
         if c is None:
             return None
+        provided = self.feed.option_quote(symbol)  # real option data when the feed has it
+        if provided is not None:
+            return provided
         u = self.feed.quote(c.underlying)
         if u is None:
             return None

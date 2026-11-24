@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chart } from "./Chart";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
+import { feedBanner, Research } from "./Research";
 import { Ticket, TicketSeed } from "./Ticket";
 import { jumpKey, modeKey, ReplayBar, ReplayButton, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { api, isOption, money, pct, signed, store, time, tone, underlyingOf, usd } from "./util";
@@ -141,8 +142,8 @@ export default function App() {
     <div className="app">
       <header className="top">
         <div className="brand">PaperDesk</div>
-        <div className={status?.replay ? "paper-banner replay" : "paper-banner"} role="note">
-          {replayBanner(status) ?? <>Paper trading · no real money{status?.simulated_data ? " · simulated market data" : status?.delay_seconds ? ` · data delayed ${status.delay_seconds / 60} min` : ""}</>}
+        <div className={status?.replay ? "paper-banner replay" : "paper-banner"} role="note" title={status?.replay ? undefined : feedBanner(status).title}>
+          {replayBanner(status) ?? <>Paper trading · no real money{feedBanner(status).text}</>}
         </div>
         <div className="top-stats">
           <div><span>Account value</span><b>{usd(summary?.equity)}</b></div>
@@ -172,7 +173,7 @@ export default function App() {
           <section className="panel main-view">
             <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />
             <div className="tabs" role="tablist">
-              {["Chart", "Options", "Company"].map((v) => (
+              {["Chart", "Options", "Company", "Research"].map((v) => (
                 <button key={v} role="tab" aria-selected={v === view} className={v === view ? "on" : ""} onClick={() => setView(v)}>{v}</button>
               ))}
             </div>
@@ -180,6 +181,7 @@ export default function App() {
               {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
               {view === "Options" && <OptionChain symbol={symbol} onTrade={(s, side, price) => setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() })} />}
               {view === "Company" && <Company info={info} />}
+              {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
             </div>
           </section>
           {accountId && (

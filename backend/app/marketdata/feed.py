@@ -60,6 +60,8 @@ class MarketDataProvider:
     name = "base"
     simulated = True
     delay_seconds = 0
+    fallback_reason: Optional[str] = None  # why a real feed was not used, shown in /api/status
+    research = None  # optional app.marketdata.research.ResearchHub
 
     def __init__(self):
         self.store = BarStore()
@@ -115,6 +117,30 @@ class MarketDataProvider:
 
     def restore(self, data: dict) -> None:
         pass
+
+    # ---- optional provider data (a feed without it returns None) ----------
+    def option_quote(self, symbol: str) -> Optional[Quote]:
+        """A provider quote for an option contract, or None to use the model price."""
+        return None
+
+    def option_expirations(self, underlying: str) -> Optional[list]:
+        """Listed expiry dates from the provider, or None to use the model calendar."""
+        return None
+
+    def option_chain(self, underlying: str, expiry, now: float) -> Optional[dict]:
+        """Provider chain in the shape of options.chain.chain(), or None to use the model."""
+        return None
+
+    def status_info(self) -> dict:
+        """Extra fields for /api/status: data source, real-time or delayed, stream health."""
+        if self.simulated:
+            return {"realtime": False, "data_source": "simulated", "data_exchange": None,
+                    "data_note": "Simulated prices for fictional companies; not market data.",
+                    "fallback_reason": self.fallback_reason}
+        return {"fallback_reason": self.fallback_reason}
+
+    def close(self) -> None:
+        """Stop background work. Feeds without any do nothing."""
 
 
 class SimFeed(MarketDataProvider):
