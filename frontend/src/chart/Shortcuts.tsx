@@ -29,14 +29,16 @@ const typing = (t: EventTarget | null) => {
 };
 const ticket = () => document.querySelector<HTMLElement>('section[aria-label="Order ticket"]');
 
-export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify, onChanged }: {
+export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify, onChanged, onTicket }: {
   symbols: string[]; symbol: string; onSelect: (s: string) => void; accountId: string; orders: any[];
   notify: (text: string, bad?: boolean) => void; onChanged: () => void;
+  /** Shows the order ticket first (the phone layout keeps it in the Trade view). */
+  onTicket?: () => void;
 }) {
   const [help, setHelp] = useState(false);
   const [cancelAll, setCancelAll] = useState<null | { busy?: boolean; error?: string }>(null);
-  const state = useRef({ symbols, symbol, onSelect });
-  state.current = { symbols, symbol, onSelect };
+  const state = useRef({ symbols, symbol, onSelect, onTicket });
+  state.current = { symbols, symbol, onSelect, onTicket };
   const open = orders.filter((o) => OPEN.includes(o.status));
 
   useEffect(() => {
@@ -56,9 +58,10 @@ export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify
         if (k === "Escape" || k === "?") { e.preventDefault(); setHelp(false); setCancelAll(null); }
         return;
       }
-      const t = ticket();
-      const click = (sel: string) => { const b = t?.querySelector<HTMLButtonElement>(sel); if (b && !b.disabled) { b.click(); return true; } return false; };
-      const { symbols: list, symbol: cur, onSelect: select } = state.current;
+      const { symbols: list, symbol: cur, onSelect: select, onTicket: show } = state.current;
+      // Ticket keys: on a phone, switch to the Trade view first and act once it is shown.
+      const onTicketKey = (fn: () => void) => { if (show) { show(); setTimeout(fn, 60); } else fn(); };
+      const click = (sel: string) => onTicketKey(() => { const b = ticket()?.querySelector<HTMLButtonElement>(sel); if (b && !b.disabled) b.click(); });
       let done = true;
       if (k === "?") setHelp(true);
       else if (k === "/") document.querySelector<HTMLInputElement>('input[aria-label="Search symbols"]')?.focus();
@@ -73,10 +76,12 @@ export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify
       } else if (k === "b") click(".side-toggle .buy");
       else if (k === "s") click(".side-toggle .sell");
       else if (k === "t") click(".side-toggle button:not(.on)");
-      else if (k === "q") {
-        const input = t?.querySelector<HTMLInputElement>("label input[inputmode=decimal]");
+      else if (k === "q") onTicketKey(() => {
+        const input = ticket()?.querySelector<HTMLInputElement>("label input[inputmode=decimal]");
         if (input) { input.focus(); input.select(); }
-      } else if (k === "r") {
+      });
+      else if (k === "r") onTicketKey(() => {
+        const t = ticket();
         const place = [...(t?.querySelectorAll<HTMLButtonElement>("button") || [])].find((b) => b.textContent === "Place paper order");
         if (place) place.focus(); // already reviewed: the order is placed only by an explicit click or Enter
         else {
@@ -84,7 +89,7 @@ export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify
           if (rev && !rev.disabled) rev.click();
           else if (rev) { notify("Enter a quantity before reviewing the order.", true); t?.querySelector<HTMLInputElement>("label input[inputmode=decimal]")?.focus(); }
         }
-      } else if (k === "X" && e.shiftKey) setCancelAll({});
+      }); else if (k === "X" && e.shiftKey) setCancelAll({});
       else done = false;
       if (done) e.preventDefault();
     };

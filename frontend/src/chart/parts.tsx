@@ -79,14 +79,19 @@ export function OrderHandles({ g, lines, draft, onDraft, onDrop }: {
   return (
     <>
       {lines.filter((l) => l.draggable).map((l) => {
-        const price = draft?.key === l.key ? draft.price : l.price;
-        const y = g.main.priceToCoordinate(price);
-        if (y == null || y < 0 || y > rect.height) return null;
+        const dragging = draft?.key === l.key;
+        const price = dragging ? draft!.price : l.price;
+        const raw = g.main.priceToCoordinate(price);
+        if (raw == null) return null;
+        // Off-screen lines get no handle, except the one being dragged: it stays inside the pane (unmounting it
+        // mid-drag would lose the pointer).
+        if (!dragging && (raw < 0 || raw > rect.height)) return null;
+        const y = Math.max(10, Math.min(rect.height - 10, raw));
         const move = (clientY: number, el: HTMLElement) => {
           const d = drag.current;
           if (!d) return;
           const box = el.parentElement!.getBoundingClientRect();
-          const yy = Math.max(0, Math.min(rect.height, clientY - box.top - d.dy));
+          const yy = Math.max(10, Math.min(rect.height - 10, clientY - box.top - d.dy));
           const p = priceAt(g, yy);
           if (p != null) { d.moved = d.moved || Math.abs(clientY - d.start) > 2; onDraft(l.key, p); }
         };
@@ -106,6 +111,7 @@ export function OrderHandles({ g, lines, draft, onDraft, onDrop }: {
               if (d && d.moved && draft?.key === l.key && draft.price !== l.price) onDrop(l, draft.price);
               else onDraft(l.key, null);
             }}
+            onLostPointerCapture={() => { if (drag.current) { drag.current = null; onDraft(l.key, null); } }}
             onPointerCancel={() => { drag.current = null; onDraft(l.key, null); }}
             onKeyDown={(e) => {
               const stepSize = e.shiftKey ? 0.1 : 0.01;

@@ -22,8 +22,10 @@ const isTyping = (t: EventTarget | null) => {
   return !!el && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
 };
 
-export function Chart({ symbol, quote, position, orders, accountId, notify, onOrdersChanged, onTradeAtPrice }: {
+export function Chart({ symbol, quote, position, orders, accountId, notify, onOrdersChanged, onTradeAtPrice, scope = "live" }: {
   symbol: string; quote: any; position: any; orders: any[];
+  /** Where drawings are kept: "live" or "replay:<session id>". The chart is remounted when it changes. */
+  scope?: string;
   accountId?: string; notify?: (text: string, bad?: boolean) => void; onOrdersChanged?: () => void; onTradeAtPrice?: (s: TradeSeed) => void;
 }) {
   const el = useRef<HTMLDivElement>(null);
@@ -32,7 +34,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
   const [settings, setSettings] = useChartSettings(say);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const [drawings, setDrawings] = useDrawings(symbol, say);
+  const [drawings, setDrawings] = useDrawings(symbol, scope, say);
   const [error, setError] = useState("");
   const [compareError, setCompareError] = useState("");
   const [g, setG] = useState<Gen | null>(null);
@@ -128,15 +130,18 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
   const lines: OrderLine[] = useMemo(() => {
     const out: OrderLine[] = [];
     for (const o of orders) {
+      // A multi-leg order's price is a net debit or credit per unit, not a price of this symbol: no line.
+      if (Array.isArray(o.legs) && o.legs.length) continue;
+      if (!["working", "partially_filled"].includes(o.status)) continue;
       const rem = o.remaining ?? o.qty - o.filled_qty;
       const side = o.side === "buy" ? "Buy" : "Sell";
       const tag = o.role === "take_profit" ? "Take profit: " : o.role === "stop_loss" ? "Stop loss: " : "";
       const color = o.role === "take_profit" ? "#26c6da" : o.role === "stop_loss" ? "#ff9800" : o.side === "buy" ? "#2fbf71" : "#ef5350";
-      const stopLive = o.stop_price != null && !o.triggered;
+      const stopLive = Number.isFinite(o.stop_price) && !o.triggered;
       if (stopLive) out.push({ key: `${o.id}:stop`, oid: o.id, field: "stop_price", price: o.stop_price, color,
         label: `${tag}${side} ${rem} ${o.type === "trailing_stop" ? "trailing stop" : "stop"}`, draggable: o.type === "stop" || o.type === "stop_limit" });
-      if (o.limit_price != null) out.push({ key: `${o.id}:limit`, oid: o.id, field: "limit_price", price: o.limit_price, color,
-        label: `${tag}${side} ${rem} limit`, draggable: true });
+      if (Number.isFinite(o.limit_price)) out.push({ key: `${o.id}:limit`, oid: o.id, field: "limit_price", price: o.limit_price, color,
+        label: `${tag}${side} ${rem} limit`, draggable: o.type === "limit" || o.type === "stop_limit" });
     }
     return out;
   }, [JSON.stringify(orders.map((o) => [o.id, o.limit_price, o.stop_price, o.status, o.triggered, o.role, o.remaining, o.qty, o.filled_qty, o.type, o.side]))]);
@@ -187,7 +192,10 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
       setConfirm(null); setDraft(null);
       onOrdersChanged?.();
     } catch (e: any) {
-      setConfirm((c) => c && { ...c, busy: false, error: `The order was not changed: ${e.message}` });
+      // Refused (buying power, a day-trading rule, a filled or canceled order...): say why and put the line back.
+      setConfirm(null); setDraft(null);
+      notify?.(`The order was not changed: ${e.message}`, true);
+      onOrdersChanged?.();
     }
   };
 
@@ -298,7 +306,6 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
         <button type="button" className={"ct-btn" + (drawMode ? " on" : "")} aria-pressed={drawMode}
           title="Draw mode: tap-drag draws instead of panning the chart" onClick={() => { setDrawMode(!drawMode); setTool("select"); setSelected(null); }}>Draw</button>
         <button type="button" className="ct-btn" onClick={resetView} aria-label="Reset chart view" title="Reset chart view">Reset view</button>
-        <button type="button" className="ct-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => window.dispatchEvent(new Event(SHORTCUTS_EVENT))}>?</button>
       </div>
       {drawMode && (
         <div className="ct-bar ct-draw-bar" role="toolbar" aria-label="Drawing tools">

@@ -73,7 +73,8 @@
 .ct-help kbd { background: var(--bg); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; font: 11px ui-monospace, monospace; }
 .ct-help .ct-confirm-body { display: flex; flex-direction: column; gap: 10px; }
 
-@media (max-width: 640px) {
+/* The phone layout (MobileShell SMALL_QUERY): touch-sized chart controls. */
+@media (max-width: 899px), (max-height: 540px) and (max-width: 1199px) {
   .ct-bar { padding: 6px 8px; }
   .ct-seg button, .ct-btn, .ct-select, .ct-compare input, .ct-menu-item, .ct-param input, .ct-panel select, .ct-popover input,
   .ct-link { min-height: 40px; min-width: 40px; }

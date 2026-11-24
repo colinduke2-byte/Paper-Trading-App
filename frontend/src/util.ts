@@ -5,8 +5,25 @@ export async function api(path: string, opts: { method?: string; body?: any } = 
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
   const j = await r.json().catch(() => null);
+  if (r.status === 401 && j?.auth_required) signedOut();
   if (!r.ok) throw new Error((j && j.detail) || r.statusText || "Request failed");
   return j;
+}
+
+// The server needs a passcode and this browser's session is missing or has expired. Login.tsx listens for
+// this and shows the sign-in screen in place of the app.
+export const SIGNED_OUT = "pd:signed-out";
+export const signedOut = () => window.dispatchEvent(new Event(SIGNED_OUT));
+
+// True unless the server says this browser must sign in. Network errors count as "still signed in" so the
+// caller keeps its normal reconnect behaviour.
+export async function sessionOk(): Promise<boolean> {
+  try {
+    const r = await fetch("/api/auth/state");
+    if (!r.ok) return true;
+    const s = await r.json();
+    return !s.auth_required || s.authenticated;
+  } catch { return true; }
 }
 
 const isNum = (v: any): v is number => typeof v === "number" && isFinite(v);

@@ -2,6 +2,8 @@
 import asyncio
 import contextlib
 import os
+import threading
+import time
 from dataclasses import fields, is_dataclass
 from datetime import date
 from decimal import Decimal
@@ -52,30 +54,84 @@ def order_row(o) -> dict:
 
 
 def default_exchange() -> Exchange:
-    import time
+    from ..marketdata.config import attach, select_feed
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
-    mode = os.environ.get("PAPERDESK_SESSIONS", "always")
-    feed = SyntheticFeed(seed=int(os.environ.get("PAPERDESK_SEED", "7")), now=time.time(), always_open=mode == "always")
-    ex = Exchange(feed, data_dir=data_dir, session_mode=mode)
+    # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
+    sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
+    ex = Exchange(sel.feed, data_dir=sel.data_dir, session_mode=sel.session_mode)
+    attach(sel, ex)
     if not ex.load() or not ex.accounts:
         ex.create_account("Margin account", "margin", Decimal("100000"))
         ex.create_account("Cash account", "cash", Decimal("25000"))
     if not ex.watchlists:
-        ex.watchlists = {"Main": ["MKTX", "TECX", "NVLX", "ORBT", "PXLR", "AUTO", "FNBK", "ENRG", "RETL", "STRM"]}
+        ex.watchlists = {"Main": sel.watchlist or ["MKTX", "TECX", "NVLX", "ORBT", "PXLR", "AUTO", "FNBK", "ENRG", "RETL", "STRM"]}
     return ex
 
 
-def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_seconds: float = 1.0) -> FastAPI:
-    ex = ex or default_exchange()
+class AppContext:
+    """Shared by the core routes and every routes_*.py module.
+
+    ctx.ex is the ACTIVE exchange: the live one, or a replay sandbox while a replay runs. Look it up
+    on every request (never keep a reference across requests). ctx.plain converts to JSON-safe values,
+    ctx.clients holds the WebSocket subscriptions. ctx.live is always the live exchange and
+    ctx.replay the running replay controller, or None.
+    """
+
+    def __init__(self, ex: Exchange, clients: dict, app: Optional[FastAPI] = None):
+        self.live = ex
+        self.ex = ex
+        self.replay = None
+        self.plain = plain
+        self.clients = clients
+        self.app = app
+        self.lock = threading.RLock()  # held by the tick loop while it ticks and saves, and by mode switches
+
+    @property
+    def mode(self) -> str:
+        return "replay" if self.replay is not None else "live"
+
+    def _publish(self) -> None:
+        if self.app is not None:
+            self.app.state.exchange = self.ex
+
+    def enter_replay(self, controller) -> None:
+        """Make the replay sandbox the active exchange. Live state is saved first and left untouched."""
+        with self.lock:
+            if self.replay is not None:
+                raise RuntimeError("a replay is already running; exit it first")
+            self.live.save(force=True)
+            self.live.drain_events()
+            self.replay = controller
+            self.ex = controller.ex
+            self._publish()
+
+    def exit_replay(self) -> None:
+        """Return to the live exchange exactly as it was when the replay started."""
+        with self.lock:
+            if self.replay is None:
+                raise RuntimeError("no replay is running")
+            controller, self.replay = self.replay, None
+            self.ex = self.live
+            controller.close()
+            self._publish()
+
+
+def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_seconds: float = 1.0,
+               replay_tick_seconds: float = 0.25) -> FastAPI:
     clients: dict[WebSocket, dict] = {}
+    ctx = AppContext(ex or default_exchange(), clients)
+    del ex  # every route looks the active exchange up through ctx.ex
 
     def status() -> dict:
+        ex = ctx.ex
         now = ex.now()
+        rp = ctx.replay
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
-                "paper": True}
+                "paper": True, **plain(ex.feed.status_info()),
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
 
-    async def broadcast() -> None:
+    async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()
         st = status()
         for ws, sub in list(clients.items()):
@@ -92,14 +148,22 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 clients.pop(ws, None)
 
     async def loop() -> None:
+        last = time.monotonic()  # wall time only paces replay; business logic reads ex.now()
         while True:
             try:
-                ex.tick()
-                await broadcast()
-                ex.save()
+                wall = time.monotonic()
+                elapsed, last = wall - last, wall
+                with ctx.lock:
+                    ex, rp = ctx.ex, ctx.replay
+                    if rp is not None:
+                        rp.advance(elapsed)  # ticks the sandbox once per simulated second
+                    else:
+                        ex.tick()
+                    ex.save()
+                await broadcast(ex)
             except Exception as e:  # keep the market running; report the fault
                 print(f"tick error: {e!r}")
-            await asyncio.sleep(tick_seconds)
+            await asyncio.sleep(min(tick_seconds, replay_tick_seconds) if ctx.replay is not None else tick_seconds)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -107,10 +171,15 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         yield
         if task:
             task.cancel()
-        ex.save(force=True)
+        with ctx.lock:
+            ctx.ex.save(force=True)
+            if ctx.ex is not ctx.live:
+                ctx.live.save(force=True)
 
     app = FastAPI(title="PaperDesk", lifespan=lifespan)
-    app.state.exchange = ex
+    ctx.app = app
+    app.state.exchange = ctx.ex
+    app.state.ctx = ctx
 
     @app.exception_handler(OrderRejected)
     async def _rejected(_, exc):
@@ -127,10 +196,12 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     # ---- market ----------------------------------------------------------
     @app.get("/api/status")
     def get_status():
+        ex = ctx.ex
         return status()
 
     @app.get("/api/symbols")
     def symbols(q: str = ""):
+        ex = ctx.ex
         q = q.upper().strip()
         rows = [{"symbol": s, "name": i["name"], "sector": i["sector"], "type": i.get("type", "stock")}
                 for s, i in ex.feed.symbols().items()
@@ -139,6 +210,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     @app.get("/api/quotes")
     def quotes(symbols: str = Query("")):
+        ex = ctx.ex
         out = {}
         for s in [x.strip().upper() for x in symbols.split(",") if x.strip()][:200]:
             row = quote_row(ex, s)
@@ -148,28 +220,34 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     def _stock(symbol: str) -> str:
         symbol = symbol.upper()
-        if not ex.is_stock(symbol):
+        if not ctx.ex.is_stock(symbol):
             raise KeyError(f"unknown symbol {symbol}")
         return symbol
 
     @app.get("/api/bars/{symbol}")
     def bars(symbol: str, tf: str = "1d", limit: int = Query(500, ge=1, le=5000)):
+        ex = ctx.ex
         if tf not in TIMEFRAMES:
             raise ValueError(f"timeframe must be one of {', '.join(TIMEFRAMES)}")
         return ex.feed.bars(_stock(symbol), tf, limit)
 
     @app.get("/api/depth/{symbol}")
     def depth(symbol: str):
+        ex = ctx.ex
         return plain(ex.feed.depth(_stock(symbol)))
 
     @app.get("/api/trades/{symbol}")
     def trades(symbol: str, limit: int = Query(50, ge=1, le=200)):
+        ex = ctx.ex
         return plain(ex.feed.trades(_stock(symbol), limit))
 
     @app.get("/api/fundamentals/{symbol}")
     def fundamentals(symbol: str):
+        ex = ctx.ex
         symbol = _stock(symbol)
         info, q = ex.feed.symbols()[symbol], ex.feed.quote(symbol)
+        if q is None:
+            raise KeyError(f"no quote has arrived for {symbol} yet")
         last = float(q.last)
         daily = ex.feed.bars(symbol, "1d", 252)
         eps, div = info.get("eps", 0), info.get("dividend", 0)
@@ -185,6 +263,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     @app.get("/api/movers")
     def movers():
+        ex = ctx.ex
         rows = [r for s in ex.feed.symbols() if (r := quote_row(ex, s)) and "change_pct" in r]
         for r in rows:
             r.update(name=ex.feed.symbols()[r["symbol"]]["name"], sector=ex.feed.symbols()[r["symbol"]]["sector"])
@@ -197,6 +276,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                  min_change_pct: Optional[float] = None, max_change_pct: Optional[float] = None,
                  min_volume: Optional[float] = None, max_pe: Optional[float] = None,
                  min_dividend_yield: Optional[float] = None):
+        ex = ctx.ex
         out = []
         for s, info in ex.feed.symbols().items():
             r = quote_row(ex, s)
@@ -227,31 +307,42 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     # ---- options -----------------------------------------------------------
     @app.get("/api/options/expirations/{symbol}")
     def expirations(symbol: str):
+        ex = ctx.ex
         _stock(symbol)
         today = cal.ny_date(ex.now())
-        return [{"date": d.isoformat(), "dte": (d - today).days} for d in optchain.expirations(today)
+        listed = ex.feed.option_expirations(symbol.upper()) or optchain.expirations(today)
+        return [{"date": d.isoformat(), "dte": (d - today).days} for d in listed
                 if cal.close_ts(d) > ex.now()]
 
     @app.get("/api/options/chain/{symbol}")
     def option_chain(symbol: str, expiry: str):
+        ex = ctx.ex
         symbol = _stock(symbol)
         try:
             exp = date.fromisoformat(expiry)
         except ValueError:
             raise ValueError("expiry must be YYYY-MM-DD")
-        if exp not in optchain.expirations(cal.ny_date(ex.now())):
+        if exp not in (ex.feed.option_expirations(symbol) or optchain.expirations(cal.ny_date(ex.now()))):
             raise KeyError("expiry is not listed")
+        provided = ex.feed.option_chain(symbol, exp, ex.now())
+        if provided is not None:
+            return plain(provided)
         q = ex.feed.quote(symbol)
+        if q is None:
+            raise KeyError(f"no quote has arrived for {symbol} yet")
         return {"underlying": symbol, "expiry": expiry, "spot": float(q.last), "simulated": True,
+                "source": "model", "source_label": "model prices, not market data",
                 "rows": plain(optchain.chain(symbol, exp, float(q.last), ex.feed.base_vol(symbol), ex.now()))}
 
     # ---- accounts ------------------------------------------------------------
     @app.get("/api/accounts")
     def accounts():
+        ex = ctx.ex
         return [plain(ex.summary(a)) for a in ex.accounts]
 
     @app.post("/api/accounts")
     def create_account(body: dict = Body(...)):
+        ex = ctx.ex
         from ..core.money import parse as parse_num
         acct = ex.create_account(str(body.get("name", "")), body.get("type", "margin"),
                                  parse_num(body.get("starting_cash", 100000)))
@@ -259,6 +350,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     @app.post("/api/accounts/{aid}/reset")
     def reset_account(aid: str, body: dict = Body(default={})):
+        ex = ctx.ex
         from ..core.money import parse as parse_num
         cash = parse_num(body["starting_cash"]) if body.get("starting_cash") else None
         if cash is not None and cash <= 0:
@@ -268,71 +360,86 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     @app.delete("/api/accounts/{aid}")
     def delete_account(aid: str):
+        ex = ctx.ex
         ex.delete_account(aid)
         return {"ok": True}
 
     @app.get("/api/accounts/{aid}")
     def account(aid: str):
+        ex = ctx.ex
         return plain(ex.summary(aid))
 
     @app.get("/api/accounts/{aid}/positions")
     def positions(aid: str):
+        ex = ctx.ex
         return plain(ex.positions(aid))
 
     @app.get("/api/accounts/{aid}/orders")
     def orders(aid: str, status: str = "all"):
+        ex = ctx.ex
         return [order_row(o) for o in ex.orders(aid, status)]
 
     @app.get("/api/accounts/{aid}/fills")
     def fills(aid: str, limit: int = Query(500, ge=1, le=5000)):
+        ex = ctx.ex
         rows = [dict(plain(f), description=describe(f.symbol)) for f in ex.account(aid).fills[-limit:]]
         return rows[::-1]
 
     @app.get("/api/accounts/{aid}/ledger")
     def ledger(aid: str, limit: int = Query(500, ge=1, le=5000)):
+        ex = ctx.ex
         txns = ex.account(aid).ledger.transactions[-limit:]
         return [{"id": t.id, "ts": t.ts, "kind": t.kind, "memo": t.memo,
                  "postings": [[a, float(v)] for a, v in t.postings]} for t in txns][::-1]
 
     @app.get("/api/accounts/{aid}/closed")
     def closed(aid: str):
+        ex = ctx.ex
         return [dict(c, description=describe(c["symbol"]), qty=float(c["qty"]), open_price=float(c["open_price"]),
                      close_price=float(c["close_price"]), pnl=float(c["pnl"])) for c in ex.account(aid).closed][::-1]
 
     @app.get("/api/accounts/{aid}/performance")
     def performance(aid: str):
+        ex = ctx.ex
         perf = ex.performance(aid)
         perf["equity_curve"] = [[t, float(e)] for t, e in perf["equity_curve"]]
         return plain(perf)
 
     @app.post("/api/accounts/{aid}/orders/preview")
     def preview(aid: str, body: dict = Body(...)):
+        ex = ctx.ex
         return plain(ex.preview(aid, body))
 
     @app.post("/api/accounts/{aid}/orders")
     def submit(aid: str, body: dict = Body(...)):
+        ex = ctx.ex
         return [order_row(o) for o in ex.submit(aid, body)]
 
     @app.delete("/api/accounts/{aid}/orders")
     def cancel_all(aid: str):
+        ex = ctx.ex
         ex.account(aid)
         return {"canceled": ex.cancel_all(aid)}
 
     @app.delete("/api/accounts/{aid}/orders/{oid}")
     def cancel(aid: str, oid: str):
+        ex = ctx.ex
         return order_row(ex.cancel(aid, oid))
 
     @app.patch("/api/accounts/{aid}/orders/{oid}")
     def replace(aid: str, oid: str, body: dict = Body(...)):
+        ex = ctx.ex
         return order_row(ex.replace(aid, oid, body))
 
     # ---- watchlists and alerts ---------------------------------------------------
     @app.get("/api/watchlists")
     def watchlists():
+        ex = ctx.ex
         return ex.watchlists
 
     @app.put("/api/watchlists/{name}")
     def put_watchlist(name: str, body: list = Body(...)):
+        ex = ctx.ex
         syms = []
         for s in body[:100]:
             s = str(s).upper().strip()
@@ -344,20 +451,24 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     @app.delete("/api/watchlists/{name}")
     def delete_watchlist(name: str):
+        ex = ctx.ex
         ex.watchlists.pop(name, None)
         ex.dirty = True
         return ex.watchlists
 
     @app.get("/api/alerts")
     def alerts():
+        ex = ctx.ex
         return ex.alerts
 
     @app.post("/api/alerts")
     def add_alert(body: dict = Body(...)):
+        ex = ctx.ex
         return ex.add_alert(str(body.get("symbol", "")), body.get("op"), body.get("price"))
 
     @app.delete("/api/alerts/{alert_id}")
     def remove_alert(alert_id: str):
+        ex = ctx.ex
         ex.remove_alert(alert_id)
         return {"ok": True}
 
@@ -379,12 +490,10 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     # ---- extension routes ----------------------------------------------------------
     # Every module named app/api/routes_*.py that defines register(app, ctx) is loaded here,
-    # so new features add routes without editing this file. ctx.ex is the active exchange.
+    # so new features add routes without editing this file. ctx.ex is the active exchange
+    # (live, or the replay sandbox); look it up per request.
     import importlib
     import pkgutil
-    from types import SimpleNamespace
-    ctx = SimpleNamespace(ex=ex, plain=plain, clients=clients)
-    app.state.ctx = ctx
     pkg = importlib.import_module("app.api")
     for mod in sorted(m.name for m in pkgutil.iter_modules(pkg.__path__) if m.name.startswith("routes_")):
         importlib.import_module(f"app.api.{mod}").register(app, ctx)

@@ -129,8 +129,12 @@ function computeIndicators(g: Gen) {
 function histColor(v: number) { return v >= 0 ? "#2fbf7188" : "#ef535088"; }
 
 /** Replace all data with freshly loaded bars (real UTC times). */
-export function setBars(g: Gen, raw: Bar[]) {
+const goodBar = (b: any) => b && [b.time, b.open, b.high, b.low, b.close].every(Number.isFinite);
+
+export function setBars(g: Gen, input: Bar[]) {
   if (!g.alive) return;
+  // A provider can send incomplete bars; skip them rather than break the chart. Missing volume counts as 0.
+  const raw = (Array.isArray(input) ? input : []).filter(goodBar).map((b) => (Number.isFinite(b.volume) ? b : { ...b, volume: 0 }));
   g.raw = raw.map((b) => b.time);
   g.bars = raw.map((b) => ({ ...b, time: b.time + g.shift }));
   g.main.setData(g.bars.map((b) => mainPoint(g, b)) as any);
@@ -149,12 +153,13 @@ export function setCompare(g: Gen, raw: Bar[]) {
   if (!g.alive || !g.compare) return;
   const shifted = new Set(g.bars.map((b) => b.time));
   // Only times the main symbol also has, so the time axis (and every drawing's position) is unchanged.
-  g.compare.setData(raw.map((b) => ({ time: (b.time + g.shift) as Time, value: b.close })).filter((p) => shifted.has(p.time as number)));
+  g.compare.setData((Array.isArray(raw) ? raw : []).filter(goodBar).map((b) => ({ time: (b.time + g.shift) as Time, value: b.close })).filter((p) => shifted.has(p.time as number)));
 }
 
 /** Stream a trade price into the last bar (or start a new one) and update every indicator's latest value. */
 export function streamPrice(g: Gen, price: number, ts: number) {
-  if (!g.alive || !g.loaded || !g.bars.length || !isFinite(price)) return;
+  // Live data can have no last price yet, or no timestamp: ignore such quotes.
+  if (!g.alive || !g.loaded || !g.bars.length || !Number.isFinite(price) || !(price > 0) || !Number.isFinite(ts)) return;
   const last = g.bars[g.bars.length - 1];
   if (g.intraday) {
     const rawT = Math.floor(ts / g.step) * g.step;

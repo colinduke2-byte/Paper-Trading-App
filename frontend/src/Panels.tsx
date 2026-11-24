@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { usePoll } from "./Market";
+import { Reports } from "./Reports";
 import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
 
-const TABS = ["Positions", "Orders", "Fills", "Activity", "Performance", "Alerts", "Screener"];
+const TABS = ["Positions", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
 export function BottomPanel(p: {
   accountId: string; positions: any[]; orders: any[]; refreshKey: number; quotes: Record<string, any>;
@@ -24,7 +25,7 @@ export function BottomPanel(p: {
         {tab === "Orders" && <Orders {...p} />}
         {tab === "Fills" && <Fills {...p} />}
         {tab === "Activity" && <Activity {...p} />}
-        {tab === "Performance" && <Performance {...p} />}
+        {tab === "Reports" && <Reports accountId={p.accountId} refreshKey={p.refreshKey} notify={p.notify} orders={p.orders} />}
         {tab === "Alerts" && <Alerts {...p} />}
         {tab === "Screener" && <Screener {...p} />}
       </div>
@@ -151,53 +152,6 @@ function Activity({ accountId, refreshKey }: any) {
         })}
       </tbody>
     </table>
-  );
-}
-
-function Performance({ accountId, refreshKey }: any) {
-  const [perf, error] = usePoll<any>(`/accounts/${accountId}/performance`, 15000, [refreshKey]);
-  const [closed] = usePoll<any[]>(`/accounts/${accountId}/closed`, 0, [refreshKey]);
-  if (error) return <div className="notice bad">Could not load performance: {error}</div>;
-  if (!perf) return <p className="muted pad">Loading…</p>;
-  const curve: number[][] = perf.equity_curve;
-  let path = "";
-  if (curve.length > 1) {
-    const ys = curve.map((c) => c[1]);
-    const lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
-    path = curve.map((c, i) => `${i ? "L" : "M"}${((i / (curve.length - 1)) * 600).toFixed(1)},${(110 - ((c[1] - lo) / span) * 100).toFixed(1)}`).join(" ");
-  }
-  const stat = (k: string, v: string, cls = "") => <div key={k}><span>{k}</span><b className={cls}>{v}</b></div>;
-  return (
-    <div className="perf">
-      <div className="facts">
-        {stat("Total return", pct(perf.total_return_pct), tone(perf.total_return_pct))}
-        {stat("Realised P&L", signed(perf.realized_pnl), tone(perf.realized_pnl))}
-        {stat("Fees paid", usd(perf.fees))}
-        {stat("Max drawdown", perf.max_drawdown_pct.toFixed(2) + "%")}
-        {stat("Closed trades", String(perf.closed_trades))}
-        {stat("Win rate", perf.win_rate == null ? "–" : perf.win_rate.toFixed(0) + "%")}
-        {stat("Average win", perf.average_win == null ? "–" : usd(perf.average_win))}
-        {stat("Average loss", perf.average_loss == null ? "–" : usd(perf.average_loss))}
-        {stat("Profit factor", perf.profit_factor == null ? "–" : perf.profit_factor.toFixed(2))}
-      </div>
-      <div className="curve">
-        <span className="muted">Account value over time</span>
-        {path ? <svg viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Account value over time"><path d={path} /></svg>
-          : <p className="muted">The curve appears after a couple of minutes of running.</p>}
-      </div>
-      {closed && closed.length > 0 && (
-        <table>
-          <thead><tr><th>Closed</th><th>Symbol</th><th className="num">Qty</th><th className="num">Open</th><th className="num">Close</th><th className="num">P&amp;L</th></tr></thead>
-          <tbody>
-            {closed.slice(0, 200).map((c, i) => (
-              <tr key={i}><td className="muted">{dateTime(c.closed_at)}</td><td>{c.description}</td><td className="num">{qty(c.qty)}</td>
-                <td className="num">{money(c.open_price)}</td><td className="num">{money(c.close_price)}</td>
-                <td className={"num " + tone(c.pnl)}>{signed(c.pnl)}</td></tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
   );
 }
 

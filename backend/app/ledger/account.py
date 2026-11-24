@@ -1,9 +1,11 @@
-"""A paper account: ledger, FIFO tax lots, fills and closed-trade history."""
+"""A paper account: ledger, tax lots (FIFO, LIFO or highest cost), fills and closed-trade history."""
 from dataclasses import dataclass
 from decimal import Decimal
 
 from ..core.models import BUY, Fill, from_plain, to_plain
 from ..core.money import ZERO, D, cents
+from ..lifecycle import settings as lifecycle_settings
+from ..lifecycle.state import AccountLife
 from ..options.symbology import describe
 from .ledger import CAPITAL, CASH, FEES, REALIZED, Ledger, position_account
 
@@ -14,6 +16,23 @@ class Lot:
     price: Decimal
     ts: float
     cost: Decimal = ZERO  # remaining cost basis in cents (always positive)
+    fill_id: str = ""  # the fill that opened the lot ("" for lots saved before this was recorded)
+
+
+# Which open lot a closing fill consumes first. "highest_cost" closes the long lot with the highest
+# price per unit (for a short position: the lot sold at the lowest price), so it realises the
+# smallest gain either way. Ties go to the oldest lot.
+LOT_METHODS = ("fifo", "lifo", "highest_cost")
+
+
+def pick_lot(lots: list, method: str) -> int:
+    if method == "lifo":
+        return len(lots) - 1
+    if method == "highest_cost":
+        if lots[0].qty > 0:
+            return max(range(len(lots)), key=lambda i: (lots[i].price, -i))
+        return min(range(len(lots)), key=lambda i: (lots[i].price, i))
+    return 0
 
 
 class Account:
@@ -30,6 +49,10 @@ class Account:
         self.equity_history: list[list] = []  # [ts, equity]
         self.day_start_equity = self.starting_cash
         self.margin_call = False
+        self.lot_method = "fifo"
+        self.journal: list[dict] = []  # trade journal entries, managed by the reports routes
+        self.settings = lifecycle_settings.defaults()  # per-account rule toggles and rates
+        self.life = AccountLife()  # settlement, day trades, accruals, dividends, margin call
         self.ledger.post(ts, "deposit", "Opening balance", [(CASH, self.starting_cash), (CAPITAL, -self.starting_cash)])
 
     # ---- derived state -------------------------------------------------
@@ -68,7 +91,8 @@ class Account:
         lots = self.lots.setdefault(fill.symbol, [])
         remaining, closed_cost, closed_notional, pnl = fill.qty, ZERO, ZERO, ZERO
         while remaining > 0 and lots and (lots[0].qty > 0) != (sign > 0):
-            lot = lots[0]
+            idx = pick_lot(lots, self.lot_method)
+            lot = lots[idx]
             take = min(remaining, abs(lot.qty))
             cost = lot.cost if take == abs(lot.qty) else cents(lot.cost * take / abs(lot.qty))
             lot.cost -= cost
@@ -79,15 +103,18 @@ class Account:
             pnl += lot_pnl
             self.closed.append({"symbol": fill.symbol, "qty": str(take if lot.qty > 0 else -take),
                                 "open_price": str(lot.price), "close_price": str(fill.price),
-                                "pnl": str(lot_pnl), "opened_at": lot.ts, "closed_at": fill.ts})
+                                "pnl": str(lot_pnl), "opened_at": lot.ts, "closed_at": fill.ts,
+                                "id": f"C{len(self.closed) + 1}", "basis": str(cost), "close_amount": str(proceeds),
+                                "open_fill_id": lot.fill_id, "close_fill_id": fill.id, "order_id": fill.order_id,
+                                "kind": fill.kind, "lot_method": self.lot_method})
             lot.qty += take if lot.qty < 0 else -take
             remaining -= take
             if lot.qty == 0:
-                lots.pop(0)
+                lots.pop(idx)
         # Closed proceeds are the sum of the per-lot amounts, so profit and cash always agree.
         open_notional = cents(remaining * fill.price * mult)
         if remaining > 0:
-            lots.append(Lot(sign * remaining, fill.price, fill.ts, open_notional))
+            lots.append(Lot(sign * remaining, fill.price, fill.ts, open_notional, fill.id))
         if not lots:
             self.lots.pop(fill.symbol, None)
         notional = closed_notional + open_notional
@@ -103,9 +130,11 @@ class Account:
     def to_plain(self) -> dict:
         return {"id": self.id, "name": self.name, "type": self.type, "starting_cash": str(self.starting_cash),
                 "created_at": self.created_at, "ledger": self.ledger.to_plain(),
-                "lots": {s: [[str(l.qty), str(l.price), l.ts, str(l.cost)] for l in ls] for s, ls in self.lots.items()},
+                "lots": {s: [[str(l.qty), str(l.price), l.ts, str(l.cost), l.fill_id] for l in ls] for s, ls in self.lots.items()},
                 "fills": [to_plain(f) for f in self.fills], "closed": self.closed,
-                "equity_history": self.equity_history, "day_start_equity": str(self.day_start_equity)}
+                "equity_history": self.equity_history, "day_start_equity": str(self.day_start_equity),
+                "lot_method": self.lot_method, "journal": self.journal,
+                "settings": self.settings, "lifecycle": self.life.to_plain()}
 
     @classmethod
     def from_plain(cls, d: dict) -> "Account":
@@ -114,10 +143,16 @@ class Account:
         a.starting_cash = D(d["starting_cash"])
         a.created_at = d["created_at"]
         a.ledger = Ledger.from_plain(d["ledger"])
-        a.lots = {s: [Lot(D(q), D(p), t, D(c)) for q, p, t, c in ls] for s, ls in d["lots"].items()}
+        # Lots saved before the opening fill id was recorded have four fields.
+        a.lots = {s: [Lot(D(l[0]), D(l[1]), l[2], D(l[3]), l[4] if len(l) > 4 else "") for l in ls]
+                  for s, ls in d["lots"].items()}
         a.fills = [from_plain(Fill, f) for f in d["fills"]]
         a.closed = d.get("closed", [])
         a.equity_history = d.get("equity_history", [])
         a.day_start_equity = D(d.get("day_start_equity", d["starting_cash"]))
         a.margin_call = False
+        a.lot_method = d.get("lot_method", "fifo") if d.get("lot_method") in LOT_METHODS else "fifo"
+        a.journal = d.get("journal", [])
+        a.settings = lifecycle_settings.merged(d.get("settings"))
+        a.life = AccountLife.from_plain(d.get("lifecycle"))
         return a

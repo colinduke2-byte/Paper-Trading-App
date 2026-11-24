@@ -1,4 +1,4 @@
-import { test, expect, lastPrice, ticket, type Account } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, type Account } from "./fixtures";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 
 // Chart tools: chart types, indicators, drawings, order lines, trade at price and keyboard shortcuts.
@@ -18,11 +18,12 @@ const stage = (page: Page) => page.locator(".ct-stage");
 async function chartReady(page: Page) {
   await expect(stage(page)).toHaveAttribute("data-loaded", "1");
   await expect(legend(page)).toBeVisible();
-  await expect(page.getByText(/^Market open/)).toBeVisible(); // the header has its final size
+  await expect(page.getByText(/^(Market open|Market closed|Pre-market|After hours) · /)).toBeVisible(); // the header has its final size
 }
 
 /** The element's box once it has stopped moving (the price scale settles after the data and order lines load). */
-async function stableBox(loc: Locator) {
+async function stableBox(pageOrLoc: Page | Locator, maybeLoc?: Locator) {
+  const loc = (maybeLoc ?? pageOrLoc) as Locator;
   let prev = await loc.boundingBox();
   for (let i = 0; i < 20; i++) {
     await loc.page().waitForTimeout(250);
@@ -235,7 +236,7 @@ test("dragging an order line asks first: cancel keeps the price, confirm changes
     const b = await stableBox(handle);
     await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
     await page.mouse.down();
-    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2 + 40, { steps: 8 });
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2 - 40, { steps: 8 }); // up: still below the market
     await page.mouse.up();
   };
   await drag();
@@ -248,11 +249,53 @@ test("dragging an order line asks first: cancel keeps the price, confirm changes
 
   await drag();
   const to = Number((await dialog.locator("b").nth(2).textContent())!.replace(/,/g, ""));
-  expect(to).toBeLessThan(limit);
+  expect(to).toBeGreaterThan(limit);
   await dialog.getByRole("button", { name: "Change order" }).click();
   await expect(page.getByText(/^Order changed: Buy 3 limit now at/)).toBeVisible();
   await expect.poll(async () => (await getOrder(request, account, o.id)).limit_price).toBe(to);
   await expect(page.getByRole("button", { name: new RegExp(`^Buy 3 limit at ${to.toFixed(2).replace(".", "\\.")}`) })).toBeVisible();
+});
+
+test("a change the server refuses shows the reason and puts the line back", async ({ page, open, request, problems }) => {
+  const px = await lastPrice(request, "MKTX");
+  const limit = Number((px * 0.99).toFixed(2));
+  // A cash account with just enough cash for 2 shares at the limit: raising the price is refused.
+  const acc = await createAccount(request, "cash", (2 * limit + 1).toFixed(2));
+  const o = await order(request, acc, { side: "buy", qty: "2", type: "limit", limit_price: limit.toFixed(2) });
+  await open(acc);
+  await chartReady(page);
+  const handle = page.getByRole("button", { name: /^Buy 2 limit at .*Drag/ });
+  const b = await stableBox(handle);
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2 - 60, { steps: 8 });
+  await page.mouse.up();
+  await page.getByRole("dialog", { name: "Confirm order change" }).getByRole("button", { name: "Change order" }).click();
+  await expect(page.getByText(/^The order was not changed: /)).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Confirm order change" })).toHaveCount(0);
+  await expect(handle).toContainText(limit.toFixed(2));
+  expect((await getOrder(request, acc, o.id)).limit_price).toBe(limit);
+  // The browser logs the refused PATCH (HTTP 422) as a failed resource load; that one entry is expected.
+  const expected = problems.filter((p) => /Failed to load resource: .* 422/.test(p));
+  expect(expected).toHaveLength(1);
+  problems.splice(problems.indexOf(expected[0]), 1);
+});
+
+test("multi-leg orders draw no line on the chart", async ({ page, open, request, account }) => {
+  const exp = (await (await request.get("/api/options/expirations/MKTX")).json())[0].date;
+  const rows = (await (await request.get(`/api/options/chain/MKTX?expiry=${exp}`)).json()).rows;
+  const lo = rows[Math.floor(rows.length / 2) - 1], hi = rows[Math.floor(rows.length / 2)];
+  const r = await request.post(`/api/accounts/${account.id}/multileg`, { data: {
+    qty: "1", type: "limit", limit_price: "0.05", price_effect: "debit", tif: "day",
+    legs: [{ symbol: lo.call.symbol, side: "buy", ratio: 1 }, { symbol: hi.call.symbol, side: "sell", ratio: 1 }] } });
+  expect(r.ok(), await r.text()).toBeTruthy();
+  const combo = (await r.json())[0] ?? (await r.json());
+  expect(combo.symbol).toBe("MKTX"); // shown in the chart's order list, so the chart must skip it itself
+  expect(["working", "held"]).toContain(combo.status);
+  await open();
+  await chartReady(page);
+  await page.waitForTimeout(1000);
+  await expect(page.locator(".ct-order-handle")).toHaveCount(0);
 });
 
 test("bracket legs are labelled as take profit and stop loss", async ({ page, open, request, account }) => {
@@ -307,7 +350,7 @@ test("keyboard shortcuts and their help", async ({ page, open }) => {
   await expect(help).toContainText("Cancel all open orders");
   await page.keyboard.press("Escape");
   await expect(help).toHaveCount(0);
-  await page.getByRole("button", { name: "Keyboard shortcuts" }).click();
+  await page.getByRole("button", { name: "Keyboard shortcuts" }).click(); // the header entry
   await expect(help).toBeVisible();
   await page.keyboard.press("Escape");
 
@@ -398,4 +441,63 @@ test("no console errors when switching symbol, timeframe, indicators and views q
   await chartReady(page);
   await expect(page.getByRole("button", { name: /^Buy 2 limit at/ })).toBeVisible();
   await page.waitForTimeout(1500); // let streamed ticks land on the rebuilt chart
+});
+
+test.describe("replay", () => {
+  // Replay mode is global on the server; never leave it running for the next test.
+  test.afterEach(async ({ request }) => { await request.post("/api/replay/exit").catch(() => {}); });
+
+  test("a line drawn in a replay stays through clock steps and does not touch the live chart", async ({ page, open }) => {
+    await open();
+    await chartReady(page);
+    const draw = page.getByRole("button", { name: "Draw", exact: true });
+    const drawingsBtn = () => page.getByRole("button", { name: /^Drawings \(/ });
+    const list = page.getByRole("dialog", { name: "Drawings" });
+    const addHLine = async (fy: number) => {
+      await page.getByRole("button", { name: "Horizontal line" }).click();
+      const box = await stableBox(page.getByTestId("draw-layer"));
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height * fy);
+      await drawingsBtn().click();
+      const text = (await list.getByRole("button", { name: /^Horizontal line at / }).last().textContent())!;
+      await drawingsBtn().click();
+      return text;
+    };
+    // A live drawing first.
+    await draw.click();
+    const liveLine = await addHLine(0.4);
+    await page.getByRole("button", { name: "Done" }).click();
+
+    // Start a replay: the chart remounts on the recorded session's prices, with its own (empty) drawings.
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await page.getByRole("dialog", { name: "Replay a trading session" }).getByRole("button", { name: /^Start with/ }).click();
+    await expect(page.getByRole("note")).toContainText("Replay of");
+    await chartReady(page);
+    await draw.click();
+    await expect(drawingsBtn()).toHaveText("Drawings (0)");
+    const replayLine = await addHLine(0.6);
+    await page.getByRole("button", { name: "Done" }).click();
+
+    // Step the simulated clock twice: the chart reloads, the line is still there at the same price.
+    const bar = page.getByRole("region", { name: "Replay controls" });
+    for (let i = 0; i < 2; i++) {
+      await page.waitForTimeout(500); // let the debounced save go out before the remount
+      await bar.getByRole("button", { name: "+1 min" }).click();
+      await chartReady(page);
+    }
+    await draw.click();
+    await drawingsBtn().click();
+    await expect(list.getByRole("button", { name: replayLine, exact: true })).toBeVisible();
+    await expect(list.getByRole("button", { name: /^Horizontal line at / })).toHaveCount(1);
+    await drawingsBtn().click();
+    await page.getByRole("button", { name: "Done" }).click();
+
+    // Exit: the live chart has its own line only.
+    await bar.getByRole("button", { name: "Exit replay" }).click();
+    await expect(page.getByRole("note")).toContainText("Paper trading · no real money");
+    await chartReady(page);
+    await draw.click();
+    await drawingsBtn().click();
+    await expect(list.getByRole("button", { name: liveLine, exact: true })).toBeVisible();
+    await expect(list.getByRole("button", { name: /^Horizontal line at / })).toHaveCount(1);
+  });
 });
