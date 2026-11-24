@@ -11,9 +11,13 @@ process.env.E2E_DATA ||= mkdtempSync(join(tmpdir(), "paperdesk-e2e-"));
 process.env.E2E_AUTH_PORT ||= String(Number(process.env.E2E_PORT) + 1);
 process.env.E2E_AUTH_DATA ||= mkdtempSync(join(tmpdir(), "paperdesk-e2e-auth-"));
 process.env.E2E_PASSCODE ||= "e2e passcode 2468";
+// A third server for the crypto tests: US stock sessions and a clock that starts on a Saturday (stocks closed).
+process.env.E2E_CRYPTO_PORT ||= String(Number(process.env.E2E_PORT) + 2);
+process.env.E2E_CRYPTO_DATA ||= mkdtempSync(join(tmpdir(), "paperdesk-e2e-crypto-"));
 
 const port = process.env.E2E_PORT;
 const authPort = process.env.E2E_AUTH_PORT;
+const cryptoPort = process.env.E2E_CRYPTO_PORT;
 const root = resolve(__dirname, "..");
 const venvPython = join(root, "backend", ".venv", "bin", "python");
 const python = process.env.E2E_PYTHON || (existsSync(venvPython) ? venvPython : "python3");
@@ -51,13 +55,16 @@ export default defineConfig({
     launchOptions: executablePath ? { executablePath } : {},
   },
   projects: [
-    { name: "desktop", testIgnore: /(mobile|auth)\.spec/ },
+    { name: "desktop", testIgnore: /(mobile|auth|crypto)\.spec/ },
     // Phone profiles run in Chromium (the only browser pre-installed here). Device emulation sets viewport, touch and scale factor.
     { name: "iphone-13", testMatch: /mobile\.spec/, use: { ...phone("iPhone 13") } },
     { name: "pixel-7", testMatch: /mobile\.spec/, use: { ...phone("Pixel 7") } },
     // Sign-in tests run against the passcode server.
     { name: "auth-desktop", testMatch: /auth\.spec/, use: { baseURL: `http://127.0.0.1:${authPort}` } },
     { name: "auth-pixel-7", testMatch: /auth\.spec/, use: { ...phone("Pixel 7"), baseURL: `http://127.0.0.1:${authPort}` } },
+    // Crypto tests run against the weekend-clock server, on desktop and one phone profile.
+    { name: "crypto-desktop", testMatch: /crypto\.spec/, use: { baseURL: `http://127.0.0.1:${cryptoPort}` } },
+    { name: "crypto-iphone-13", testMatch: /crypto\.spec/, use: { ...phone("iPhone 13"), baseURL: `http://127.0.0.1:${cryptoPort}` } },
   ],
   webServer: [
     {
@@ -76,6 +83,15 @@ export default defineConfig({
       timeout: 60_000,
       env: { ...common, PAPERDESK_DATA: process.env.E2E_AUTH_DATA!, PAPERDESK_PASSCODE: process.env.E2E_PASSCODE!,
              PAPERDESK_LOOPBACK_BYPASS: "0" },
+    },
+    {
+      command: `"${python}" -m uvicorn app.api.server:app_factory --factory --host 127.0.0.1 --port ${cryptoPort} --no-proxy-headers`,
+      cwd: join(root, "backend"),
+      url: `http://127.0.0.1:${cryptoPort}/api/status`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      env: { ...common, PAPERDESK_DATA: process.env.E2E_CRYPTO_DATA!, PAPERDESK_SESSIONS: "us",
+             PAPERDESK_CLOCK_START: "2026-11-28T15:00:00Z", PAPERDESK_FEED: "synthetic" },
     },
   ],
 });

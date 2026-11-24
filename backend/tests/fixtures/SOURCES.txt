@@ -22,3 +22,12 @@ finnhub/company_profile2.json    finnhub.io/docs/api/company-profile2    (sample
 finnhub/basic_financials.json    finnhub.io/docs/api/company-basic-financials (sampleResponse; a trailing comma that
                                  made the published sample invalid JSON was removed)
 finnhub/company_news.json        finnhub.io/docs/api/company-news        (sampleResponse; trailing comma removed)
+alpaca_crypto/latest_quotes.json     docs.alpaca.markets/us/reference/cryptolatestquotes-1.md     (200 example, verbatim)
+alpaca_crypto/latest_trades.json     docs.alpaca.markets/us/reference/cryptolatesttrades-1.md     (200 example, verbatim)
+alpaca_crypto/latest_bars.json       docs.alpaca.markets/us/reference/cryptolatestbars-1.md       (200 example, verbatim)
+alpaca_crypto/latest_orderbooks.json docs.alpaca.markets/us/reference/cryptolatestorderbooks-1.md (200 example, verbatim)
+alpaca_crypto/snapshots.json         docs.alpaca.markets/us/reference/cryptosnapshots-1.md        (200 example, verbatim)
+alpaca_crypto/bars.json              docs.alpaca.markets/us/reference/cryptobars-1.md             (200 example, verbatim)
+alpaca_crypto/asset_btc.json         docs.alpaca.markets/us/docs/crypto-trading.md (sample crypto asset object, verbatim)
+alpaca_crypto/stream.json            docs.alpaca.markets/us/docs/real-time-crypto-pricing-data.md and
+                                     streaming-market-data.md (each message verbatim; grouped into one file by kind)

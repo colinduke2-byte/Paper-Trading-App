@@ -8,6 +8,10 @@ account, API key or internet connection.
 prices follow a random walk. Option prices come from a pricing model. Nothing here is
 real market data or investment advice.
 
+Crypto pairs quoted in US dollars trade alongside stocks and options, 24 hours a day and fully paid
+(no margin, no short selling, a percentage fee per fill). The simulated coins (SIMCOIN/USD and others)
+are invented; see [docs/CRYPTO.md](docs/CRYPTO.md).
+
 ## Run it
 
 Requires Python 3.11 or newer (Node is not needed).
@@ -33,6 +37,7 @@ account). State is saved in `backend/data/` and survives restarts.
 | `PAPERDESK_SESSIONS` | `always` | `always`: the simulated market never closes. `us`: follow US market hours and holidays |
 | `PAPERDESK_DATA` | `backend/data` | Where state is saved |
 | `PAPERDESK_SEED` | `7` | Seed for the simulated price history |
+| `PAPERDESK_CLOCK_START` | unset | Simulated prices only: start the clock at this UTC time, e.g. `2026-11-28T15:00:00Z` (tests and demos) |
 | `PORT` | `8000` | Port (`run.sh`, `run.bat`, Docker) |
 | `HOST` | `127.0.0.1` | Bind address (`run.sh`, `run.bat`; `0.0.0.0` in LAN mode). A network address is refused without LAN mode. Only the Docker image sets `0.0.0.0`, inside the container |
 | `PAPERDESK_LAN` | `0` | `1`: let devices on your network connect (needs `PAPERDESK_PASSCODE`). See LAN mode |

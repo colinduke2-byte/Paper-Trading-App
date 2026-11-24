@@ -21,6 +21,9 @@ Margin account (Regulation T style):
   cover shorts in more than one way, every way of pairing them is tried (for all but very
   large books) and the cheapest is used; each one is a valid cover, so a covered group
   always holds its worst loss.
+Crypto (both account types) is fully paid: it cannot be sold short and has no loan value, so its
+requirement is 100% of market value (initial and maintenance). It counts in equity at market and
+in the requirement at the same amount, so it neither adds to nor takes from stock buying power.
 Cash account: no short stock. A long option is NOT cover in a cash account, because
 assignment settles in shares and the account must be able to take or deliver them: a
 short call needs the shares, a short put needs strike x 100 in cash. Spreads whose short
@@ -35,6 +38,7 @@ from functools import lru_cache
 from math import gcd
 from typing import Optional
 
+from ..core.assets import is_crypto
 from ..core.money import ZERO, cents
 from ..options.symbology import parse
 
@@ -291,7 +295,9 @@ def requirement(positions: dict, marks: dict, maintenance: bool = False) -> Deci
         if parse(sym):
             continue
         mv = abs(qty) * marks[sym]
-        if maintenance:
+        if is_crypto(sym):
+            req += mv  # fully paid: no loan value
+        elif maintenance:
             req += mv * (MAINT_LONG if qty > 0 else MAINT_SHORT)
         else:
             req += mv * INITIAL
@@ -303,6 +309,8 @@ def requirement(positions: dict, marks: dict, maintenance: bool = False) -> Deci
 def evaluate(account_type: str, cash: Decimal, positions: dict, marks: dict) -> Evaluation:
     """Would this state be acceptable when opening new risk?"""
     eq = equity(cash, positions, marks)
+    if any(qty < 0 and is_crypto(sym) for sym, qty in positions.items()):
+        return Evaluation(False, "crypto cannot be sold short", eq, ZERO, structural=True)
     if account_type == "margin":
         req = requirement(positions, marks)
         ok = eq >= req

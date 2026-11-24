@@ -13,6 +13,7 @@ from ..core import calendar as cal
 from ..core.models import Quote
 from ..core.money import CENT, ZERO, cents
 from ..lifecycle.actions import dividend as dividend_action, split as split_action
+from . import crypto_sim
 from .feed import MarketDataProvider, adjust_for_split
 
 # symbol, name, sector, start price, annual volatility, shares outstanding (millions), EPS, dividend per share
@@ -59,6 +60,7 @@ class SyntheticFeed(MarketDataProvider):
     def __init__(self, seed: int = 7, now: float = 0.0, history_days: int = 520, always_open: bool = True):
         super().__init__()
         self.rng = random.Random(seed)
+        self.crypto_rng = random.Random(f"{seed}-crypto")  # separate, so the stock walk is unchanged by coins
         self.always_open = always_open
         self.year_seconds = ALWAYS_OPEN_SECONDS_PER_YEAR if always_open else TRADING_SECONDS_PER_YEAR
         self._day: dict[str, date] = {}
@@ -68,6 +70,8 @@ class SyntheticFeed(MarketDataProvider):
                               "shares_outstanding": shares * 1_000_000, "eps": eps, "dividend": div,
                               "type": "etf" if sector == "ETF" else "stock"}
         self._generate_history(now, history_days)
+        self.info.update(crypto_sim.crypto_infos())
+        crypto_sim.generate_history(self, now, history_days)
 
     # ---- history -------------------------------------------------------
     def _generate_history(self, now: float, days: int) -> None:
@@ -139,12 +143,16 @@ class SyntheticFeed(MarketDataProvider):
 
     # ---- live stepping ---------------------------------------------------
     def step(self, now: float) -> list:
-        if not self.always_open and cal.session(now) == "closed":
-            return []
-        out = []
         today = self._utc_date(now)
+        # Crypto trades around the clock, also while the simulated stock market is closed.
+        out = [crypto_sim.step(self, sym, now, today, self.crypto_rng.gauss(0, 1) if i == 0 else 0.0)
+               for i, sym in enumerate(crypto_sim.CRYPTO_SYMBOLS)]
+        if not self.always_open and cal.session(now) == "closed":
+            return out
         market = self.rng.gauss(0, 1)
         for sym, info in self.info.items():
+            if sym in crypto_sim.CRYPTO_SYMBOLS:
+                continue
             prev = self.quotes[sym]
             dt = min(max(now - prev.ts, 0.0), 5.0) or 1.0
             if self._day.get(sym) != today:  # roll the day
@@ -225,11 +233,15 @@ class SyntheticFeed(MarketDataProvider):
                 kw["trade"] = False
                 quotes[s] = Quote(**kw)
             if set(quotes) != set(self.info):
-                return
-            self.quotes = quotes
-            self.store.daily = data["daily"]
-            self.store.minutes = {s: deque(b, maxlen=6000) for s, b in data["minutes"].items()}
-            self._day = {s: date.fromisoformat(d) for s, d in data["days"].items()}
+                # A market saved before the crypto pairs existed: keep the freshly made coins.
+                if set(quotes) | set(crypto_sim.CRYPTO_SYMBOLS) != set(self.info):
+                    return
+            fresh = set(self.info) - set(quotes)
+            self.quotes = {**{s: self.quotes[s] for s in fresh}, **quotes}
+            self.store.daily = {**{s: self.store.daily[s] for s in fresh}, **data["daily"]}
+            self.store.minutes = {**{s: self.store.minutes[s] for s in fresh if s in self.store.minutes},
+                                  **{s: deque(b, maxlen=6000) for s, b in data["minutes"].items()}}
+            self._day = {**{s: self._day[s] for s in fresh}, **{s: date.fromisoformat(d) for s, d in data["days"].items()}}
             self.applied_actions = set(data.get("applied_actions", []))
             for s, div in data.get("dividends", {}).items():
                 if s in self.info:

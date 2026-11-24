@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, compact, money, pct, qty, time, tone } from "./util";
+import { api, ASSET_LABELS, compact, isCrypto, money, pct, price, qty, time, tone } from "./util";
 
 export function usePoll<T>(path: string | null, ms: number, deps: any[] = []): [T | null, string, () => void] {
   const [data, setData] = useState<T | null>(null);
@@ -20,25 +20,32 @@ export function Watchlist({ symbols, quotes, selected, onSelect, onChange }: {
   symbols: string[]; quotes: Record<string, any>; selected: string; onSelect: (s: string) => void; onChange: (s: string[]) => void;
 }) {
   const [q, setQ] = useState("");
+  const [cls, setCls] = useState(""); // asset-class filter: "" (all), "stock" or "crypto"
   const [results, setResults] = useState<any[]>([]);
   useEffect(() => {
-    if (!q.trim()) { setResults([]); return; }
+    if (!q.trim() && !cls) { setResults([]); return; }
     let alive = true;
-    api(`/symbols?q=${encodeURIComponent(q)}`).then((r) => alive && setResults(r.slice(0, 8))).catch(() => {});
+    api(`/symbols?q=${encodeURIComponent(q)}&asset_class=${cls}`).then((r) => alive && setResults(r.slice(0, 8))).catch(() => {});
     return () => { alive = false; };
-  }, [q]);
+  }, [q, cls]);
   const pick = (s: string) => { if (!symbols.includes(s)) onChange([...symbols, s]); onSelect(s); setQ(""); };
   return (
     <section className="panel watch" aria-label="Watchlist">
       <h3>Watchlist</h3>
       <div className="search">
-        <input value={q} placeholder="Search symbol or company" aria-label="Search symbols" onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && results[0]) pick(results[0].symbol); if (e.key === "Escape") setQ(""); }} />
-        {q.trim() && (
+        <div className="asset-filter seg" role="group" aria-label="Asset class">
+          {[["", "All"], ["stock", "Stocks"], ["crypto", "Crypto"]].map(([k, label]) => (
+            <button key={k} className={cls === k ? "on" : ""} aria-pressed={cls === k} onClick={() => setCls(k)}>{label}</button>
+          ))}
+        </div>
+        <input value={q} placeholder={cls === "crypto" ? "Search coin" : "Search symbol or company"} aria-label="Search symbols" onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && results[0]) pick(results[0].symbol); if (e.key === "Escape") { setQ(""); setCls(""); } }} />
+        {(q.trim() || cls) && (
           <ul className="results">
             {results.length === 0 && <li className="muted">No matching symbol</li>}
             {results.map((r) => (
-              <li key={r.symbol}><button onClick={() => pick(r.symbol)}><b>{r.symbol}</b><span className="muted">{r.name}</span></button></li>
+              <li key={r.symbol}><button onClick={() => { pick(r.symbol); setCls(""); }}><b>{r.symbol}</b><span className="muted">{r.name}</span>
+                {r.asset_class === "crypto" && <span className="tag">{ASSET_LABELS.crypto}</span>}</button></li>
             ))}
           </ul>
         )}
@@ -52,7 +59,7 @@ export function Watchlist({ symbols, quotes, selected, onSelect, onChange }: {
               return (
                 <tr key={s} className={s === selected ? "sel click" : "click"} onClick={() => onSelect(s)}>
                   <td><b>{s}</b></td>
-                  <td className="num">{money(x?.last)}</td>
+                  <td className="num">{price(x?.last)}</td>
                   <td className={"num " + tone(x?.change_pct)}>{pct(x?.change_pct)}</td>
                   <td className="num"><button className="x" title={`Remove ${s}`} aria-label={`Remove ${s}`}
                     onClick={(e) => { e.stopPropagation(); onChange(symbols.filter((y) => y !== s)); }}>×</button></td>
@@ -73,21 +80,21 @@ export function QuoteHeader({ symbol, quote, info }: { symbol: string; quote: an
     <div className="quote-head">
       <div className="qh-main">
         <h2>{symbol}</h2>
-        <span className="muted">{info?.name}{info?.sector ? ` · ${info.sector}` : ""}</span>
+        <span className="muted">{info?.name}{isCrypto(symbol) ? " · Crypto · trades 24/7" : info?.sector ? ` · ${info.sector}` : ""}</span>
         <div className="qh-price">
-          <strong>{money(quote?.last)}</strong>
-          <span className={tone(quote?.change)}>{quote ? `${quote.change > 0 ? "+" : ""}${money(quote.change)} (${pct(quote.change_pct)})` : ""}</span>
+          <strong>{price(quote?.last)}</strong>
+          <span className={tone(quote?.change)}>{quote ? `${quote.change > 0 ? "+" : ""}${price(quote.change)} (${pct(quote.change_pct)})` : ""}</span>
         </div>
       </div>
       <div className="qh-grid">
-        {cell("Bid", quote ? `${money(quote.bid)} × ${qty(quote.bid_size)}` : "–")}
-        {cell("Ask", quote ? `${money(quote.ask)} × ${qty(quote.ask_size)}` : "–")}
-        {cell("Open", money(quote?.open))}
-        {cell("Prev close", money(quote?.prev_close))}
-        {cell("Day range", quote ? `${money(quote.low)} – ${money(quote.high)}` : "–")}
+        {cell("Bid", quote ? `${price(quote.bid)} × ${qty(quote.bid_size)}` : "–")}
+        {cell("Ask", quote ? `${price(quote.ask)} × ${qty(quote.ask_size)}` : "–")}
+        {cell(isCrypto(symbol) ? "Open (UTC day)" : "Open", price(quote?.open))}
+        {cell("Prev close", price(quote?.prev_close))}
+        {cell("Day range", quote ? `${price(quote.low)} – ${price(quote.high)}` : "–")}
         {cell("Volume", compact(quote?.volume))}
-        {cell("52-wk range", info ? `${money(info.low_52w)} – ${money(info.high_52w)}` : "–")}
-        {cell("Mkt cap", compact(info?.market_cap))}
+        {cell("52-wk range", info ? `${price(info.low_52w)} – ${price(info.high_52w)}` : "–")}
+        {isCrypto(symbol) ? cell("Asset class", "Crypto") : cell("Mkt cap", compact(info?.market_cap))}
       </div>
     </div>
   );
@@ -99,7 +106,7 @@ export function DepthTape({ symbol }: { symbol: string }) {
   const max = depth ? Math.max(1, ...depth.bids.map((b: any) => b.size), ...depth.asks.map((a: any) => a.size)) : 1;
   return (
     <section className="panel depth" aria-label="Depth and trades">
-      <h3>Depth <span className="tag">simulated depth</span></h3>
+      <h3>Depth <span className="tag">{depth && depth.simulated === false ? `order book · ${depth.source || "provider"}` : "simulated depth"}</span></h3>
       <div className="ladder">
         <table className="tight">
           <thead><tr><th className="num">Size</th><th className="num">Bid</th><th>Ask</th><th>Size</th></tr></thead>
@@ -109,8 +116,8 @@ export function DepthTape({ symbol }: { symbol: string }) {
               return (
                 <tr key={i}>
                   <td className="num bar-cell"><i className="bar bid" style={{ width: `${(b.size / max) * 100}%` }} />{qty(b.size)}</td>
-                  <td className="num up">{money(b.price)}</td>
-                  <td className="down">{money(a?.price)}</td>
+                  <td className="num up">{price(b.price)}</td>
+                  <td className="down">{price(a?.price)}</td>
                   <td className="bar-cell"><i className="bar ask" style={{ width: `${((a?.size || 0) / max) * 100}%` }} />{qty(a?.size)}</td>
                 </tr>
               );
@@ -125,7 +132,7 @@ export function DepthTape({ symbol }: { symbol: string }) {
           <tbody>
             {(trades || []).map((t, i) => (
               <tr key={i}><td className="muted">{time(t.ts)}</td>
-                <td className={"num " + (t.side === "buy" ? "up" : t.side === "sell" ? "down" : "")}>{money(t.price)}</td>
+                <td className={"num " + (t.side === "buy" ? "up" : t.side === "sell" ? "down" : "")}>{price(t.price)}</td>
                 <td className="num">{qty(t.size)}</td></tr>
             ))}
             {trades && trades.length === 0 && <tr><td colSpan={3} className="muted">No trades yet.</td></tr>}

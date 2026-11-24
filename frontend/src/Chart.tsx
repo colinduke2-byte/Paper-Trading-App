@@ -119,6 +119,10 @@ export function Chart({ symbol, quote, position, orders }: { symbol: string; quo
         const rawTimes = raw.map((b) => b.time);
         const bars = raw.map((b) => ({ ...b, time: b.time + shift }));
         candles.setData(bars as any);
+        // Small prices (crypto pairs under $1) need more decimals on the price scale.
+        const lastClose = bars.length ? Math.abs(bars[bars.length - 1].close) : 1;
+        const precision = lastClose >= 1 ? 2 : lastClose >= 0.01 ? 4 : 6;
+        candles.applyOptions({ priceFormat: { type: "price", precision, minMove: Math.pow(10, -precision) } });
         volume.setData(bars.map((b) => ({ time: b.time, value: b.volume, color: b.close >= b.open ? "#2fbf7155" : "#ef535055" })) as any);
         series.sma20?.setData(sma(bars, 20));
         series.sma50?.setData(sma(bars, 50));

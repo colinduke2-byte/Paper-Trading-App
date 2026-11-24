@@ -51,6 +51,7 @@ from itertools import count
 from typing import Optional
 
 from ..core import models as m
+from ..core.assets import is_crypto
 from ..core.models import Fill, Order
 from ..core.money import CENT, ZERO, D, cents
 from ..ledger.ledger import CASH
@@ -179,7 +180,7 @@ class LifecycleManager:
                 if nxt.month != d.month:
                     self._post_accruals(a, now, d)
             # Ask the feed for this day only, after earlier days' actions were applied to it.
-            acts = [x for x in self.ex.feed.corporate_actions(nxt, nxt) if x.ex_date == nxt]
+            acts = [x for x in self.ex.feed.corporate_actions(nxt, nxt) if x.ex_date == nxt and not is_crypto(x.symbol)]
             self._start_of_day(nxt, sorted(acts, key=lambda x: (x.kind != SPLIT, x.symbol)), now)
             d = nxt
             self.last_date = d
@@ -361,8 +362,8 @@ class LifecycleManager:
 
     # ---- fills -----------------------------------------------------------------------
     def on_fill(self, a, fill: Fill) -> None:
-        if fill.kind not in SETTLING_KINDS:
-            return
+        if fill.kind not in SETTLING_KINDS or is_crypto(fill.symbol):
+            return  # crypto settles at once and does not count as a day trade
         day = self.days.today(fill.ts)
         txn = a.ledger.transactions[-1] if a.ledger.transactions else None
         cash = sum((v for acct, v in txn.postings if acct == CASH), ZERO) if txn and txn.ref == fill.id else ZERO
@@ -434,7 +435,7 @@ class LifecycleManager:
         """Reason to reject the order, or None. `worst` is the exchange's worst-case check; it is None
         for an order that only closes part of a position, and closing orders are never blocked here."""
         s = a.settings
-        if worst is not None and self.pdt_restricted(a):
+        if worst is not None and not is_crypto(order.symbol) and self.pdt_restricted(a):
             _, _, eq, _ = self._state(a)
             n = self.day_trade_count(a)
             release = self._pdt_release_date(a)
@@ -617,7 +618,7 @@ class LifecycleManager:
                 side = m.SELL if q > 0 else m.BUY
                 o = Order(id=f"O{next(ex._order_seq):08d}", account_id=a.id, symbol=sym, side=side, qty=qty,
                           type=m.MARKET, tif=m.DAY, role="liquidation")
-                ex._handle(ex.engine.submit(o, ex.quote(sym), now, ex.session(now)))
+                ex._handle(ex.engine.submit(o, ex.quote(sym), now, ex.session_for(sym, now)))
             a.life.liquidation_paused = False
             _, _, eq_after, maint_after = self._state(a)
             steps.append({"symbol": sym, "side": side, "qty": qty, "requirement_before": maint,

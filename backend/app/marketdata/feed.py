@@ -4,6 +4,7 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Optional
 
+from ..core.assets import round_to, spec_from_info
 from ..core.models import Quote
 from ..core.money import CENT, ZERO, D, cents
 
@@ -101,11 +102,18 @@ class MarketDataProvider:
         if q is None:
             return {"simulated": True, "bids": [], "asks": []}
         tick = CENT if q.last < 50 else CENT * (1 + int(q.last / 100))
+        size_step = Decimal(1)
+        info = self.info.get(symbol) or {}
+        if info.get("type") == "crypto":  # finer prices and fractional sizes
+            spec = spec_from_info(symbol, info)
+            tick = max(spec.price_increment, round_to(q.last * Decimal("0.0002"), spec.price_increment))
+            size_step = spec.qty_increment
+        sz = (lambda v: v.quantize(Decimal(1))) if size_step == 1 else (lambda v: round_to(v, size_step))
         bids, asks = [], []
         for i in range(levels):
             scale = Decimal(1) + Decimal(i) * Decimal("0.6") + Decimal((hash((symbol, i, int(q.ts) // 5)) % 7)) / 10
-            bids.append({"price": q.bid - tick * i, "size": (q.bid_size * scale).quantize(Decimal(1))})
-            asks.append({"price": q.ask + tick * i, "size": (q.ask_size * scale).quantize(Decimal(1))})
+            bids.append({"price": q.bid - tick * i, "size": sz(q.bid_size * scale)})
+            asks.append({"price": q.ask + tick * i, "size": sz(q.ask_size * scale)})
         return {"simulated": True, "bids": [b for b in bids if b["price"] > 0], "asks": asks}
 
     def _record_print(self, q: Quote) -> None:

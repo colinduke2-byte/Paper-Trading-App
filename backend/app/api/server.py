@@ -18,6 +18,7 @@ from ..exchange import Exchange, OrderRejected
 from ..marketdata.feed import TIMEFRAMES
 from ..marketdata.synthetic import SyntheticFeed
 from ..options import chain as optchain
+from ..core.assets import asset_class
 from ..options.symbology import describe, parse as parse_option
 
 
@@ -50,6 +51,7 @@ def quote_row(ex: Exchange, symbol: str) -> Optional[dict]:
 def order_row(o) -> dict:
     row = plain(o)
     row["description"] = describe(o.symbol)
+    row["asset_class"] = asset_class(o.symbol)
     return row
 
 
@@ -57,8 +59,16 @@ def default_exchange() -> Exchange:
     from ..marketdata.config import attach, select_feed
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
     # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
-    sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
-    ex = Exchange(sel.feed, data_dir=sel.data_dir, session_mode=sel.session_mode)
+    # PAPERDESK_CLOCK_START (tests and demos, simulated prices only): run the clock from another time,
+    # for example a weekend, at normal speed.
+    from ..core.clock import OffsetClock, parse_start
+    start = os.environ.get("PAPERDESK_CLOCK_START", "").strip()
+    clock = OffsetClock(parse_start(start)) if start else None
+    sel = select_feed(clock.now() if clock else time.time(), data_dir,
+                      synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
+    if clock is not None and not sel.feed.simulated:
+        clock = None  # real market data always runs on real time
+    ex = Exchange(sel.feed, clock=clock, data_dir=sel.data_dir, session_mode=sel.session_mode)
     attach(sel, ex)
     if not ex.load() or not ex.accounts:
         ex.create_account("Margin account", "margin", Decimal("100000"))
@@ -200,12 +210,12 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return status()
 
     @app.get("/api/symbols")
-    def symbols(q: str = ""):
+    def symbols(q: str = "", asset_class: str = ""):
         ex = ctx.ex
         q = q.upper().strip()
-        rows = [{"symbol": s, "name": i["name"], "sector": i["sector"], "type": i.get("type", "stock")}
-                for s, i in ex.feed.symbols().items()
-                if not q or q in s or q in i["name"].upper()]
+        rows = [{"symbol": s, "name": i["name"], "sector": i["sector"], "type": i.get("type", "stock"),
+                 "asset_class": ex.asset_class(s)} for s, i in ex.feed.symbols().items()
+                if (not q or q in s or q in i["name"].upper()) and (not asset_class or ex.asset_class(s) == asset_class)]
         return sorted(rows, key=lambda r: (not r["symbol"].startswith(q), r["symbol"]))
 
     @app.get("/api/quotes")
@@ -224,24 +234,24 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             raise KeyError(f"unknown symbol {symbol}")
         return symbol
 
-    @app.get("/api/bars/{symbol}")
+    @app.get("/api/bars/{symbol:path}")
     def bars(symbol: str, tf: str = "1d", limit: int = Query(500, ge=1, le=5000)):
         ex = ctx.ex
         if tf not in TIMEFRAMES:
             raise ValueError(f"timeframe must be one of {', '.join(TIMEFRAMES)}")
         return ex.feed.bars(_stock(symbol), tf, limit)
 
-    @app.get("/api/depth/{symbol}")
+    @app.get("/api/depth/{symbol:path}")
     def depth(symbol: str):
         ex = ctx.ex
         return plain(ex.feed.depth(_stock(symbol)))
 
-    @app.get("/api/trades/{symbol}")
+    @app.get("/api/trades/{symbol:path}")
     def trades(symbol: str, limit: int = Query(50, ge=1, le=200)):
         ex = ctx.ex
         return plain(ex.feed.trades(_stock(symbol), limit))
 
-    @app.get("/api/fundamentals/{symbol}")
+    @app.get("/api/fundamentals/{symbol:path}")
     def fundamentals(symbol: str):
         ex = ctx.ex
         symbol = _stock(symbol)
@@ -252,7 +262,9 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         daily = ex.feed.bars(symbol, "1d", 252)
         eps, div = info.get("eps", 0), info.get("dividend", 0)
         vols = [b["volume"] for b in daily[-30:]]
-        return {"symbol": symbol, "name": info["name"], "sector": info["sector"], "type": info.get("type", "stock"),
+        crypto = {k: info[k] for k in ("qty_increment", "price_increment", "min_order_size", "base") if k in info}
+        return {**crypto, "asset_class": ex.asset_class(symbol),
+                "symbol": symbol, "name": info["name"], "sector": info["sector"], "type": info.get("type", "stock"),
                 "market_cap": last * info.get("shares_outstanding", 0), "shares_outstanding": info.get("shares_outstanding"),
                 "eps": eps, "pe": last / eps if eps and eps > 0 else None, "dividend": div,
                 "dividend_yield_pct": div / last * 100 if last else None,
@@ -275,10 +287,12 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     def screener(sector: str = "", min_price: Optional[float] = None, max_price: Optional[float] = None,
                  min_change_pct: Optional[float] = None, max_change_pct: Optional[float] = None,
                  min_volume: Optional[float] = None, max_pe: Optional[float] = None,
-                 min_dividend_yield: Optional[float] = None):
+                 min_dividend_yield: Optional[float] = None, asset_class: str = ""):
         ex = ctx.ex
         out = []
         for s, info in ex.feed.symbols().items():
+            if asset_class and ex.asset_class(s) != asset_class:
+                continue
             r = quote_row(ex, s)
             if not r:
                 continue
@@ -300,6 +314,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             if min_dividend_yield is not None and dy < min_dividend_yield:
                 continue
             out.append({"symbol": s, "name": info["name"], "sector": info["sector"], "last": r["last"],
+                        "asset_class": ex.asset_class(s),
                         "change_pct": r.get("change_pct"), "volume": r["volume"], "pe": pe, "dividend_yield_pct": dy,
                         "market_cap": r["last"] * info.get("shares_outstanding", 0)})
         return sorted(out, key=lambda r: r["market_cap"], reverse=True)
@@ -308,7 +323,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     @app.get("/api/options/expirations/{symbol}")
     def expirations(symbol: str):
         ex = ctx.ex
-        _stock(symbol)
+        if ex.asset_class(_stock(symbol)) == "crypto":
+            return []  # crypto pairs have no listed options
         today = cal.ny_date(ex.now())
         listed = ex.feed.option_expirations(symbol.upper()) or optchain.expirations(today)
         return [{"date": d.isoformat(), "dte": (d - today).days} for d in listed

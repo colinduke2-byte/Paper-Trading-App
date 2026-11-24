@@ -108,7 +108,8 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
 
 
 def _alpaca(now, data_dir, environ, key, secret, start, **kw):
-    from .alpaca import PAPER_TRADING_URL, AlpacaFeed
+    from .alpaca import PAPER_TRADING_URL
+    from .alpaca_crypto import AlpacaCryptoFeed as AlpacaFeed  # stocks and options as before, plus crypto pairs
     from .finnhub import FinnhubClient
     from .http import ProviderError
     from .research import ResearchHub
@@ -117,7 +118,8 @@ def _alpaca(now, data_dir, environ, key, secret, start, **kw):
         feed = AlpacaFeed(key, secret, feed=environ.get("PAPERDESK_ALPACA_FEED", "iex").strip().lower(),
                           options_feed=environ.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative").strip().lower(),
                           trading_url=environ.get("APCA_API_BASE_URL", PAPER_TRADING_URL).strip().rstrip("/"),
-                          rpm=float(environ.get("PAPERDESK_ALPACA_RPM", "190")), data_dir=live_dir, **kw)
+                          rpm=float(environ.get("PAPERDESK_ALPACA_RPM", "190")), data_dir=live_dir,
+                          crypto_loc=environ.get("PAPERDESK_ALPACA_CRYPTO_LOC", "us").strip().lower(), **kw)
     except ValueError as e:
         return f"Alpaca settings are invalid: {e}. Using simulated prices."
     try:

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
-import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
+import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, price, qty, signed, STATUS, TIFS, tone, usd } from "./util";
 
 const TABS = ["Positions", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
@@ -42,10 +42,11 @@ function Positions({ positions, onSelect, onClose }: any) {
       <tbody>
         {positions.map((x: any) => (
           <tr key={x.symbol}>
-            <td><button className="link" onClick={() => onSelect(x.underlying || x.symbol)}>{x.description}</button></td>
+            <td><button className="link" onClick={() => onSelect(x.underlying || x.symbol)}>{x.description}</button>
+              {x.asset_class === "crypto" && <span className="tag" title="Crypto: fully paid, trades 24/7">Crypto</span>}</td>
             <td className={"num " + tone(x.qty)}>{qty(x.qty)}</td>
-            <td className="num">{money(x.avg_cost)}</td>
-            <td className="num">{money(x.mark)}</td>
+            <td className="num">{price(x.avg_cost)}</td>
+            <td className="num">{price(x.mark)}</td>
             <td className="num">{usd(x.market_value)}</td>
             <td className={"num " + tone(x.day_pnl)}>{x.day_pnl == null ? "–" : signed(x.day_pnl)}</td>
             <td className={"num " + tone(x.unrealized_pnl)}>{signed(x.unrealized_pnl)}</td>
@@ -61,8 +62,8 @@ function Positions({ positions, onSelect, onClose }: any) {
 function orderPrice(o: any) {
   if (o.type === "trailing_stop") return `trail ${o.trail_amount != null ? "$" + money(o.trail_amount) : o.trail_percent + "%"}${o.stop_price != null ? ` (stop ${money(o.stop_price)})` : ""}`;
   const parts: string[] = [];
-  if (o.stop_price != null) parts.push(`stop ${money(o.stop_price)}`);
-  if (o.limit_price != null) parts.push(`limit ${money(o.limit_price)}`);
+  if (o.stop_price != null) parts.push(`stop ${price(o.stop_price)}`);
+  if (o.limit_price != null) parts.push(`limit ${price(o.limit_price)}`);
   return parts.join(", ") || "market";
 }
 
@@ -101,7 +102,7 @@ function Orders({ accountId, orders, onChanged, notify, onSelect }: any) {
                 <td>{ORDER_TYPES[o.type]}{o.role ? ` (${o.role.replace("_", " ")})` : ""}</td>
                 <td>{orderPrice(o)}</td>
                 <td>{TIFS[o.tif]}</td>
-                <td className="num">{o.avg_fill_price == null ? "–" : money(o.avg_fill_price, o.avg_fill_price < 1 ? 4 : 2)}</td>
+                <td className="num">{o.avg_fill_price == null ? "–" : price(o.avg_fill_price)}</td>
                 <td title={o.reason || undefined}>{STATUS[o.status] || o.status}{o.reason && o.status !== "filled" ? <span className="muted"> · {o.reason}</span> : null}</td>
                 <td className="num">{active(o) && <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button>}</td>
               </tr>
@@ -125,7 +126,7 @@ function Fills({ accountId, refreshKey }: any) {
         {rows.map((f) => (
           <tr key={f.id}><td className="muted">{dateTime(f.ts)}</td><td>{f.description}</td>
             <td className={f.side === "buy" ? "up" : "down"}>{f.side === "buy" ? "Buy" : "Sell"}</td>
-            <td className="num">{qty(f.qty)}</td><td className="num">{money(f.price, f.price < 1 && f.price > 0 ? 4 : 2)}</td>
+            <td className="num">{qty(f.qty)}</td><td className="num">{price(f.price)}</td>
             <td className="num">{money(f.fee)}</td><td>{f.kind}</td></tr>
         ))}
       </tbody>
@@ -167,7 +168,7 @@ function Alerts({ notify, refreshKey }: any) {
   return (
     <>
       <div className="toolbar">
-        <input value={symbol} placeholder="Symbol" aria-label="Alert symbol" onChange={(e) => setSymbol(e.target.value.toUpperCase())} style={{ width: 90 }} />
+        <input value={symbol} placeholder="Symbol" aria-label="Alert symbol" onChange={(e) => setSymbol(e.target.value.toUpperCase())} style={{ width: 130 }} />
         <select value={op} aria-label="Condition" onChange={(e) => setOp(e.target.value)}><option value="above">rises to</option><option value="below">falls to</option></select>
         <input value={price} placeholder="Price" aria-label="Alert price" inputMode="decimal" onChange={(e) => setPrice(e.target.value)} style={{ width: 90 }} />
         <button className="ghost sm" onClick={add} disabled={!symbol || !price}>Add alert</button>
@@ -177,7 +178,7 @@ function Alerts({ notify, refreshKey }: any) {
           <thead><tr><th>Symbol</th><th>Condition</th><th>Status</th><th /></tr></thead>
           <tbody>
             {alerts.map((a) => (
-              <tr key={a.id}><td><b>{a.symbol}</b></td><td>{a.op === "above" ? "Rises to" : "Falls to"} {money(Number(a.price))}</td>
+              <tr key={a.id}><td><b>{a.symbol}</b></td><td>{a.op === "above" ? "Rises to" : "Falls to"} {a.price}</td>
                 <td>{a.triggered_at ? `Triggered ${dateTime(a.triggered_at)}` : "Waiting"}</td>
                 <td className="num"><button className="ghost sm" onClick={async () => { await api(`/alerts/${a.id}`, { method: "DELETE" }).catch(() => {}); reload(); }}>Remove</button></td></tr>
             ))}
@@ -189,7 +190,7 @@ function Alerts({ notify, refreshKey }: any) {
 }
 
 function Screener({ onSelect }: any) {
-  const [f, setF] = useState({ sector: "", min_price: "", max_price: "", min_change_pct: "", max_pe: "", min_dividend_yield: "" });
+  const [f, setF] = useState({ asset_class: "", sector: "", min_price: "", max_price: "", min_change_pct: "", max_pe: "", min_dividend_yield: "" });
   const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
   const [rows, error] = usePoll<any[]>(`/screener?${qs}`, 5000);
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
@@ -197,6 +198,9 @@ function Screener({ onSelect }: any) {
   return (
     <>
       <div className="toolbar">
+        <select value={f.asset_class} aria-label="Asset class" onChange={set("asset_class")}>
+          <option value="">All asset classes</option><option value="stock">Stocks and funds</option><option value="crypto">Crypto</option>
+        </select>
         <select value={f.sector} aria-label="Sector" onChange={set("sector")}>
           <option value="">All sectors</option>
           {["Technology", "Health Care", "Financials", "Energy", "Consumer", "Industrials", "Utilities", "Communication", "ETF"].map((s) => <option key={s}>{s}</option>)}
@@ -212,10 +216,10 @@ function Screener({ onSelect }: any) {
           <tbody>
             {rows.map((r) => (
               <tr key={r.symbol} className="click" onClick={() => onSelect(r.symbol)}>
-                <td><b>{r.symbol}</b></td><td>{r.name}</td><td className="muted">{r.sector}</td><td className="num">{money(r.last)}</td>
+                <td><b>{r.symbol}</b></td><td>{r.name}</td><td className="muted">{r.sector}</td><td className="num">{price(r.last)}</td>
                 <td className={"num " + tone(r.change_pct)}>{pct(r.change_pct)}</td><td className="num">{compact(r.volume)}</td>
                 <td className="num">{r.pe == null ? "–" : r.pe.toFixed(1)}</td><td className="num">{r.dividend_yield_pct.toFixed(2)}%</td>
-                <td className="num">{compact(r.market_cap)}</td></tr>
+                <td className="num">{r.asset_class === "crypto" ? "–" : compact(r.market_cap)}</td></tr>
             ))}
           </tbody>
         </table>
