@@ -33,6 +33,7 @@ MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be l
 CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its intrinsic value, not exercised
 RUNNING_GAP = 120  # seconds: a longer gap between two ticks means the simulator was not running (or was paused)
 CLOSE_WAIT = 120  # seconds to wait for the provider's daily close before settling at an approximate price
+PROVIDER_CLOSE_WAIT = 1800  # seconds to wait for feed.closing_price to become ready before approximating
 
 
 def _in_range(*values) -> None:
@@ -1188,9 +1189,11 @@ class Exchange:
 
         The settlement price is the underlying's closing price on the expiry date:
         - the simulator was running at the close: the last regular-session price it saw;
-        - otherwise the daily bar for that date in the feed's bar store (synthetic and replay feeds);
-        - otherwise, for a live feed, the provider's daily bar for that date, fetched in the background
-          (never on the tick path) for up to CLOSE_WAIT seconds;
+        - otherwise the feed's closing_price(symbol, day) when it has that method (it never blocks; "not
+          ready" is asked again on later ticks for up to PROVIDER_CLOSE_WAIT seconds);
+        - for a feed without it: the daily bar for that date in the feed's bar store (synthetic and replay
+          feeds), or for a live feed the provider's daily bar fetched in the background (never on the
+          tick path) for up to CLOSE_WAIT seconds;
         - otherwise the first price available now, marked as approximate.
         Never a missing or zero price: while there is none, the contracts wait.
         """
@@ -1203,14 +1206,27 @@ class Exchange:
             q = self._session_quotes.get(u) or self.feed.quote(u)
             if q is not None and q.last > 0:
                 result = (q.last, True, f"{u} closed at {q.last:f} on {iso}")
-        if result is None:
+        closing_price = getattr(self.feed, "closing_price", None)  # MarketDataProvider.closing_price (provider stream)
+        if result is None and closing_price is not None:
+            asked = self._close_fetches.setdefault(key, {"started": now, "done": False})
+            try:
+                cp = closing_price(u, c.expiry)
+            except Exception:  # a provider fault: treat as "no close available"
+                cp = None
+            if cp is not None and not cp.ready and now - asked["started"] < PROVIDER_CLOSE_WAIT:
+                return None  # the feed is fetching it off the tick path: ask again on a later tick
+            if cp is not None and cp.ready and cp.price is not None and cp.price > 0:
+                px = cents(D(cp.price))
+                result = (px, True, f"{u} closed at {px:f} on {iso}" + (f" ({cp.note})" if cp.note else ""))
+            asked["done"] = True
+        elif result is None:
             day_ts = int((c.expiry - date(1970, 1, 1)).total_seconds())
             for r in reversed(self.feed.store.daily.get(u) or ()):
                 if r[0] == day_ts and r[4] > 0:
                     px = cents(D(repr(r[4])))
                     result = (px, True, f"{u} closed at {px:f} on {iso}")
                     break
-        if result is None and not self.feed.simulated:
+        if result is None and closing_price is None and not self.feed.simulated:
             fetch = self._close_fetches.get(key)
             if fetch is None:
                 fetch = self._close_fetches[key] = {"started": now, "done": False}

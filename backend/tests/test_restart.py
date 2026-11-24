@@ -458,3 +458,36 @@ def test_reset_keeps_settings_and_lot_method_and_validates_the_starting_cash():
     assert new.cash == D("5000")
     with pytest.raises(ValueError):
         ex.create_account("x", "margin", D("0.001"))
+
+
+def test_feed_closing_price_is_used_when_the_feed_has_it():
+    from collections import namedtuple
+    ClosePrice = namedtuple("ClosePrice", "ready price note")
+
+    class CloseFeed(LiveLikeFeed):
+        answer = ClosePrice(False, None, "")
+
+        def closing_price(self, symbol, day):
+            return self.answer
+
+    tmp, a, exp, put, call = _book()
+    feed = CloseFeed(INFO)
+    ex = _restart(tmp, parse(put).expiry_ts + 86400, feed)
+    feed.set_quote("ABC", "49.99", "50.00", "50.00")
+    ex.tick()
+    assert len(ex.account(a).positions()) == 3  # not ready yet: wait, do not settle at 50
+    feed.answer = ClosePrice(True, D("100.00"), "provider daily bar")
+    ex.clock.advance(1)
+    ex.tick()
+    acc = ex.account(a)
+    assert acc.positions() == {"ABC": D(200)} and feed.bar_calls == 0
+    assert "ABC closed at 100.00 on" in acc.ledger.transactions[-1].memo
+
+    tmp, a, exp, put, call = _book()
+    feed = CloseFeed(INFO)
+    feed.answer = ClosePrice(True, None, "no bar")  # no close for that day: approximate, with a notice
+    ex = _restart(tmp, parse(put).expiry_ts + 86400, feed)
+    feed.set_quote("ABC", "84.99", "85.00", "85.00")
+    ex.tick()
+    assert ex.account(a).positions() == {}
+    assert any("approximate price" in m for _, k, m in ex.account(a).life.log if k == "expiration")
