@@ -3,13 +3,13 @@ import { test, expect, createAccount, ticket, bottomTab } from "./fixtures";
 // Phone profiles (see playwright.config.ts). Tests that fail on today's layout are marked test.fixme with
 // the reason; the mobile UI stream is expected to fix the layout and remove the marks.
 
-const BOTTOM = [/^Positions/, /^Orders/, "Fills", "Activity", "Performance", "Alerts", "Screener"];
+const BOTTOM = [/^Positions/, /^Orders/, "Fills", "Activity", "Reports", "Alerts", "Screener"];
 const overflow = (page: any) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 
 test("no horizontal page scroll on any view", async ({ page, open }) => {
   await open();
   expect(await overflow(page), "on load").toBeLessThanOrEqual(0);
-  for (const view of ["Options", "Company", "Chart"]) {
+  for (const view of ["Options", "Company", "Research", "Chart"]) {
     await page.getByRole("tab", { name: view }).tap();
     expect(await overflow(page), `view ${view}`).toBeLessThanOrEqual(0);
   }

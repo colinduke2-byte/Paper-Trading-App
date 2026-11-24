@@ -51,34 +51,45 @@ Docker daemon available, so treat the first `docker compose up --build` as its f
 
 ## What works
 
+- **Market data:** simulated prices for fictional companies by default. With Alpaca keys the app
+  uses real stock and option quotes (IEX real time on the free plan), with Finnhub optional for
+  earnings and fundamentals; it falls back to simulated prices and says why. Setup:
+  `docs/DATA_PROVIDERS.md`. Every quote is labelled with its source; option prices without provider
+  data are model prices.
 - **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute
-  to weekly) with SMA, EMA, Bollinger bands, VWAP and RSI, simulated depth ladder,
-  time and sales, company facts, screener.
-- **Orders:** market, limit, stop, stop-limit and trailing stop (amount or percent);
-  day, good-till-canceled, immediate-or-cancel and fill-or-kill; bracket orders with
-  take profit and stop loss; order preview, change and cancel; fractional shares.
-- **Fill simulation:** fills against the live quote, partial fills limited by the
-  displayed size, market orders that walk a synthetic book, stops triggered by trades.
-- **Accounts:** cash and margin accounts, several at once, reset; buying power, Reg T
-  style initial and maintenance margin, short selling, margin-call warning.
+  to weekly) with SMA, EMA, Bollinger bands, VWAP and RSI, depth ladder, time and sales,
+  company facts, screener, and a Research tab (news, earnings and dividend calendar,
+  corporate actions, fundamentals; real data needs a provider).
+- **Orders:** market, limit, stop, stop-limit and trailing stop; market and limit on open
+  and on close; day, good-till-canceled, good-till-date, immediate-or-cancel and
+  fill-or-kill; brackets, one-cancels-other groups and one-triggers-other chains; order
+  preview, change and cancel; fractional shares.
 - **Options:** chains with weekly and monthly expiries, implied volatility and greeks,
-  single-leg buying and writing, covered calls, cash-secured puts, uncovered-option
-  margin, automatic exercise and assignment at expiry.
-- **Records:** positions with FIFO lots, order and fill history, a double-entry ledger,
-  realised and unrealised profit and loss, performance statistics, price alerts.
+  single-leg trades and multi-leg orders (two to four legs, all-or-none at a net price)
+  with payoff preview and strategy-aware margin for spreads, condors, butterflies and
+  calendars; automatic exercise and assignment at expiry.
+- **Accounts:** cash and margin accounts, several at once, reset; Reg T style margin and
+  buying power, short selling. Per-account settings (Settings button) for dividend
+  reinvestment, T+1 settlement and the settled-cash rule, the pattern day trader rule,
+  margin interest and short borrow fees with their rates, and margin-call liquidation
+  after a grace period.
+- **Corporate actions:** splits (lots, options and open orders adjusted or canceled, cash
+  in lieu) and dividends; the simulated feed schedules them for its companies.
+- **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO,
+  LIFO or highest-cost matching, realised gains report with holding period and
+  wash-sale flag, monthly statements, CSV export, trade journal, performance analytics
+  (Reports tab), price alerts.
+- **Historical replay:** replay a recorded or bundled session in a sandbox account with a
+  simulated clock (`docs/REPLAY.md`); live state is never touched.
 
 ## What is not built yet
 
 See `docs/PLAN.md` for the full plan. Still to do:
 
-- Real market data (the provider interface is in `backend/app/marketdata/feed.py`;
-  a live adapter needs an API key).
-- Multi-leg option orders, early assignment, American-style pricing.
-- Dividends, splits, margin interest, borrow fees, settlement dates, the pattern day
-  trader rule, forced liquidation on a margin call.
-- Market-on-open/close orders, good-till-date, standalone one-cancels-other orders.
-- News, calendars, real fundamentals, statements, tax-lot method choice, CSV export.
-- Historical replay mode, chart drawing tools, logins.
+- Corporate actions from a real provider (Alpaca's are shown in Research but not applied
+  to accounts; only the simulated feed's are).
+- Early assignment, American-style pricing.
+- Chart drawing tools, logins.
 
 ## Develop
 
