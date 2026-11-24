@@ -393,19 +393,6 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return [{"id": t.id, "ts": t.ts, "kind": t.kind, "memo": t.memo,
                  "postings": [[a, float(v)] for a, v in t.postings]} for t in txns][::-1]
 
-    @app.get("/api/accounts/{aid}/closed")
-    def closed(aid: str):
-        ex = ctx.ex
-        return [dict(c, description=describe(c["symbol"]), qty=float(c["qty"]), open_price=float(c["open_price"]),
-                     close_price=float(c["close_price"]), pnl=float(c["pnl"])) for c in ex.account(aid).closed][::-1]
-
-    @app.get("/api/accounts/{aid}/performance")
-    def performance(aid: str):
-        ex = ctx.ex
-        perf = ex.performance(aid)
-        perf["equity_curve"] = [[t, float(e)] for t, e in perf["equity_curve"]]
-        return plain(perf)
-
     @app.post("/api/accounts/{aid}/orders/preview")
     def preview(aid: str, body: dict = Body(...)):
         ex = ctx.ex

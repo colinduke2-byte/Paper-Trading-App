@@ -255,29 +255,6 @@ class Exchange:
             rows = [o for o in rows if not o.active]
         return sorted(rows, key=lambda o: (o.created_at, o.id), reverse=True)
 
-    def performance(self, account_id: str) -> dict:
-        a = self.account(account_id)
-        pnls = [D(c["pnl"]) for c in a.closed]
-        wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p < 0]
-        gross_win, gross_loss = sum(wins, ZERO), -sum(losses, ZERO)
-        peak, max_dd = a.starting_cash, ZERO
-        for _, e in a.equity_history:
-            e = D(e)
-            peak = max(peak, e)
-            if peak > 0:
-                max_dd = max(max_dd, (peak - e) / peak)
-        s = self.summary(account_id)
-        return {"closed_trades": len(pnls), "wins": len(wins), "losses": len(losses),
-                "win_rate": float(len(wins) / len(pnls) * 100) if pnls else None,
-                "average_win": cents(gross_win / len(wins)) if wins else None,
-                "average_loss": cents(-gross_loss / len(losses)) if losses else None,
-                "profit_factor": float(gross_win / gross_loss) if gross_loss else None,
-                "largest_win": max(wins) if wins else None, "largest_loss": min(losses) if losses else None,
-                "realized_pnl": a.realized, "fees": a.fees_paid,
-                "total_return_pct": float((s["equity"] - a.starting_cash) / a.starting_cash * 100),
-                "max_drawdown_pct": float(max_dd * 100), "equity_curve": a.equity_history}
-
     # ---- order entry -----------------------------------------------------
     def _check_symbol(self, account: Account, symbol: str):
         """Reject an unknown or unlisted symbol. Returns the option contract, or None for a stock."""

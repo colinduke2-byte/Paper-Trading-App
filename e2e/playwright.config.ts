@@ -1,5 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -11,6 +11,11 @@ process.env.E2E_DATA ||= mkdtempSync(join(tmpdir(), "paperdesk-e2e-"));
 process.env.E2E_AUTH_PORT ||= String(Number(process.env.E2E_PORT) + 1);
 process.env.E2E_AUTH_DATA ||= mkdtempSync(join(tmpdir(), "paperdesk-e2e-auth-"));
 process.env.E2E_PASSCODE ||= "e2e passcode 2468";
+// An empty settings file, so a developer's .env (Alpaca or Finnhub keys, access settings) never reaches the servers.
+if (!process.env.E2E_ENV_FILE) {
+  process.env.E2E_ENV_FILE = join(mkdtempSync(join(tmpdir(), "paperdesk-e2e-env-")), "empty.env");
+  writeFileSync(process.env.E2E_ENV_FILE, "");
+}
 
 const port = process.env.E2E_PORT;
 const authPort = process.env.E2E_AUTH_PORT;
@@ -20,15 +25,21 @@ const python = process.env.E2E_PYTHON || (existsSync(venvPython) ? venvPython : 
 // A pre-installed browser can be used instead of the one Playwright downloads.
 const executablePath = process.env.E2E_CHROMIUM || undefined;
 
-// Shared by both servers. The access settings are cleared so a developer's shell cannot change the tests.
+// Shared by both servers. The access settings are cleared so a developer's shell cannot change the tests, and
+// the feed is the synthetic one with every provider key blank (variables already set win over .env), so an
+// e2e run never sends a request to a market data provider.
 const common = {
+  PAPERDESK_FEED: "synthetic",
+  APCA_API_KEY_ID: "",
+  APCA_API_SECRET_KEY: "",
+  FINNHUB_API_KEY: "",
   PAPERDESK_UI: join(root, "frontend", "dist"),
   PAPERDESK_SESSIONS: "always",
   PAPERDESK_SEED: "7",
   PAPERDESK_LAN: "",
   PAPERDESK_PASSCODE: "",
   PAPERDESK_LOOPBACK_BYPASS: "",
-  PAPERDESK_ENV_FILE: "",
+  PAPERDESK_ENV_FILE: process.env.E2E_ENV_FILE!,
 };
 
 function phone(name: string) {
