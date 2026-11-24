@@ -183,3 +183,28 @@ Combine and merge PRs 13-18 and the fix branches; a second release-candidate rev
 update the user guide and in-app Help for the new order types, strategy builder, lots, alerts, crypto
 and research; specific follow-ups listed in each PR's "descoped" section; tag a release only with the
 owner's go.
+
+## Updates after the first version of this note
+
+- 05:07 UTC: PR 15 (alerts and notification centre) MERGED to main; bundled UI rebuilt (main at 8934a60).
+  All 8 checks were green on the PR head.
+- PR 14 (crypto): all 8 checks green; waiting only for its independent review
+  (session_01ByytwYbp7KirUmqTTP1QTN).
+- PR 19 (stream/backup -> main, head 9a03465) opened: state format v2 with append-only segment files,
+  rotating backups, download/restore, migrations with fixtures from earlier builds, data-directory
+  lock, recovery mode instead of overwriting a damaged state file. Author reports 480 backend tests and
+  88 e2e. For the thread-safety work: `ex.save_plan()` is pure serialisation (call under the lock) and
+  `ex.write_plan(plan)` is I/O only (call outside it). Not yet reviewed; it reworks persistence, so it
+  needs an independent review before merging. Its Windows paths (msvcrt lock) only run in CI.
+- PR 13 (lots) review finished: APPROVE WITH FIXES, no ledger corruption. Findings sent to the lots
+  session (session_01ByytwcAyVLJZvZxFGivyho) to fix: (1) `_cancel_broken_lot_orders` checks each order
+  alone, so two orders naming parts of one lot can over-reserve it and one can open a short;
+  (2) same-tick race only partly fixed: a plain sell entered first can take a named lot and the lot
+  order then opens a short or closes unnamed lots (book lot-order fills first within a batch and never
+  fill beyond what the named lots hold); (3) wash sale can use a replacement share twice
+  (`analytics/wash.py` ~158); (4) wash analysis is quadratic and runs on every lots/gains request;
+  (5) huge lot quantity returns HTTP 500; (6) `"lots": []` silently ignored; (7) Ticket.tsx sums lot
+  quantities as floats. Merge PR 13 only after these are fixed.
+- PR 18 (ticket UI) opened by its author; see the open pull request table.
+- Since alerts merged, PRs 13, 14, 16, 17, 18 and 19 each need main merged in again (or go through
+  the `integration/wave2` integrator as described above; add 19 backup after 17 in the order).
