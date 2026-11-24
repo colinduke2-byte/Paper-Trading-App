@@ -75,14 +75,18 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
     elif not key or not secret:
         reason = ("No Alpaca API key is set (APCA_API_KEY_ID and APCA_API_SECRET_KEY), so PaperDesk is showing "
                   "simulated prices for fictional companies. See docs/DATA_PROVIDERS.md.")
-    else:
+    live_cause = None
+    if reason is None:
         sel = _alpaca(now, data_dir, environ, key, secret, start, **alpaca_kw)
-        if sel is not None and not isinstance(sel, str):
+        if isinstance(sel, Selection):
             return sel
-        reason = sel
+        reason, live_cause = sel
     mode = environ.get("PAPERDESK_SESSIONS", "always")
     feed = SyntheticFeed(seed=synthetic_seed, now=now, always_open=mode == "always")
     feed.fallback_reason = reason
+    # Alpaca was configured but could not be used: the app runs on simulated data and the simulated accounts
+    # (the live-data accounts in <data>/alpaca are not loaded). The UI shows a persistent notice saying so.
+    feed.live_unavailable = live_cause
     from .research import ResearchHub
     feed.research = ResearchHub(simulated_reason="The synthetic feed uses fictional companies, so there is no "
                                                  "real news, calendar or fundamental data for them.")
@@ -101,14 +105,16 @@ def _alpaca(now, data_dir, environ, key, secret, start, **kw):
                           trading_url=environ.get("APCA_API_BASE_URL", PAPER_TRADING_URL).strip().rstrip("/"),
                           rpm=float(environ.get("PAPERDESK_ALPACA_RPM", "190")), data_dir=live_dir, **kw)
     except ValueError as e:
-        return f"Alpaca settings are invalid: {e}. Using simulated prices."
+        return f"Alpaca settings are invalid: {e}. Using simulated prices.", f"the settings are invalid: {e}"
     try:
         feed.load_assets()
     except ProviderError as e:
         if e.status in (401, 403):
-            return (f"Alpaca rejected the API key (HTTP {e.status}). Check APCA_API_KEY_ID and APCA_API_SECRET_KEY "
-                    f"(paper keys need APCA_API_BASE_URL unset or https://paper-api.alpaca.markets). Using simulated prices.")
-        return f"Could not reach Alpaca to load the symbol list ({e.message}). Using simulated prices."
+            return ((f"Alpaca rejected the API key (HTTP {e.status}). Check APCA_API_KEY_ID and APCA_API_SECRET_KEY "
+                     f"(paper keys need APCA_API_BASE_URL unset or https://paper-api.alpaca.markets). Using simulated prices."),
+                    f"the API key was rejected, HTTP {e.status}")
+        return (f"Could not reach Alpaca to load the symbol list ({e.message}). Using simulated prices.",
+                f"it could not be reached: {e.message}")
     fh_key = environ.get("FINNHUB_API_KEY", "").strip()
     feed.research = ResearchHub(alpaca=feed.rest, finnhub=FinnhubClient(fh_key) if fh_key else None)
     if start:

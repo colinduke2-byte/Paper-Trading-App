@@ -133,7 +133,9 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
                 "paper": True, **plain(ex.feed.status_info()), "price_note": price_source(ex.feed)["price_note"],
-                "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None,
+                # Alpaca was configured but failed at start-up, so the live exchange runs on simulated data
+                "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None)}
 
     async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()

@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "./Dialog";
+import { FeedNotice } from "./FeedNotice";
 import { Chart } from "./Chart";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
@@ -178,6 +179,7 @@ export default function App() {
       {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
     </select>
   );
+  const feedNotice = <FeedNotice status={status} />;
   const marginNotice = summary?.margin_call && (
     <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
   );
@@ -229,7 +231,7 @@ export default function App() {
     return (
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
-        notice={marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        notice={status?.live_unavailable && marginNotice ? <div className="m-notices">{feedNotice}{marginNotice}</div> : status?.live_unavailable ? feedNotice : marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
         ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
         replayBar={status?.replay ? replayBar : null} mode={mode}>
         {overlays}
@@ -257,6 +259,7 @@ export default function App() {
         </div>
       </header>
       {replayBar}
+      {feedNotice}
       {marginNotice}
       <main key={mode}>
         {watchlist}
