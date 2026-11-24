@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
-from ..core.calendar import NY
+from ..core.calendar import NY, utc_datetime
 from ..core.money import ZERO, D
 from ..ledger.ledger import CAPITAL
 
@@ -15,14 +15,14 @@ def ratio(x: Optional[Decimal]) -> Optional[Decimal]:
 
 
 def ny_date(ts: float) -> date:
-    return datetime.fromtimestamp(ts, timezone.utc).astimezone(NY).date()
+    return utc_datetime(ts).astimezone(NY).date()
 
 
 def iso(ts: Optional[float]) -> str:
     """UTC ISO 8601 timestamp with millisecond precision ('' for none)."""
     if ts is None:
         return ""
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="milliseconds")
+    return utc_datetime(ts).isoformat(timespec="milliseconds")
 
 
 def month_bounds(year: int, month: int) -> tuple[float, float]:
