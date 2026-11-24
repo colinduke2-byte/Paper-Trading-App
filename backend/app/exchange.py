@@ -515,16 +515,21 @@ class Exchange:
         than left to close lots nobody chose (or to open a short position).
         """
         held = {l.id: abs(l.qty) for ls in account.lots.values() for l in ls}
-        for o in list(self.engine.orders.values()):
-            if o.account_id != account.id or not o.lots or not o.active:
-                continue
+        # Several orders can each name part of one lot, so what they still need is counted together:
+        # the oldest orders keep their claim and the newest ones that no longer fit are canceled.
+        claimed: dict = {}
+        mine = [o for o in self.engine.orders.values() if o.account_id == account.id and o.lots and o.active]
+        for o in sorted(mine, key=lambda o: (o.created_at, o.id)):
             need: dict = {}
             for e in o.lots:
                 need[e["lot_id"]] = need.get(e["lot_id"], ZERO) + max(D(e["qty"]) - D(e.get("filled", "0")), ZERO)
-            short = [lid for lid, q in need.items() if q > held.get(lid, ZERO)]
+            short = [lid for lid, q in need.items() if q > 0 and claimed.get(lid, ZERO) + q > held.get(lid, ZERO)]
             if short:
                 self._handle(self.engine.cancel(o.id, now, f"Canceled: lot {', '.join(short)} named by this order "
                                                            f"was closed by another trade"))
+            else:
+                for lid, q in need.items():
+                    claimed[lid] = claimed.get(lid, ZERO) + q
 
     def validate_lots(self, account: Account, symbol: str, side: str, qty: Decimal, raw) -> list:
         """Check a closing order's chosen lots. Returns the plan stored on the order."""

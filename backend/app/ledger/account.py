@@ -9,10 +9,10 @@ Tax lots
 """
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 
-from ..core.calendar import NY
+from ..core.calendar import ny_date
 from ..core.models import BUY, Fill, from_plain, to_plain
 from ..core.money import ZERO, D, cents
 from ..lifecycle import settings as lifecycle_settings
@@ -45,7 +45,7 @@ SPECIFIC = "specific"  # the lot method recorded on a lot closed because the ord
 
 
 def _ny_date(ts: float):
-    return datetime.fromtimestamp(ts, timezone.utc).astimezone(NY).date()
+    return ny_date(ts)  # Windows-safe near the epoch (core.calendar.utc_datetime)
 
 
 def long_term_from(open_ts: float):

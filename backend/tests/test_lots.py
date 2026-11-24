@@ -612,3 +612,22 @@ def test_reserved_lots_are_never_double_closed(steps, method):
         assert q <= opened[lid]
     ledger_ok(acc)
     assert gains_report(acc)["totals"]["gain"] == acc.realized
+
+
+# ---- review fixes: regression tests ------------------------------------------------------------------
+def test_reservations_of_several_orders_on_one_lot_are_checked_together():
+    # Buy 10 (L1); two sell-5 orders each name L1:5; a plain sell of 1 must close part of L1.
+    # Only 9 is left for 10 named: the newer order is canceled, the older one keeps its 5.
+    ex, feed, clock, a = exchange_with_lots("100")
+    [o1] = ex.submit(a, sell(5, ("L1", 5), type="limit", limit_price="150", tif="gtc"))
+    clock.advance(1)
+    [o2] = ex.submit(a, sell(5, ("L1", 5), type="limit", limit_price="150", tif="gtc"))
+    ex.submit(a, sell(1))
+    assert o1.status == "working" and o2.status == "canceled"
+    assert o2.reason == "Canceled: lot L1 named by this order was closed by another trade"
+    assert ex.reserved_lots(a) == {"L1": D("5")}
+    move(ex, feed, clock, "ABC", "151", bid_size=1000)
+    acc = ex.account(a)
+    assert o1.status == "filled" and acc.position("ABC") == 4 and [l.qty for l in acc.lots["ABC"]] == [4]
+    assert all(c["lot_method"] == "specific" for c in acc.closed if c["order_id"] == o1.id)
+    ledger_ok(acc)
