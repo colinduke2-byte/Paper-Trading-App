@@ -36,7 +36,8 @@ Paper trading simulator. Python backend (`backend/`), React UI (`frontend/`). Pl
 
 ## Finishing
 Commit, then push with `git -c push.negotiate=true push -u origin <branch>` (on HTTP 429 wait 5 s and retry once).
-Open a pull request to `main` with `gh pr create -R colinduke2-byte/paper-trading-app` (do not merge it).
+Open a pull request to `main` (do not merge it). `gh pr create` does not work here; use
+`gh api repos/colinduke2-byte/paper-trading-app/pulls -f title=... -f head=<branch> -f base=main -f body=...`.
 The description holds: what changed, evidence (test output), files touched outside your area, risks.
 End the description with:
 
