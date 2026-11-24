@@ -12,7 +12,8 @@ from decimal import Decimal
 from ..core import calendar as cal
 from ..core.models import Quote
 from ..core.money import CENT, ZERO, cents
-from .feed import MarketDataProvider
+from ..lifecycle.actions import dividend as dividend_action, split as split_action
+from .feed import MarketDataProvider, adjust_for_split
 
 # symbol, name, sector, start price, annual volatility, shares outstanding (millions), EPS, dividend per share
 UNIVERSE = [
@@ -46,6 +47,9 @@ UNIVERSE = [
 
 TRADING_SECONDS_PER_YEAR = 252 * 6.5 * 3600
 ALWAYS_OPEN_SECONDS_PER_YEAR = 252 * 24 * 3600
+# Quarterly dividend months, by position in UNIVERSE modulo 3.
+DIVIDEND_MONTHS = ((1, 4, 7, 10), (2, 5, 8, 11), (3, 6, 9, 12))
+SPLIT_CANDIDATES = [u[0] for u in sorted(UNIVERSE, key=lambda u: -u[3])[:6]]  # the highest-priced listings
 
 
 class SyntheticFeed(MarketDataProvider):
@@ -58,6 +62,7 @@ class SyntheticFeed(MarketDataProvider):
         self.always_open = always_open
         self.year_seconds = ALWAYS_OPEN_SECONDS_PER_YEAR if always_open else TRADING_SECONDS_PER_YEAR
         self._day: dict[str, date] = {}
+        self._ex_drop: dict[str, Decimal] = {}  # dividend to take off the price at the next step
         for sym, name, sector, price, vol, shares, eps, div in UNIVERSE:
             self.info[sym] = {"symbol": sym, "name": name, "sector": sector, "vol": vol,
                               "shares_outstanding": shares * 1_000_000, "eps": eps, "dividend": div,
@@ -149,6 +154,10 @@ class SyntheticFeed(MarketDataProvider):
                 prev = Quote(**{**prev.__dict__, "prev_close": prev.last, "open": prev.last, "high": prev.last,
                                 "low": prev.last, "volume": ZERO})
                 self._day[sym] = today
+            if sym in self._ex_drop:  # the stock opens lower by the dividend on its ex-date
+                drop = self._ex_drop.pop(sym)
+                low = lambda v: max(v - drop, CENT)
+                prev = Quote(**{**prev.__dict__, "last": low(prev.last), "open": low(prev.open), "low": low(prev.low)})
             sigma = info["vol"] * math.sqrt(dt / self.year_seconds)
             shock = sigma * (0.5 * market + 0.87 * self.rng.gauss(0, 1))
             last = cents(prev.last * Decimal(repr(math.exp(shock))))
@@ -165,9 +174,44 @@ class SyntheticFeed(MarketDataProvider):
             out.append(q)
         return out
 
+    # ---- corporate actions -------------------------------------------------
+    def _business(self, d: date) -> date:
+        while d.weekday() >= 5 or not (self.always_open or cal.is_trading_day(d)):
+            d += timedelta(days=1)
+        return d
+
+    def corporate_actions(self, start: date, end: date) -> list:
+        """Quarterly dividends from each symbol's annual `dividend` figure, on fixed dates, and one
+        2-for-1 split a year (mid September) among the highest-priced listings."""
+        out = []
+        for y in range(start.year - 1, end.year + 1):
+            for i, (sym, *_) in enumerate(UNIVERSE):
+                amount = cents(Decimal(repr(float(self.info[sym].get("dividend", 0)))) / 4)
+                if amount <= 0:
+                    continue
+                for month in DIVIDEND_MONTHS[i % 3]:
+                    ex = self._business(date(y, month, 5 + (i * 7) % 20))
+                    if start <= ex <= end:
+                        out.append(dividend_action(sym, ex, self._business(ex + timedelta(days=14)), amount))
+            ex = self._business(date(y, 9, 15))
+            if start <= ex <= end:
+                out.append(split_action(SPLIT_CANDIDATES[y % len(SPLIT_CANDIDATES)], ex, 2, 1))
+        return out
+
+    def _adjust_for_action(self, action) -> None:
+        if action.kind == "split":
+            adjust_for_split(self, action)
+            info = self.info[action.symbol]
+            info["dividend"] = round(float(info.get("dividend", 0)) * action.old / action.new, 6)
+        elif action.kind == "dividend" and action.symbol in self.quotes:
+            self._ex_drop[action.symbol] = self._ex_drop.get(action.symbol, ZERO) + action.amount
+
     # ---- persistence ------------------------------------------------------
     def snapshot(self) -> dict:
-        return {"daily": self.store.daily,
+        return {"applied_actions": sorted(self.applied_actions),
+                "dividends": {s: i.get("dividend", 0) for s, i in self.info.items()},
+                "ex_drop": {s: str(v) for s, v in self._ex_drop.items()},
+                "daily": self.store.daily,
                 "minutes": {s: list(b) for s, b in self.store.minutes.items()},
                 "days": {s: d.isoformat() for s, d in self._day.items()},
                 "quotes": {s: {k: (str(v) if isinstance(v, Decimal) else v) for k, v in q.__dict__.items()}
@@ -186,5 +230,10 @@ class SyntheticFeed(MarketDataProvider):
             self.store.daily = data["daily"]
             self.store.minutes = {s: deque(b, maxlen=6000) for s, b in data["minutes"].items()}
             self._day = {s: date.fromisoformat(d) for s, d in data["days"].items()}
+            self.applied_actions = set(data.get("applied_actions", []))
+            for s, div in data.get("dividends", {}).items():
+                if s in self.info:
+                    self.info[s]["dividend"] = div
+            self._ex_drop = {s: Decimal(v) for s, v in data.get("ex_drop", {}).items()}
         except (KeyError, ValueError, TypeError):
             return

@@ -5,6 +5,7 @@ import { BottomPanel } from "./Panels";
 import { feedBanner, Research } from "./Research";
 import { Ticket, TicketSeed } from "./Ticket";
 import { jumpKey, modeKey, ReplayBar, ReplayButton, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
+import { SettingsDialog } from "./Settings";
 import { api, isOption, money, pct, signed, store, time, tone, underlyingOf, usd } from "./util";
 
 type Toast = { id: number; text: string; bad?: boolean };
@@ -27,6 +28,7 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
   const [replayPicker, setReplayPicker] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const ws = useRef<WebSocket | null>(null);
   const toastId = useRef(0);
 
@@ -161,6 +163,7 @@ export default function App() {
           <button className="ghost sm" onClick={() => setDialog("new")}>New account</button>
           <button className="ghost sm" onClick={() => setDialog("reset")}>Reset</button>
           <ReplayButton status={status} onOpen={() => setReplayPicker(true)} />
+          <button className="ghost sm" onClick={() => setSettingsOpen(true)} disabled={!accountId}>Settings</button>
         </div>
       </header>
       <ReplayBar status={status} onStatus={setStatus} notify={notify} />
@@ -201,6 +204,9 @@ export default function App() {
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
+      {settingsOpen && accountId && (
+        <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
+      )}
       {dialog && (
         <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
           onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />

@@ -4,6 +4,8 @@ from decimal import Decimal
 
 from ..core.models import BUY, Fill, from_plain, to_plain
 from ..core.money import ZERO, D, cents
+from ..lifecycle import settings as lifecycle_settings
+from ..lifecycle.state import AccountLife
 from ..options.symbology import describe
 from .ledger import CAPITAL, CASH, FEES, REALIZED, Ledger, position_account
 
@@ -49,6 +51,8 @@ class Account:
         self.margin_call = False
         self.lot_method = "fifo"
         self.journal: list[dict] = []  # trade journal entries, managed by the reports routes
+        self.settings = lifecycle_settings.defaults()  # per-account rule toggles and rates
+        self.life = AccountLife()  # settlement, day trades, accruals, dividends, margin call
         self.ledger.post(ts, "deposit", "Opening balance", [(CASH, self.starting_cash), (CAPITAL, -self.starting_cash)])
 
     # ---- derived state -------------------------------------------------
@@ -129,7 +133,8 @@ class Account:
                 "lots": {s: [[str(l.qty), str(l.price), l.ts, str(l.cost), l.fill_id] for l in ls] for s, ls in self.lots.items()},
                 "fills": [to_plain(f) for f in self.fills], "closed": self.closed,
                 "equity_history": self.equity_history, "day_start_equity": str(self.day_start_equity),
-                "lot_method": self.lot_method, "journal": self.journal}
+                "lot_method": self.lot_method, "journal": self.journal,
+                "settings": self.settings, "lifecycle": self.life.to_plain()}
 
     @classmethod
     def from_plain(cls, d: dict) -> "Account":
@@ -148,4 +153,6 @@ class Account:
         a.margin_call = False
         a.lot_method = d.get("lot_method", "fifo") if d.get("lot_method") in LOT_METHODS else "fifo"
         a.journal = d.get("journal", [])
+        a.settings = lifecycle_settings.merged(d.get("settings"))
+        a.life = AccountLife.from_plain(d.get("lifecycle"))
         return a
