@@ -740,3 +740,26 @@ def test_a_replacement_share_already_carrying_a_loss_is_not_used_again():
     assert [(r["lot_id"], r["wash_sale_disallowed"]) for r in rows] == [("L2", D(0)), ("L1", D("40")), ("L1", D(0))]
     _, open_adj = wash.analyse(a, closed_lots(a))
     assert (open_adj["L2"]["qty"], open_adj["L2"]["amount"]) == (D(4), D("40"))
+
+
+def test_wash_sale_analysis_scales_and_is_cached():
+    # 10,000 round trips (20,000 fills) in one trading day, every other one at a loss with the next
+    # purchase as its replacement. Measured about 0.5 s here; the bound leaves room for slow machines
+    # (it was 30 s at 6,000 round trips before the windowed index).
+    import time
+    a = Account("A1", "t", "margin", D("100000000"), 0)
+    t0 = ts(2026, 1, 2)
+    for i in range(10000):
+        a.apply_fill(fill(2 * i, "buy", 10, "100", t=t0 + 2 * i), 1)
+        a.apply_fill(fill(2 * i + 1, "sell", 10, "99" if i % 2 else "101", t=t0 + 2 * i + 1), 1)
+    start = time.perf_counter()
+    rep = gains_report(a)
+    assert time.perf_counter() - start < 3.0
+    # each 10-share loss of 10.00 is replaced by the next round trip's purchase; the last one has none
+    assert rep["totals"]["wash_sale_disallowed"] == D("49990")
+    assert rep["totals"]["adjusted_gain"] == rep["totals"]["gain"] == a.realized
+    rows = closed_lots(a)
+    first = wash.analyse(a, rows)
+    assert wash.analyse(a, rows) is first  # nothing changed: the cached result
+    a.apply_fill(fill(99999, "buy", 1, "100", t=t0 + 30000), 1)
+    assert wash.analyse(a, closed_lots(a)) is not first  # a new lot: worked out again

@@ -1,4 +1,6 @@
 """Shared helpers: time conversion and account-derived series."""
+import math
+from functools import lru_cache
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
@@ -14,8 +16,15 @@ def ratio(x: Optional[Decimal]) -> Optional[Decimal]:
     return None if x is None else x.quantize(RATIO)
 
 
+@lru_cache(maxsize=1 << 16)
+def _ny_date_of_hour(hour: int) -> date:
+    return utc_datetime(hour * 3600).astimezone(NY).date()
+
+
 def ny_date(ts: float) -> date:
-    return utc_datetime(ts).astimezone(NY).date()
+    # New York's UTC offset is always a whole number of hours, so the date is the same for a whole
+    # UTC hour; caching by hour makes reports over many lots cheap.
+    return _ny_date_of_hour(math.floor(ts / 3600))
 
 
 def iso(ts: Optional[float]) -> str:

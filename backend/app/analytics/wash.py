@@ -20,6 +20,7 @@ stock, for example), purchases in other accounts, and splits after a wash sale (
 amounts are not rescaled). Lots are identified by lot id; entries saved before lot ids existed
 use the opening fill id, or the opening time.
 """
+from bisect import bisect_left, bisect_right
 from decimal import Decimal
 from typing import Optional
 
@@ -101,29 +102,70 @@ def analyse(account, rows: list) -> tuple[list, dict]:
 
     rows: closed_lots(account), in the order they were closed. Returns (per-row detail,
     open-lot adjustments keyed by lot key: {"qty", "amount", "holding_shift", "from"}).
+    The result is cached on the account until a lot closes or the open lots change; callers must
+    not modify it.
+    """
+    stamp = None
+    if len(rows) == len(account.closed):
+        stamp = (len(account.closed), id(account.closed[-1]) if account.closed else None,
+                 tuple((l.id, l.qty, l.fill_id, l.ts) for ls in account.lots.values() for l in ls))
+        cached = getattr(account, "_wash_cache", None)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    result = _analyse(account, rows)
+    if stamp is not None:
+        account._wash_cache = (stamp, result)
+    return result
+
+
+def _analyse(account, rows: list) -> tuple[list, dict]:
+    """The work behind analyse. Rows are in the order they closed (each fill appends its rows).
+
+    Cost: O(n log n) plus, per loss, the acquisitions in its 61-day window that are still open or
+    not yet used up. Acquisitions that are fully closed or fully used as replacements leave the index.
     """
     rows = _resolve(account, rows)
     acq = _acquisitions(account, rows)
-    by_key: dict = {}
-    for i, r in enumerate(rows):
-        by_key.setdefault(lot_key(r), []).append(i)
+    # Index: (symbol, direction) -> acquisitions sorted by (opened_at, key), with New York day numbers.
+    index: dict = {}
+    for a in sorted(acq.values(), key=lambda a: (a["opened_at"], a["key"])):
+        a["day"] = ny_date(a["opened_at"]).toordinal()
+        g = index.setdefault((a["symbol"], a["direction"]), ([], [], []))
+        g[0].append((a["opened_at"], a["key"]))
+        g[1].append(a["day"])
+        g[2].append(a["key"])
+    # Quantity of each lot closed in each sale (by closing fill) and at each moment, for "sold in the same sale".
+    by_fill_total, by_time_total = {}, {}
+    for r in rows:
+        k = lot_key(r)
+        if r["close_fill_id"]:
+            by_fill_total[(k, r["close_fill_id"])] = by_fill_total.get((k, r["close_fill_id"]), ZERO) + r["qty"]
+        by_time_total[(k, r["closed_at"])] = by_time_total.get((k, r["closed_at"]), ZERO) + r["qty"]
+    by_fill_seen, by_time_seen = {}, {}
+    closed_before: dict = {}  # key -> quantity closed by earlier rows
     used: dict = {}  # acquisition key -> quantity already used as a replacement
+    carrying: dict = {}  # acquisition key -> quantity carrying an unconsumed adjustment
     chunks: dict = {}  # acquisition key -> [{"qty", "amount", "shift", "from"}] carried in, oldest first
     out = []
 
-    def held_at(key: str, i: int) -> Decimal:
-        """Quantity of acquisition `key` still held when row i closed (not sold before or in that sale)."""
-        r = rows[i]
-        gone = ZERO
-        for j in by_key.get(key, ()):
-            o = rows[j]
-            same_sale = (r["close_fill_id"] and o["close_fill_id"] == r["close_fill_id"]) or \
-                (not r["close_fill_id"] and o["closed_at"] == r["closed_at"])
-            if j < i or same_sale or o["closed_at"] < r["closed_at"]:
-                gone += o["qty"]
-        return acq[key]["qty"] - gone
+    def drop(a) -> None:
+        g = index[(a["symbol"], a["direction"])]
+        i = bisect_left(g[0], (a["opened_at"], a["key"]))
+        if i < len(g[0]) and g[2][i] == a["key"]:
+            for col in g:
+                del col[i]
 
-    for i, r in enumerate(rows):
+    def held_at(key: str, r: dict) -> Decimal:
+        """Quantity of acquisition `key` still held when row r closed (not sold before or in that sale)."""
+        if r["close_fill_id"]:
+            k = (key, r["close_fill_id"])
+            later = by_fill_total.get(k, ZERO) - by_fill_seen.get(k, ZERO)
+        else:
+            k = (key, r["closed_at"])
+            later = by_time_total.get(k, ZERO) - by_time_seen.get(k, ZERO)
+        return acq[key]["qty"] - closed_before.get(key, ZERO) - later
+
+    for r in rows:
         key, q = lot_key(r), r["qty"]
         # 1. basis and holding period carried into this lot by earlier wash sales
         carried, shift, need, took = ZERO, None, q, []
@@ -137,6 +179,7 @@ def analyse(account, rows: list) -> tuple[list, dict]:
             took.append(c["from"])
             c["qty"] -= take
             c["amount"] -= amt
+            carrying[key] -= take
             need -= take
             if c["qty"] <= 0:
                 pending.pop(0)
@@ -145,48 +188,58 @@ def analyse(account, rows: list) -> tuple[list, dict]:
         detail = {"basis_adjustment": carried, "adjusted_cost": r["cost"] + carried, "adjusted_opened_at": adj_open,
                   "adjusted_term": _term(r["direction"], adj_open, r["closed_at"]), "carried_from": took,
                   "disallowed": ZERO, "replacements": [], "loss_before_wash": -base_gain if base_gain < 0 else ZERO}
-        # 2. a loss: find replacement shares
+        # 2. a loss: find replacement shares, earliest acquisition first, within 30 days either side
         if base_gain < 0:
-            loss, close_day = -base_gain, ny_date(r["closed_at"])
-            cands = []
-            for a in acq.values():
-                if a["key"] == key or a["symbol"] != r["symbol"] or a["direction"] != r["direction"]:
-                    continue
-                if abs((ny_date(a["opened_at"]) - close_day).days) > WINDOW_DAYS:
-                    continue
-                if a["opened_at"] <= r["closed_at"]:
-                    # Shares still held, less those already carrying an earlier wash sale's loss.
-                    carrying = sum((c["qty"] for c in chunks.get(a["key"], ())), ZERO)
-                    cap = min(held_at(a["key"], i) - carrying, a["qty"] - used.get(a["key"], ZERO))
-                else:
-                    cap = a["qty"] - used.get(a["key"], ZERO)
-                if cap > 0:
-                    cands.append((a["opened_at"], a["key"], cap, a))
-            cands.sort(key=lambda c: (c[0], c[1]))
-            left, matched, given = q, ZERO, ZERO
-            reps = []
-            for _, akey, cap, a in cands:
-                if left <= 0:
-                    break
-                m = min(left, cap)
-                left -= m
-                matched += m
-                amt = loss - given if matched == q else cents(loss * matched / q) - given
-                given += amt
-                used[akey] = used.get(akey, ZERO) + m
-                holding = r["closed_at"] - adj_open
-                chunks.setdefault(akey, []).append({"qty": m, "amount": amt, "shift": holding, "from": r["id"]})
-                before = cents(m * a["open_price"] * multiplier(a["symbol"]))
-                rep_open = a["opened_at"] - holding
-                reps.append({"key": akey, "lot_id": a["lot_id"], "fill_id": a["fill_id"], "opened_at": a["opened_at"],
-                             "open_date": ny_date(a["opened_at"]).isoformat(), "qty": m, "disallowed": amt,
-                             "basis_before": before, "basis_after": before + amt,
-                             "adjusted_opened_at": rep_open, "adjusted_open_date": ny_date(rep_open).isoformat(),
-                             "status": "open" if a["open_qty"] > 0 else "closed"})
+            loss, close_day = -base_gain, ny_date(r["closed_at"]).toordinal()
+            left, matched, given, reps = q, ZERO, ZERO, []
+            g = index.get((r["symbol"], r["direction"]))
+            if g is not None:
+                lo, hi = bisect_left(g[1], close_day - WINDOW_DAYS), bisect_right(g[1], close_day + WINDOW_DAYS)
+                for akey in g[2][lo:hi]:
+                    if left <= 0:
+                        break
+                    if akey == key:
+                        continue
+                    a = acq[akey]
+                    if a["opened_at"] <= r["closed_at"]:
+                        # Shares still held, less those already carrying an earlier wash sale's loss.
+                        cap = min(held_at(akey, r) - carrying.get(akey, ZERO), a["qty"] - used.get(akey, ZERO))
+                    else:
+                        cap = a["qty"] - used.get(akey, ZERO)
+                    if cap <= 0:
+                        continue
+                    m = min(left, cap)
+                    left -= m
+                    matched += m
+                    amt = loss - given if matched == q else cents(loss * matched / q) - given
+                    given += amt
+                    used[akey] = used.get(akey, ZERO) + m
+                    holding = r["closed_at"] - adj_open
+                    chunks.setdefault(akey, []).append({"qty": m, "amount": amt, "shift": holding, "from": r["id"]})
+                    carrying[akey] = carrying.get(akey, ZERO) + m
+                    before = cents(m * a["open_price"] * multiplier(a["symbol"]))
+                    rep_open = a["opened_at"] - holding
+                    reps.append({"key": akey, "lot_id": a["lot_id"], "fill_id": a["fill_id"], "opened_at": a["opened_at"],
+                                 "open_date": ny_date(a["opened_at"]).isoformat(), "qty": m, "disallowed": amt,
+                                 "basis_before": before, "basis_after": before + amt,
+                                 "adjusted_opened_at": rep_open, "adjusted_open_date": ny_date(rep_open).isoformat(),
+                                 "status": "open" if a["open_qty"] > 0 else "closed"})
+                    if used[akey] >= a["qty"]:
+                        drop(a)
             detail["disallowed"] = given
             detail["replacements"] = reps
         detail["adjusted_gain"] = base_gain + detail["disallowed"]
         out.append(detail)
+        # 3. this row is now sold: move the running totals on
+        closed_before[key] = closed_before.get(key, ZERO) + q
+        if r["close_fill_id"]:
+            k = (key, r["close_fill_id"])
+            by_fill_seen[k] = by_fill_seen.get(k, ZERO) + q
+        k = (key, r["closed_at"])
+        by_time_seen[k] = by_time_seen.get(k, ZERO) + q
+        a = acq[key]
+        if a["open_qty"] == 0 and closed_before[key] >= a["qty"]:
+            drop(a)  # fully sold: never a replacement for a later sale
     open_adj = {}
     for key, pending in chunks.items():
         pending = [c for c in pending if c["qty"] > 0]
