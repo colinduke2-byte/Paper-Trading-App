@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Start PaperDesk on http://127.0.0.1:8000 (Python 3.11+ required; Node is not needed).
-# HOST and PORT can be overridden. HOST stays 127.0.0.1: PaperDesk has no login, never expose it.
+# PORT can be overridden. To use PaperDesk from a phone on the same Wi-Fi, set PAPERDESK_LAN=1 and
+# PAPERDESK_PASSCODE (in .env or the environment; see README.md). Without LAN mode HOST must stay local.
 set -euo pipefail
 cd "$(dirname "$0")/backend"
 
@@ -25,6 +26,10 @@ if [ ! -x .venv/bin/python ] || [ ! -f .venv/.installed ] || [ pyproject.toml -n
     echo "Installing the Python packages failed. Check your internet connection and run this again." >&2; exit 1; }
 fi
 
-HOST="${HOST:-127.0.0.1}"
-echo "PaperDesk is starting on http://${HOST}:${PORT:-8000}  (press Ctrl+C to stop)"
+# Check the access settings (also read from ../.env) and choose the bind address: 127.0.0.1, or 0.0.0.0 in
+# LAN mode. The check prints the phone addresses and reminders itself and refuses unsafe settings.
+export PAPERDESK_ENV_FILE="${PAPERDESK_ENV_FILE:-$(cd .. && pwd)/.env}"
+HOST="$(.venv/bin/python -m app.api.auth preflight)" || { echo "PaperDesk did not start." >&2; exit 1; }
+OPEN="$HOST"; case "$HOST" in 0.0.0.0|::) OPEN=127.0.0.1 ;; esac
+echo "PaperDesk is starting on http://${OPEN}:${PORT:-8000}  (press Ctrl+C to stop)"
 exec .venv/bin/python -m uvicorn app.api.server:app_factory --factory --host "$HOST" --port "${PORT:-8000}"

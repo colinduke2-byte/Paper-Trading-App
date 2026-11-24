@@ -135,3 +135,37 @@ jobs:
             Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
             taskkill /PID $p.Id /T /F | Out-Null
           }
+
+  docker:
+    name: docker (build the image and smoke-test it)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Build the image
+        run: docker build -t paperdesk:ci .
+      - name: Check the compose file
+        run: docker compose config --quiet
+      - name: Run the container, wait for the API and the UI, then stop it
+        run: |
+          docker run -d --name paperdesk-ci -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges:true paperdesk:ci
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/api/status | grep -q '"paper":true'; then ok=1; break; fi
+            sleep 2
+          done
+          docker logs paperdesk-ci
+          test -n "$ok" || { echo "The API did not answer on http://127.0.0.1:8000/api/status"; exit 1; }
+          curl -fsS http://127.0.0.1:8000/ | grep -q '<div id="root">' || { echo "GET / did not return the UI"; exit 1; }
+          curl -fsSI http://127.0.0.1:8000/ | grep -qi '^content-security-policy:' || { echo "No security headers"; exit 1; }
+          echo "The image starts; API and UI both answered."
+      - name: LAN mode without a passcode refuses to start
+        run: |
+          if docker run --rm -e PAPERDESK_LAN=1 paperdesk:ci > lan.log 2>&1; then
+            cat lan.log; echo "The container started in LAN mode without a passcode"; exit 1
+          fi
+          cat lan.log
+          grep -q "needs a passcode" lan.log
+      - name: Stop the container
+        if: always()
+        run: docker rm -f paperdesk-ci || true

@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableExtensions
 rem Start PaperDesk on http://127.0.0.1:8000 (Python 3.11+ required; Node is not needed).
-rem HOST and PORT can be set beforehand. HOST stays 127.0.0.1: PaperDesk has no login, never expose it.
+rem PORT can be set beforehand. To use PaperDesk from a phone on the same Wi-Fi, set PAPERDESK_LAN=1 and
+rem PAPERDESK_PASSCODE (in .env next to this file, or the environment; see README.md).
 rem Set PAPERDESK_NO_BROWSER=1 to skip opening the browser, PAPERDESK_NO_PAUSE=1 to skip the final pause.
 cd /d "%~dp0backend" || goto :fail
-if not defined HOST set "HOST=127.0.0.1"
 if not defined PORT set "PORT=8000"
 
 set "PY="
@@ -34,9 +34,21 @@ if "%NEED%"=="1" (
   echo done> ".venv\.installed"
 )
 
-if not defined PAPERDESK_NO_BROWSER start "" /b ".venv\Scripts\python.exe" "%~dp0tools\open_when_ready.py" "http://%HOST%:%PORT%"
-echo PaperDesk is starting on http://%HOST%:%PORT%  ^(close this window or press Ctrl+C to stop^)
-".venv\Scripts\python.exe" -m uvicorn app.api.server:app_factory --factory --host %HOST% --port %PORT%
+rem Check the access settings (also read from .env) and choose the bind address: 127.0.0.1, or 0.0.0.0 in
+rem LAN mode. The check prints the phone addresses and reminders itself (on stderr) and prints only the
+rem bind address on stdout; it prints nothing there when the settings are unsafe.
+if not defined PAPERDESK_ENV_FILE set "PAPERDESK_ENV_FILE=%~dp0.env"
+set "BINDHOST="
+for /f "usebackq delims=" %%h in (`.venv\Scripts\python.exe -m app.api.auth preflight`) do set "BINDHOST=%%h"
+if not defined BINDHOST goto :fail
+set "HOST=%BINDHOST%"
+set "OPENHOST=%HOST%"
+if "%HOST%"=="0.0.0.0" set "OPENHOST=127.0.0.1"
+if "%HOST%"=="::" set "OPENHOST=127.0.0.1"
+
+if not defined PAPERDESK_NO_BROWSER start "" /b ".venv\Scripts\python.exe" "%~dp0tools\open_when_ready.py" "http://%OPENHOST%:%PORT%"
+echo PaperDesk is starting on http://%OPENHOST%:%PORT%  ^(close this window or press Ctrl+C to stop^)
+".venv\Scripts\python.exe" -m uvicorn app.api.server:app_factory --factory --host "%HOST%" --port %PORT%
 if errorlevel 1 goto :fail
 exit /b 0
 

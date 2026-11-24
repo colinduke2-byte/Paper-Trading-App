@@ -24,8 +24,9 @@ http://127.0.0.1:8000. The first start creates a virtual environment and install
 The first start creates two accounts (a 100,000 margin account and a 25,000 cash
 account). State is saved in `backend/data/` and survives restarts.
 
-> **There is no login.** Anyone who can reach the port can trade and delete your paper accounts.
-> Keep PaperDesk on `127.0.0.1` and never expose it to a network or the internet.
+> **By default there is no login.** Anyone who can reach the port can trade and delete your paper accounts,
+> so PaperDesk listens on `127.0.0.1` only. To use it from your phone, turn on LAN mode (below), which adds a
+> passcode. Never expose PaperDesk to the internet.
 
 | Setting (environment variable) | Default | Meaning |
 |---|---|---|
@@ -33,9 +34,53 @@ account). State is saved in `backend/data/` and survives restarts.
 | `PAPERDESK_DATA` | `backend/data` | Where state is saved |
 | `PAPERDESK_SEED` | `7` | Seed for the simulated price history |
 | `PORT` | `8000` | Port (`run.sh`, `run.bat`, Docker) |
-| `HOST` | `127.0.0.1` | Bind address (`run.sh`, `run.bat`). Only the Docker image sets `0.0.0.0`, inside the container |
+| `HOST` | `127.0.0.1` | Bind address (`run.sh`, `run.bat`; `0.0.0.0` in LAN mode). A network address is refused without LAN mode. Only the Docker image sets `0.0.0.0`, inside the container |
+| `PAPERDESK_LAN` | `0` | `1`: let devices on your network connect (needs `PAPERDESK_PASSCODE`). See LAN mode |
+| `PAPERDESK_PASSCODE` | unset | Passcode, at least 8 characters. When set, browsers must sign in |
+| `PAPERDESK_SESSION_DAYS` | `30` | Sign-ins expire after this many days without use |
+| `PAPERDESK_LOOPBACK_BYPASS` | `1` | `1`: browsers on this computer skip the passcode. `0`: everyone signs in |
+| `PAPERDESK_ALLOWED_HOSTS` | unset | Extra host names to answer to besides `localhost` (for example `mypc.local`); in LAN mode IP addresses always work |
+| `PAPERDESK_BIND` | `127.0.0.1` | Docker only: where compose publishes the port. `0.0.0.0` is refused without LAN mode |
 
 `.env.example` lists every setting, including reserved names for the market data work.
+
+### Use it from your phone (LAN mode)
+
+LAN mode is off by default. To turn it on, copy `.env.example` to `.env` (next to `run.sh`) and set:
+
+```bash
+PAPERDESK_LAN=1
+PAPERDESK_PASSCODE='a long passcode you use nowhere else'
+```
+
+(or set the same variables in the environment). Then start `run.sh` or `run.bat` as usual. PaperDesk now
+listens on all network interfaces and prints the address to open on your phone, such as
+`http://192.168.1.20:8000`. The phone must be on the same Wi-Fi network as the computer. On Windows the
+firewall may ask whether to allow Python: allow it on **Private networks only**, never Public. If the phone
+cannot connect, check that Windows calls your Wi-Fi a private network.
+
+The phone shows a sign-in screen; after the passcode it stays signed in for 30 days of no use
+(`PAPERDESK_SESSION_DAYS`). Use "Sign out" in the top bar to end the session on that device. Browsers on the
+computer itself skip the passcode unless `PAPERDESK_LOOPBACK_BYPASS=0`. Sign-ins survive a restart: only a
+SHA-256 digest of each session token is stored, in `sessions.json` in the data directory (owner-only file
+permissions on Linux and macOS). Changing the passcode signs every device out; deleting `sessions.json` does
+too. Without LAN mode or a passcode the program behaves as before: `127.0.0.1` only, no login.
+
+**Be honest with yourself about what this protects.** LAN mode uses plain HTTP, not HTTPS: anyone on the same
+network could watch the traffic, including the passcode as you type it and the session cookie, and could then
+use your session. Use it only on your own home network, never on public or shared Wi-Fi (cafes, hotels,
+offices, student housing). It is paper money, but do not reuse the passcode anywhere else. HTTPS with a
+self-signed certificate is not included: phones show alarming warnings for such certificates and they are
+hard to set up well, so it was left out rather than done badly.
+
+What else is in place: wrong passcodes are slowed down per device (after three tries, 1, 2, 4 ... seconds, up
+to 15 minutes) and all sign-ins pause for a while after 30 failures in 15 minutes; failed attempts are logged
+with the device address, never with what was typed. The passcode and session tokens are never logged. The
+session cookie is `HttpOnly` and `SameSite=Strict`; requests that change anything, and the live stream, are
+refused when they come from another website; the server only answers to `localhost`, `127.0.0.1`, IP
+addresses (LAN mode) and `PAPERDESK_ALLOWED_HOSTS`, which blocks DNS rebinding attacks; and responses carry
+a Content-Security-Policy and related headers. A reverse proxy in front of PaperDesk is not supported in this
+build (if you use one anyway, set `PAPERDESK_LOOPBACK_BYPASS=0`).
 
 ### Docker
 
@@ -46,8 +91,15 @@ docker compose up --build
 
 Then open http://127.0.0.1:8000. State lives in the named volume `paperdesk-data`
 (`docker compose down -v` deletes it). The compose file publishes the port on `127.0.0.1` only, which is
-what keeps the unauthenticated app private; do not change that. The image was written without a running
-Docker daemon available, so treat the first `docker compose up --build` as its first real test.
+what keeps the unauthenticated app private; do not edit that line. CI builds the image and checks that it
+starts and answers.
+
+LAN mode in Docker: put `PAPERDESK_LAN=1`, `PAPERDESK_PASSCODE='...'` and `PAPERDESK_BIND=0.0.0.0` in `.env`,
+then `docker compose up --build`. Compose then publishes the port on all interfaces of the computer; the
+server refuses to start if `PAPERDESK_BIND` points at the network without LAN mode and a passcode. Open
+`http://<this computer's address>:8000` on the phone (find the address with `ipconfig` on Windows or
+`ip addr` on Linux). In Docker every browser has to sign in, including the one on the computer, because
+requests reach the container through Docker's network rather than from `127.0.0.1`.
 
 ## What works
 
@@ -78,7 +130,7 @@ See `docs/PLAN.md` for the full plan. Still to do:
   trader rule, forced liquidation on a margin call.
 - Market-on-open/close orders, good-till-date, standalone one-cancels-other orders.
 - News, calendars, real fundamentals, statements, tax-lot method choice, CSV export.
-- Historical replay mode, chart drawing tools, logins.
+- Historical replay mode, chart drawing tools, user accounts (LAN mode has a single shared passcode), HTTPS.
 
 ## Develop
 
@@ -114,7 +166,9 @@ Playwright's own), `E2E_SKIP_BUILD=1`. Run `npx playwright install chromium` onc
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pull requests and pushes to `main`: backend tests on
 Python 3.11 and 3.13 (Linux), plus Windows and macOS; the UI build; the end-to-end tests; and a Windows job that
-starts `run.bat` and checks that the API and UI answer.
+starts `run.bat` and checks that the API and UI answer; and a Docker job that builds the image, runs it and checks
+that the API and UI answer. The e2e run starts a second server with a passcode (loopback bypass off) for the
+sign-in tests (`e2e/tests/auth.spec.ts`, desktop and Pixel 7; `E2E_AUTH_PORT`, `E2E_PASSCODE`).
 
 ## Layout
 

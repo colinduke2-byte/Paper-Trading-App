@@ -3,7 +3,8 @@ import { Chart } from "./Chart";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
 import { Ticket, TicketSeed } from "./Ticket";
-import { api, isOption, money, pct, signed, store, time, tone, underlyingOf, usd } from "./util";
+import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
+import { SignOut } from "./Login";
 
 type Toast = { id: number; text: string; bad?: boolean };
 
@@ -92,7 +93,13 @@ export default function App() {
           }
         }
       };
-      sock.onclose = () => { setConnected(false); if (!closed) { retry = setTimeout(connect, delay); delay = Math.min(delay * 2, 8000); } };
+      sock.onclose = (ev) => {
+        setConnected(false);
+        if (closed) return;
+        if (ev.code === 4401) { signedOut(); return; } // session ended: back to the sign-in screen, no retry
+        retry = setTimeout(() => sessionOk().then((ok) => { if (closed) return; if (ok) connect(); else signedOut(); }), delay);
+        delay = Math.min(delay * 2, 8000);
+      };
       sock.onerror = () => sock.close();
     };
     connect();
@@ -147,6 +154,7 @@ export default function App() {
           </select>
           <button className="ghost sm" onClick={() => setDialog("new")}>New account</button>
           <button className="ghost sm" onClick={() => setDialog("reset")}>Reset</button>
+          <SignOut />
         </div>
       </header>
       {summary?.margin_call && (
