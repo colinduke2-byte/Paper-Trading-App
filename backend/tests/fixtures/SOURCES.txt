@@ -1,0 +1,24 @@
+Provenance of the saved provider responses used by the tests (read 2026-11-24).
+No file here was produced by an authenticated call; there was no API key.
+
+alpaca/stock_snapshots.json      docs.alpaca.markets/us/reference/stocksnapshots-1.md   (200 example, verbatim)
+alpaca/stock_bars.json           docs.alpaca.markets/us/reference/stockbars.md          (200 example, verbatim)
+alpaca/stock_latest_quotes.json  docs.alpaca.markets/us/reference/stocklatestquotes-1.md (200 example, verbatim)
+alpaca/stock_latest_trades.json  docs.alpaca.markets/us/reference/stocklatesttrades-1.md (200 example, verbatim)
+alpaca/option_chain.json         docs.alpaca.markets/us/reference/optionchain.md        (200 example, verbatim)
+alpaca/news.json                 docs.alpaca.markets/us/reference/news-3.md             (200 example, verbatim)
+alpaca/option_contracts.json     docs.alpaca.markets/us/reference/get-options-contracts.md
+                                 (schema example of OptionContractsResponse.option_contracts; next_page_token added)
+alpaca/stream_session.json       docs.alpaca.markets/us/docs/streaming-market-data.md and
+                                 real-time-stock-pricing-data.md (frames verbatim; subscription symbol lists edited)
+alpaca/assets.json               CONSTRUCTED from the Assets schema on
+                                 docs.alpaca.markets/us/reference/get-v2-assets-1.md (the page has no full example;
+                                 field names from the schema, the CGRNQ/OTC row from market-data-faq.md)
+alpaca/corporate_actions.json    CONSTRUCTED from the corporate_actions_resp schema on
+                                 docs.alpaca.markets/us/reference/corporateactions-1.md (no example on the page;
+                                 field names and types from the schema, values invented)
+finnhub/earnings_calendar.json   finnhub.io/docs/api/earnings-calendar   (sampleResponse, verbatim)
+finnhub/company_profile2.json    finnhub.io/docs/api/company-profile2    (sampleResponse, verbatim)
+finnhub/basic_financials.json    finnhub.io/docs/api/company-basic-financials (sampleResponse; a trailing comma that
+                                 made the published sample invalid JSON was removed)
+finnhub/company_news.json        finnhub.io/docs/api/company-news        (sampleResponse; trailing comma removed)

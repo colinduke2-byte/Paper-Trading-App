@@ -162,7 +162,7 @@ export function OptionChain({ symbol, onTrade }: { symbol: string; onTrade: (opt
             {(exps || []).map((e) => <option key={e.date} value={e.date}>{e.date} ({e.dte}d)</option>)}
           </select>
         </label>
-        <span className="tag">model prices, not market data</span>
+        <span className="tag">{chain?.source_label || "model prices, not market data"}{chain?.model_legs ? ` · ${chain.model_legs} model-priced` : ""}</span>
         <span className="muted">Click a bid to sell or an ask to buy. Each contract covers 100 shares.</span>
       </div>
       {error && <div className="notice bad">Could not load the option chain: {error}</div>}
@@ -197,7 +197,8 @@ export function Company({ info }: { info: any }) {
   const row = (k: string, v: string) => <div key={k}><span>{k}</span><b>{v}</b></div>;
   return (
     <div className="company">
-      <div className="notice">Every company in this build is fictional and its figures are generated. Connect a market data provider for real fundamentals.</div>
+      {info.simulated !== false ? <div className="notice">Every company in this build is fictional and its figures are generated. Connect a market data provider for real fundamentals.</div>
+        : <div className="notice">These figures are computed from price data only. Earnings, dividends and fundamentals from the data provider are on the Research tab.</div>}
       <div className="facts">
         {row("Name", info.name)}
         {row("Sector", info.sector)}

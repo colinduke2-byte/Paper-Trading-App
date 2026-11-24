@@ -1,0 +1,53 @@
+/* Reports tab. Builds on the tokens and components in styles.css. */
+.reports { display: flex; flex-direction: column; min-width: 0; }
+.reports-nav { position: sticky; top: 0; background: var(--panel); z-index: 2; border-bottom: 1px solid var(--line); }
+.reports .rep-label { font-size: 11px; }
+.rep-body { min-width: 0; padding-bottom: 10px; }
+.rep-h { margin: 6px 12px 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.rep-note { margin: 0 12px 8px; font-size: 11.5px; }
+.rep-notes { margin: 8px 0 0; padding: 0 12px 0 28px; font-size: 11.5px; }
+.rep-notes li { margin-bottom: 3px; }
+.rep-table { overflow-x: auto; margin: 0 0 8px; }
+.rep-table th { position: static; }
+.rep-summary { max-width: 520px; }
+.rep-summary tr.total td { font-weight: 700; border-top: 1px solid var(--line); }
+.reports b.warn, .reports .flag { color: var(--warn); }
+.reports .flag { border: 1px solid #5a4520; border-radius: 3px; padding: 0 5px; font-size: 11px; }
+.btnlink { display: inline-flex; align-items: center; text-decoration: none; color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
+.btnlink:hover { background: var(--panel2); }
+.btnlink:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.rep-chart-wrap { padding: 0 12px 10px; }
+.rep-chart { height: 220px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.rep-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); padding: 4px 0; }
+.rep-legend .sw { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--accent); vertical-align: middle; margin-right: 5px; }
+.rep-legend .sw.bench { border-top: 2px dashed var(--warn); }
+
+.rep-card { margin: 8px 10px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); display: flex; flex-direction: column; gap: 8px; }
+.rep-form { display: flex; flex-direction: column; gap: 8px; }
+.rep-form label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 11.5px; }
+.rep-form textarea { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 7px; width: 100%; resize: vertical; min-height: 60px; }
+.rep-form textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rep-form-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rep-form-row .grow { flex: 1 1 200px; width: auto; min-width: 0; }
+.rep-form-row .primary { padding: 6px 14px; }
+.reports .grow { flex: 1; }
+.rep-entry { margin: 0 10px 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.rep-card .rep-entry { margin: 0; background: var(--panel); }
+.rep-entry-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rep-entry-note { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rep-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+.chip { font-size: 11px; background: #1a2433; border: 1px solid #2f4257; border-radius: 10px; padding: 0 8px; }
+.rep-downloads { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px; }
+.rep-downloads .btnlink { padding: 7px 12px; }
+.reports .inline input, .reports .inline select { width: auto; }
+
+@media (max-width: 700px) {
+  .reports .seg { flex-wrap: wrap; }
+  .reports button, .reports .btnlink, .reports input, .reports select { min-height: 40px; }
+  .reports .seg button { padding: 6px 10px; }
+  .reports .toolbar, .rep-form-row { gap: 8px; }
+  .reports .inline { flex-wrap: wrap; }
+  .rep-chart { height: 180px; }
+  .reports-nav { position: static; }
+}

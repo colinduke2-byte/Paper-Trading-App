@@ -1,0 +1,275 @@
+/* Phone layout (MobileShell). Every rule is scoped to .m-shell so the desktop layout is untouched. */
+
+.m-shell {
+  --m-nav: 58px; --m-tap: 44px;
+  position: fixed; top: 0; left: 0; right: 0; height: 100vh; height: 100dvh;
+  display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "top" "strip" "notice" "views" "nav";
+  overflow: hidden; background: var(--bg); font-size: 13.5px;
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+}
+html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: none; }
+
+/* Touch targets: at least 44 px, and no double-tap zoom delay. */
+.m-shell button, .m-shell select, .m-shell input:not([type=checkbox]):not([type=radio]), .m-shell [role=tab] {
+  min-height: var(--m-tap); min-width: var(--m-tap); touch-action: manipulation;
+}
+.m-shell input, .m-shell select, .m-shell textarea { font-size: 16px; } /* 16 px stops iOS zooming on focus */
+.m-shell input:not([type=checkbox]), .m-shell select { padding: 8px 10px; border-radius: 6px; }
+.m-shell input[type=checkbox] { width: 22px; height: 22px; margin: 0; accent-color: var(--accent); }
+.m-shell label.check { display: flex; flex-direction: row; align-items: center; min-height: var(--m-tap); gap: 10px; font-size: 14px; }
+.m-shell button { border-radius: 6px; }
+.m-shell button:active:not(:disabled) { filter: brightness(1.25); }
+.m-shell .sm { padding: 6px 12px; font-size: 13px; }
+.m-shell .muted, .m-shell h3 { font-size: 11.5px; }
+
+/* Top bar */
+.m-top {
+  grid-area: top; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: env(safe-area-inset-top) max(10px, env(safe-area-inset-right)) 6px max(10px, env(safe-area-inset-left));
+}
+.m-top-row { display: flex; align-items: center; gap: 10px; min-height: 48px; }
+.m-brand { display: flex; flex-direction: column; min-width: 0; }
+.m-brand-name { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 15px; white-space: nowrap; }
+.m-stats { display: flex; gap: 14px; margin-left: auto; min-width: 0; }
+.m-stats div { display: flex; flex-direction: column; align-items: flex-end; min-width: 0; }
+.m-stats span { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.m-stats b { font-size: 14px; white-space: nowrap; }
+.m-menu-btn { border: 1px solid var(--line); display: grid; place-items: center; padding: 0; flex: none; }
+.m-top-row2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.m-top-row2 .paper-banner { font-size: 11px; padding: 2px 8px; line-height: 1.35; }
+.m-session { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-shell > .notice.wide { grid-area: notice; margin: 6px 8px 0; }
+
+/* Views */
+.m-views { grid-area: views; position: relative; min-height: 0; overflow: hidden; }
+.m-view {
+  position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+.m-view[hidden] { display: none !important; }
+.m-shell .panel { border-radius: 0; border-left: 0; border-right: 0; min-height: 0; }
+.m-shell .scroll { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+
+/* Watchlist */
+.m-watch .watch { flex: 1; max-height: none; border-top: 0; }
+.m-shell .watch .search { padding: 0 10px 10px; }
+.m-shell .results { left: 10px; right: 10px; max-height: 60vh; overflow: auto; }
+.m-shell .results button { min-height: var(--m-tap); align-items: center; }
+.m-watch table.tight td, .m-watch table.tight th { padding: 0 10px; height: 48px; }
+.m-watch table.tight th { height: 30px; }
+.m-watch td b { font-size: 14.5px; }
+.m-shell .x { width: var(--m-tap); font-size: 20px; line-height: 1; }
+
+/* Chart view: quote, tabs and a chart that fills the rest. The chart owns every gesture made on it
+   (pan and pinch) and the view itself does not scroll, so page scroll and chart gestures never compete. */
+.m-quote { position: relative; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
+.m-quote .quote-head { flex: 1; min-width: 0; padding: 8px 10px 6px; gap: 6px; }
+.m-quote .qh-main { min-width: 0; width: 100%; padding-right: 96px; min-height: 96px; }
+.m-quote .qh-main h2 { font-size: 18px; }
+.m-quote .qh-main > .muted { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-quote .qh-price strong { font-size: 22px; }
+.m-quote .qh-grid {
+  display: flex; gap: 16px; margin: 0; width: 100%; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px;
+}
+.m-quote .qh-grid::-webkit-scrollbar { display: none; }
+.m-quote .qh-grid div { flex: none; }
+.m-chart:not([data-view=Chart]) .qh-grid { display: none; } /* more room for the chain and company facts */
+.m-tradebtns { position: absolute; top: 8px; right: 10px; display: flex; flex-direction: column; gap: 6px; }
+.m-tradebtns button { width: 76px; padding: 0 10px; font-size: 15px; }
+.m-chart .tabs, .m-account .tabs { background: var(--panel); }
+.m-chart > .tabs button { flex: 1 0 auto; }
+.m-shell .tabs { padding: 0 4px; scrollbar-width: none; }
+.m-shell .tabs::-webkit-scrollbar { display: none; }
+.m-shell .tabs button { padding: 0 14px; font-size: 14px; flex: none; }
+.m-main { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--panel); }
+.m-main > .view { flex: 1; min-height: 0; }
+/* Options and Company scroll as a whole view, so the chain gets the full height once the header scrolls away. */
+.m-chart:not([data-view=Chart]) { overflow-y: auto; overscroll-behavior: contain; }
+.m-chart:not([data-view=Chart]) .m-main, .m-chart:not([data-view=Chart]) .m-main > .view,
+.m-chart:not([data-view=Chart]) .chain, .m-main-options .scroll { flex: none; min-height: auto; }
+.m-main-options .scroll { overflow-x: auto; overflow-y: hidden; }
+.m-chart:not([data-view=Chart]) .m-main { padding-bottom: 12px; }
+.m-shell .chart-wrap { min-height: 0; }
+.m-shell .chart { min-height: 120px; }
+.m-shell .chart-bar {
+  flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding: 6px 8px; gap: 8px; flex: none;
+}
+.m-shell .chart-bar::-webkit-scrollbar { display: none; }
+.m-shell .seg { flex: none; border-radius: 6px; }
+.m-shell .seg button { padding: 0 10px; font-size: 13px; border-radius: 0; white-space: nowrap; }
+.m-shell .company .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.m-shell .facts b { overflow-wrap: anywhere; }
+
+/* Option chain: one side at a time with a condensed column set, or both sides with horizontal scroll. */
+.m-chainside { display: flex; padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.m-chainside .seg { flex: none; width: 100%; } .m-chainside .seg button { flex: 1; }
+.m-main-options .chart-bar { flex-wrap: wrap; overflow: visible; }
+.m-main-options .chart-bar > .muted { display: none; } /* replaced by the tap hint above the chain */
+.m-chainside { flex-direction: column; gap: 4px; }
+.m-chainhint { font-size: 11.5px; color: var(--muted); }
+.m-main-options .chart-bar .inline select { width: auto; }
+.m-shell .chain-table td, .m-shell .chain-table th { padding: 2px 6px; height: 48px; }
+.m-shell .chain-table thead th { height: 28px; }
+.m-shell .px { min-width: 64px; font-size: 14px; }
+.m-shell .chain-table .strike { position: sticky; left: 0; z-index: 1; }
+.m-side-calls .chain-table thead tr:first-child, .m-side-puts .chain-table thead tr:first-child { display: none; }
+/* calls: OI, Vol hidden; puts side (columns 8-13) hidden */
+.m-side-calls .chain-table tr > :nth-child(-n+2), .m-side-calls .chain-table tr > :nth-child(n+8) { display: none; }
+/* puts: calls side (1-6) and Vol, OI (12-13) hidden */
+.m-side-puts .chain-table tr > :nth-child(-n+6), .m-side-puts .chain-table tr > :nth-child(n+12) { display: none; }
+.m-side-both .chain-table tr:first-child th { height: 24px; }
+
+/* Trade view: ticket, then depth and time and sales, in one scrolling column. */
+.m-trade { overflow-y: auto; overscroll-behavior: contain; scroll-padding-bottom: 80px; }
+.m-trade .ticket { flex: none; border-top: 0; padding-bottom: 0; }
+.m-trade .ticket > *:not(h3) { margin: 0 12px 10px; }
+.m-trade .ticket label { font-size: 12.5px; gap: 4px; }
+.m-trade .ticket-sym strong { font-size: 16px; }
+.m-trade .side-toggle button { font-size: 15px; }
+.m-trade .primary { font-size: 15px; }
+/* Keep Review / Place in reach while the ticket is on screen. */
+.m-trade .ticket > .primary:last-child, .m-trade .ticket > .row:last-child {
+  position: sticky; bottom: 0; z-index: 2; margin: 0; padding: 10px 12px; background: var(--panel); border-top: 1px solid var(--line);
+}
+.m-trade .ticket > .primary:last-child { bottom: 10px; margin: 0 12px 10px; padding: 0 12px; border: 0; border-radius: 6px; min-height: 48px; box-shadow: 0 0 0 10px var(--panel); }
+.m-trade .ticket > .primary:last-child:disabled { opacity: 1; background: #26303d; color: var(--muted); }
+.m-trade .ticket > .row:last-child > button { min-height: var(--m-tap); }
+.m-trade .depth { flex: none; min-height: 0; margin-top: 8px; }
+.m-trade .depth .scroll { overflow: visible; flex: none; }
+.m-trade table.tight td, .m-trade table.tight th { padding: 4px 12px; }
+
+/* Account view: summary, then the bottom-panel tabs filling the rest. */
+.m-acct { padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
+.m-acct-name { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
+.m-acct-name > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-acct-name .tag { flex: none; font-weight: 400; }
+.m-acct-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 12px; margin-top: 4px; }
+.m-acct-stats div { display: flex; flex-direction: column; min-width: 0; }
+.m-acct-stats span { font-size: 10.5px; color: var(--muted); }
+.m-acct-stats b { font-size: 13.5px; overflow-wrap: anywhere; }
+.m-account .bottom { flex: 1; min-height: 0; max-height: none; border-top: 0; }
+.m-account .bottom .scroll { overscroll-behavior: contain; }
+.m-account .bottom .toolbar { padding: 8px 12px; gap: 8px; }
+.m-account .bottom .toolbar input, .m-account .bottom .toolbar select { flex: 1 1 120px; width: auto !important; }
+.m-account .bottom .toolbar button { flex: 1 1 auto; }
+.m-account .bottom td, .m-account .bottom th { padding: 6px 10px; }
+.m-account .bottom td { height: 48px; }
+/* Wide tables scroll sideways inside .scroll; the first column stays in place. */
+.m-account .bottom tr > :first-child {
+  position: sticky; left: 0; background: var(--panel); z-index: 1; min-width: 118px; max-width: 46vw; white-space: normal;
+  box-shadow: inset -1px 0 0 var(--line);
+}
+/* Toolbars and messages above a wide table stay in place while the table scrolls sideways. */
+.m-account .bottom .scroll > .toolbar, .m-account .bottom .scroll > p, .m-account .bottom .scroll > .notice {
+  position: sticky; left: 0; max-width: calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right));
+}
+.m-account .bottom thead tr > :first-child { z-index: 2; }
+.m-account .bottom .link { text-align: left; min-height: var(--m-tap); }
+.m-account .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* Bottom navigation */
+.m-nav {
+  grid-area: nav; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--panel); border-top: 1px solid var(--line);
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.m-nav button {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: var(--m-nav);
+  color: var(--muted); font-size: 11.5px; border-radius: 0; padding: 4px 0;
+}
+.m-nav button.on { color: var(--accent); }
+.m-kb .m-nav { display: none; } /* the on-screen keyboard is up: give its space to the view */
+
+/* Menu sheet */
+.m-sheet-bg { position: fixed; inset: 0; z-index: 35; background: #000a; display: flex; align-items: flex-start; }
+.m-sheet {
+  width: 100%; max-height: 100%; overflow-y: auto; background: var(--panel); border-bottom: 1px solid var(--line);
+  border-radius: 0 0 12px 12px; display: flex; flex-direction: column; gap: 12px;
+  padding: calc(env(safe-area-inset-top) + 10px) max(14px, env(safe-area-inset-right)) 16px max(14px, env(safe-area-inset-left));
+}
+.m-sheet-head { display: flex; align-items: center; justify-content: space-between; }
+.m-sheet-head h3 { padding: 0; }
+.m-sheet .m-acct-stats { margin: 0; }
+.m-sheet-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.m-sheet-item { grid-column: 1 / -1; }
+.m-sheet-status { margin: 0; }
+
+/* Toasts sit at the top of the view area, away from the controls at the bottom, and never take taps. */
+.m-shell .toasts { position: absolute; top: 8px; left: 8px; right: 8px; bottom: auto; max-width: none; pointer-events: none; z-index: 30; }
+.m-shell .toast { font-size: 13.5px; }
+/* Dialogs open at the top so the on-screen keyboard does not cover them. */
+.m-shell .modal-bg { position: fixed; align-items: start; padding: calc(env(safe-area-inset-top) + 12px) 12px 12px; overflow-y: auto; }
+.m-shell .modal { width: 100%; max-width: 480px; justify-self: center; }
+.m-shell .modal label { font-size: 12.5px; gap: 4px; }
+.m-shell .modal .row button { min-height: 48px; }
+
+/* Landscape phones: the tab bar becomes a rail on the left, the top bar a single row. */
+@media (orientation: landscape) and (max-height: 540px) {
+  .m-shell {
+    grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-areas: "nav top" "nav strip" "nav notice" "nav views";
+  }
+  .m-nav {
+    grid-template-columns: none; grid-auto-rows: 1fr; border-top: 0; border-right: 1px solid var(--line); width: auto;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .m-nav button { min-height: 0; padding: 0 8px; min-width: 68px; }
+  .m-kb .m-nav { display: grid; }
+  .m-top { display: flex; align-items: center; gap: 10px; min-height: 48px; padding-left: 10px; padding-bottom: 0; }
+  .m-top-row, .m-top-row2 { display: contents; }
+  .m-brand { order: -3; } .m-top-row2 .paper-banner { order: -2; } .m-stats { order: -1; } .m-menu-btn { order: 0; }
+  .m-session { display: none; }
+  .m-chainhint { display: none; }
+  .m-chainside .seg { width: min(100%, 420px); }
+  .m-brand { flex-direction: row; }
+  .m-view { padding-left: 0; }
+  .m-quote .qh-grid { display: none; }
+  .m-quote .quote-head { flex-direction: row; align-items: center; padding: 4px 10px; }
+  .m-quote .qh-main { display: flex; align-items: baseline; gap: 10px; min-height: 0; padding-right: 190px; }
+  .m-quote .qh-main > .muted { max-width: 30vw; }
+  .m-tradebtns { flex-direction: row; top: 4px; }
+  .m-acct-stats { grid-template-columns: repeat(3, auto); justify-content: start; }
+  .m-acct { display: flex; gap: 16px; align-items: center; padding: 4px 12px; }
+  .m-acct .m-acct-stats { margin: 0; }
+}
+
+/* The chart library's attribution logo stays visible, but a stray tap while panning must not leave the app. */
+.m-shell a#tv-attr-logo { pointer-events: none; }
+
+/* Replay controls: one compact row (session, clock, play/pause, exit) under the top bar; "More" opens
+   the step, speed, progress and jump controls. The views shrink to make room in either state. */
+.m-top-row2 .paper-banner { min-width: 0; white-space: normal; }
+.m-replay { grid-area: strip; display: flex; align-items: flex-start; background: #101a28; border-bottom: 1px solid #2f5487; min-width: 0; }
+.m-replay .replay-bar {
+  flex: 1; min-width: 0; border-bottom: 0; padding: 6px 4px 6px max(10px, env(safe-area-inset-left)); gap: 6px 8px;
+  max-height: 42dvh; overflow-y: auto; overscroll-behavior: contain;
+}
+.m-replay .replay-when { flex: 1 1 120px; min-width: 0; gap: 2px 6px; }
+.m-replay .replay-clock { font-size: 14px; }
+.m-replay .replay-controls { gap: 6px; }
+.m-replay .replay-play { min-width: 92px; }
+.m-replay .replay-exit { margin-left: 0; }
+.m-replay .replay-progress { flex-basis: 100%; }
+.m-replay .replay-progress input[type=range] { min-height: var(--m-tap); }
+.m-replay .replay-jump input { width: 88px; }
+.m-replay-more { flex: none; margin: 6px max(8px, env(safe-area-inset-right)) 6px 4px; padding: 0; display: grid; place-items: center; }
+.m-replay:not(.open) .replay-controls > :not(.replay-play),
+.m-replay:not(.open) .replay-progress, .m-replay:not(.open) .replay-jump, .m-replay:not(.open) .replay-local,
+.m-replay:not(.open) .replay-badge, .m-replay:not(.open) .replay-when > b { display: none; } /* the banner already names the session */
+.m-replay:not(.open) .replay-bar { flex-wrap: nowrap; align-items: center; }
+.m-replay:not(.open) .replay-when { flex: 1 1 auto; }
+.m-replay:not(.open) .replay-exit { flex: none; }
+.m-replay-more svg { transition: transform .15s; } .m-replay.open .m-replay-more svg { transform: rotate(180deg); }
+.m-shell .replay-item { flex: none; }
+.m-shell .replay-modal { width: 100%; }
+.m-shell .replay-list { max-height: 38dvh; }
+.m-shell .replay-item { min-height: var(--m-tap); }
+.m-shell .replay-item input[type=radio] { width: 22px; height: 22px; margin-top: 1px; flex: none; }
+.m-shell .replay-fields > label { flex: 1 1 100px; }
+@media (orientation: landscape) and (max-height: 540px) {
+  .m-replay .replay-bar { max-height: 50dvh; }
+  .m-replay .replay-progress { flex-basis: 200px; }
+  .m-brand { flex: none; }
+  .m-stats { flex: none; }
+  .m-top-row2 .paper-banner { flex: 1 1 auto; }
+}
