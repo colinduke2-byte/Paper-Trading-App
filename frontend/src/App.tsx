@@ -301,8 +301,8 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
   };
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <h3>{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title" onClick={(e) => e.stopPropagation()}>
+        <h3 id="account-dialog-title">{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
         {mode === "reset" && <p className="muted">This erases the account's positions, orders and history and starts again with the cash below. It cannot be undone.</p>}
         {mode === "new" && (
           <>

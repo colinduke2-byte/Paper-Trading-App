@@ -201,7 +201,7 @@ export function Chart({ symbol, quote, position, orders }: { symbol: string; quo
         </div>
       </div>
       {error && <div className="notice bad">Could not load chart data: {error}</div>}
-      <div className="chart" ref={el} role="img" aria-label={`${symbol} price chart`} />
+      <div className="chart" ref={el} role="figure" aria-label={`${symbol} price chart`} />
     </div>
   );
 }

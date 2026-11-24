@@ -57,6 +57,19 @@ MIN_PASSCODE = 8
 MAX_PASSCODE = 1024
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 PUBLIC_API = {"/api/auth/login", "/api/auth/logout", "/api/auth/state", "/print.js"}
+# Files of the UI build served at the site root for installing PaperDesk on a home screen, with their media types.
+# The only root files served besides index.html; public in every mode, because the browser fetches them without
+# cookies (the manifest) or before signing in (icons), and they hold nothing private: a fixed manifest and icons.
+PUBLIC_STATIC = {
+    "/manifest.webmanifest": "application/manifest+json",
+    "/favicon.ico": "image/x-icon",
+    "/favicon.svg": "image/svg+xml",
+    "/apple-touch-icon.png": "image/png",
+    **{f"/icons/{n}": "image/png" for n in ("icon-16.png", "icon-32.png", "icon-192.png", "icon-512.png",
+                                              "maskable-192.png", "maskable-512.png")},
+    "/icons/mark.svg": "image/svg+xml",
+    "/icons/mark-maskable.svg": "image/svg+xml",
+}
 # /print.js: the CSP forbids inline handlers (onclick=...), so server-rendered pages such as printable
 # statements use <button type="button" data-print>Print</button><script src="/print.js"></script>.
 PROXY_HEADERS = {b"forwarded", b"x-forwarded-for", b"x-real-ip", b"via", b"x-forwarded-host", b"x-forwarded-proto"}

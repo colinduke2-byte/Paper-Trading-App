@@ -12,7 +12,7 @@ test("selecting a symbol shows its quote and renders the chart", async ({ page, 
   await open();
   await page.getByRole("region", { name: "Watchlist" }).getByRole("cell", { name: "TECX", exact: true }).click();
   await expect(page.getByRole("heading", { name: "TECX", level: 2 })).toBeVisible();
-  const chart = page.getByRole("img", { name: "TECX price chart" });
+  const chart = page.getByRole("figure", { name: "TECX price chart" });
   await expect(chart).toBeVisible();
   await expect(chart.locator("canvas").first()).toBeVisible();
   await expect.poll(async () => (await chart.boundingBox())?.height ?? 0).toBeGreaterThan(100);

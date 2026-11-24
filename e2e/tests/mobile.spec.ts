@@ -74,14 +74,14 @@ test("no horizontal page scroll on any view", async ({ page, open }) => {
 test("navigate all four views", async ({ page, open }) => {
   await open();
   await expect(navButton(page, "Chart")).toHaveAttribute("aria-current", "page");
-  await expect(page.getByRole("img", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
+  await expect(page.getByRole("figure", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
 
   await go(page, "Watchlist");
   await page.getByRole("region", { name: "Watchlist" }).getByRole("cell", { name: "TECX", exact: true }).tap();
   // Picking a symbol opens its chart.
   await expect(navButton(page, "Chart")).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("heading", { name: "TECX", level: 2 })).toBeVisible();
-  const chart = page.getByRole("img", { name: "TECX price chart" });
+  const chart = page.getByRole("figure", { name: "TECX price chart" });
   await expect.poll(async () => (await chart.boundingBox())?.height ?? 0).toBeGreaterThan(150);
 
   // The Buy button on the chart opens the ticket for that symbol.
@@ -305,6 +305,16 @@ test("create an account from the menu", async ({ page, open }) => {
 test("landscape orientation fits without overflow", async ({ page, open }) => {
   const v = page.viewportSize()!;
   await open();
+  if (v.height + 100 >= 900) {
+    // Rotated, a tablet is wider than the 900 px breakpoint: the desktop layout takes over and must fit too.
+    await page.setViewportSize({ width: v.height + 100, height: v.width - 40 });
+    await expect(page.getByRole("combobox", { name: "Account" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Views" })).toHaveCount(0);
+    await expect(page.getByRole("figure", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
+    expect(await overflow(page), "rotated tablet: no horizontal page scroll").toBeLessThanOrEqual(0);
+    await page.setViewportSize(v);
+    return;
+  }
   await page.setViewportSize({ width: v.height + 100, height: v.width - 40 }); // rotate (browser bars take some height)
   await expect(navButton(page, "Chart")).toBeVisible();
   for (const view of VIEWS) {
@@ -314,7 +324,7 @@ test("landscape orientation fits without overflow", async ({ page, open }) => {
   }
   await go(page, "Chart");
   await expect(page.getByRole("note")).toBeVisible();
-  const chart = page.getByRole("img", { name: "MKTX price chart" });
+  const chart = page.getByRole("figure", { name: "MKTX price chart" });
   await expect.poll(async () => (await chart.boundingBox())?.height ?? 0).toBeGreaterThan(100);
   for (const view of ["Options", "Company"]) {
     await page.getByRole("tab", { name: view }).tap();
@@ -387,7 +397,7 @@ test.describe("replay", () => {
     await go(page, "Chart");
     const clock = bar.locator(".replay-clock");
     const before = await clock.textContent();
-    const chart = page.getByRole("img", { name: /price chart$/ });
+    const chart = page.getByRole("figure", { name: /price chart$/ });
     await chart.evaluate((e: any) => { e.__beforeStep = true; });
     await bar.getByRole("button", { name: "+1 min" }).tap();
     await expect(clock).not.toHaveText(before!);

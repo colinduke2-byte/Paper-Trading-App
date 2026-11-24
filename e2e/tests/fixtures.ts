@@ -20,12 +20,17 @@ type Fixtures = {
   open: (account?: Account, symbol?: string) => Promise<void>;
 };
 
+// Browser messages that are not errors in the app. WebKit logs one at error level for the viewport meta key
+// interactive-widget, which index.html sets on purpose for Chrome and Firefox on Android (the layout shrinks
+// when the on-screen keyboard opens) and which Safari ignores.
+const BENIGN = [/^Viewport argument key "interactive-widget" not recognized and ignored\.$/];
+
 // Every test fails if the page logs a console error or throws. A fresh account is created for each
 // test, so tests do not depend on each other's orders or positions.
 export const test = base.extend<Fixtures>({
   problems: [async ({ page }, use) => {
     const problems: string[] = [];
-    page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()}`); });
+    page.on("console", (m) => { if (m.type() === "error" && !BENIGN.some((b) => b.test(m.text()))) problems.push(`console: ${m.text()}`); });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     await use(problems);
     expect(problems, "console errors or page errors").toEqual([]);

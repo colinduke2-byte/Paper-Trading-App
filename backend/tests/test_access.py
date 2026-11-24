@@ -543,3 +543,63 @@ def test_sign_ins_survive_replay_and_stay_in_the_live_data_dir(monkeypatch, tmp_
     assert c.get("/api/accounts").status_code == 200 and second.get("/api/accounts").status_code == 200
     assert not [p for p in tmp_path.rglob("sessions.json") if p != live / "sessions.json"]
     assert token not in (live / "sessions.json").read_text()
+
+
+# ---- home-screen install: manifest and icons ------------------------------------------------------
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def test_manifest_and_icons_are_public_and_nothing_else_at_the_root_is(monkeypatch, ui_dir):
+    """The access layer stays deny-by-default: only the exact PUBLIC_STATIC paths are served from the build
+    root (they are fetched without cookies or before signing in, and hold nothing private); any other file
+    in the build, and any path trick, gets the UI shell, never the file."""
+    for path in auth.PUBLIC_STATIC:
+        f = ui_dir / path.lstrip("/")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"PUBLIC " + path.encode())
+    (ui_dir / "private.json").write_text('{"secret": 1}')
+    (ui_dir / "icons" / "extra.png").write_text("not on the list")
+    c, _, _ = locked(monkeypatch)
+    for path, media in auth.PUBLIC_STATIC.items():
+        r = c.get(path, headers={"host": "localhost:8000"})
+        assert r.status_code == 200, path
+        assert r.content == b"PUBLIC " + path.encode(), path
+        assert r.headers["content-type"].startswith(media), path
+        assert r.headers["x-content-type-options"] == "nosniff"
+        csp = r.headers["content-security-policy"]
+        assert "default-src 'self'" in csp and "img-src 'self'" in csp  # covers manifest-src and the icons
+    for path in ("/private.json", "/icons/extra.png", "/icons/../private.json", "/icons/%2e%2e/private.json",
+                 "/manifest.webmanifest/", "/MANIFEST.WEBMANIFEST"):
+        r = c.get(path)
+        assert "secret" not in r.text and "not on the list" not in r.text, path
+    # With the passcode on, the API stays closed.
+    assert c.get("/api/accounts").status_code == 401
+
+
+def test_a_missing_public_file_falls_back_to_the_ui_shell(monkeypatch, ui_dir):
+    """A missing icon falls back to the UI shell instead of an error."""
+    c, _, _ = locked(monkeypatch)
+    r = c.get("/apple-touch-icon.png")
+    assert r.status_code == 200 and '<div id="root">' in r.text
+
+
+def test_the_shipped_manifest_lists_only_public_files_that_exist():
+    import json
+    pub = os.path.join(REPO, "frontend", "public")
+    with open(os.path.join(pub, "manifest.webmanifest"), encoding="utf-8") as f:
+        m = json.load(f)
+    assert m["display"] == "standalone" and m["start_url"] == "/" and m["short_name"] == "PaperDesk"
+    assert m["theme_color"] == "#12161c" and m["background_color"] == "#0b0e12"
+    sizes = {i["sizes"] for i in m["icons"]}
+    assert {"192x192", "512x512"} <= sizes
+    assert any(i.get("purpose") == "maskable" for i in m["icons"])
+    for icon in m["icons"]:
+        assert icon["src"] in auth.PUBLIC_STATIC, icon["src"]
+        assert os.path.isfile(os.path.join(pub, icon["src"].lstrip("/"))), icon["src"]
+    for path in auth.PUBLIC_STATIC:
+        assert os.path.isfile(os.path.join(pub, path.lstrip("/"))), f"{path} is allowlisted but not in frontend/public"
+    with open(os.path.join(REPO, "frontend", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    for ref in ("/manifest.webmanifest", "/apple-touch-icon.png", "/favicon.ico", "/favicon.svg"):
+        assert f'href="{ref}"' in html and ref in auth.PUBLIC_STATIC, ref

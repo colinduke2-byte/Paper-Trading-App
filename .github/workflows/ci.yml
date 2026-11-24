@@ -89,12 +89,26 @@ jobs:
       - run: npx playwright install --with-deps ${{ matrix.engine }}
         working-directory: e2e
       # The test run starts its own servers (synthetic feed, private ports, temporary data directories).
-      - run: npx playwright test --shard=${{ matrix.shard }}/${{ matrix.shards }}
+      # With the label update-visual-baselines on the pull request, baselines that differ are rewritten
+      # (--update-snapshots=changed) instead of failing; missing ones are always written. Either way the
+      # next step prints the new files so they can be committed (see e2e/README.md).
+      - run: npx playwright test --shard=${{ matrix.shard }}/${{ matrix.shards }} ${{ contains(github.event.pull_request.labels.*.name, 'update-visual-baselines') && '--update-snapshots=changed' || '' }}
         working-directory: e2e
         env:
           CI: "true"
           E2E_PYTHON: python
           E2E_ENGINES: ${{ matrix.engine }}
+      - name: Print new or changed visual baselines
+        if: always()
+        working-directory: e2e
+        run: |
+          files="$(git status --porcelain --untracked-files=all -- tests/__screenshots__ | cut -c4-)"
+          if [ -z "$files" ]; then echo "No new or changed visual baselines."; exit 0; fi
+          echo "$files"
+          echo "Decode with: tools/baselines_from_log.py <log file> (from the repository root)."
+          echo "----- BEGIN PAPERDESK BASELINES -----"
+          (cd .. && printf '%s\n' $files | tar czf - -T -) | base64 -w 120
+          echo "----- END PAPERDESK BASELINES -----"
       - name: Upload traces, screenshots and new visual baselines
         if: failure()
         uses: actions/upload-artifact@v4.6.2
@@ -133,38 +147,40 @@ jobs:
         working-directory: frontend
       - run: npm ci
         working-directory: e2e
-      - name: Start run.bat and wait for the API
+      # One step: a process started with Start-Process does not outlive the step that started it.
+      - name: Start run.bat, then run the desktop and sign-in suites in Edge against it
         shell: pwsh
+        working-directory: e2e
         env:
           PAPERDESK_NO_BROWSER: "1"
           PAPERDESK_NO_PAUSE: "1"
           PAPERDESK_DATA: ${{ runner.temp }}\paperdesk-e2e-data
           PORT: "8000"
-        run: |
-          $log = Join-Path $env:RUNNER_TEMP 'run-bat-e2e.log'
-          $p = Start-Process -FilePath cmd.exe -ArgumentList '/c', 'run.bat' -RedirectStandardOutput $log `
-               -RedirectStandardError "$log.err" -PassThru -NoNewWindow
-          for ($i = 0; $i -lt 180; $i++) {
-            if ($p.HasExited) { break }
-            try { $s = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/status' -TimeoutSec 3; if ($s.paper -eq $true) { exit 0 } } catch { }
-            Start-Sleep -Seconds 2
-          }
-          Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
-          throw 'run.bat did not start the server on http://127.0.0.1:8000'
-      - name: Desktop and sign-in suites in Edge
-        working-directory: e2e
-        env:
           CI: "true"
-          E2E_SKIP_BUILD: "1"
           E2E_BASE_URL: http://127.0.0.1:8000
           E2E_ENGINES: chromium
           E2E_CHANNEL: msedge
           E2E_PYTHON: ${{ github.workspace }}\backend\.venv\Scripts\python.exe
-        run: npx playwright test --project=desktop --project=auth-desktop
-      - name: Server output
-        if: always()
-        shell: pwsh
-        run: Get-Content (Join-Path $env:RUNNER_TEMP 'run-bat-e2e.log'), (Join-Path $env:RUNNER_TEMP 'run-bat-e2e.log.err') -ErrorAction SilentlyContinue | Select-Object -Last 200
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'run-bat-e2e.log'
+          $p = Start-Process -FilePath cmd.exe -ArgumentList '/c', '..\run.bat' -RedirectStandardOutput $log `
+               -RedirectStandardError "$log.err" -PassThru -NoNewWindow
+          $ok = $false
+          try {
+            for ($i = 0; $i -lt 180; $i++) {
+              if ($p.HasExited) { break }
+              try { $s = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/status' -TimeoutSec 3; if ($s.paper -eq $true) { $ok = $true; break } } catch { }
+              Start-Sleep -Seconds 2
+            }
+            if (-not $ok) { throw 'run.bat did not start the server on http://127.0.0.1:8000' }
+            Write-Host "Time zone: $((Get-TimeZone).Id)"
+            npx playwright test --project=desktop --project=auth-desktop
+            if ($LASTEXITCODE -ne 0) { throw "Playwright failed with exit code $LASTEXITCODE" }
+          } finally {
+            Write-Host '--- run.bat output (last 100 lines) ---'
+            Get-Content $log, "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 100
+            taskkill /PID $p.Id /T /F | Out-Null
+          }
       - name: Upload traces and screenshots
         if: failure()
         uses: actions/upload-artifact@v4.6.2
