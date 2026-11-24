@@ -1,0 +1,31 @@
+# PaperDesk in Docker. Start: docker compose up --build   then open http://127.0.0.1:8000
+#
+# SECURITY: PaperDesk has NO login. Anyone who can reach the port can trade, reset and delete your
+# paper accounts. The port is therefore published on 127.0.0.1 only. Do not change it to
+# "8000:8000" or "0.0.0.0:8000:8000", and do not put it behind a public reverse proxy without
+# adding your own authentication in front.
+services:
+  paperdesk:
+    build: .
+    image: paperdesk:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}"
+    env_file:
+      - path: .env        # optional: copy .env.example to .env to change settings
+        required: false
+    environment:
+      HOST: 0.0.0.0        # inside the container only; the published port above is host-local
+      PORT: "${PORT:-8000}"
+      PAPERDESK_DATA: /data
+    volumes:
+      - paperdesk-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  paperdesk-data:

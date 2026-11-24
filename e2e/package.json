@@ -1,0 +1,14 @@
+{
+  "name": "paperdesk-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build-ui": "node build-ui.mjs",
+    "test": "node build-ui.mjs && playwright test",
+    "test:only": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22.0.0"
+  }
+}

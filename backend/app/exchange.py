@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import time as _time
 from decimal import Decimal
 from itertools import count
 from typing import Optional
@@ -594,10 +595,29 @@ class Exchange:
 
     @staticmethod
     def _write(path: str, data: dict) -> None:
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
+        # The temp file is created in the target directory, so the replace never crosses volumes.
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            # On Windows os.replace raises PermissionError while another process (a virus scanner, an
+            # editor, a backup tool) briefly holds the target open, so retry for a short while.
+            for attempt in range(10):
+                try:
+                    os.replace(tmp, path)
+                    return
+                except PermissionError:
+                    if attempt == 9:
+                        raise
+                    _time.sleep(0.05 * (attempt + 1))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def save(self, force: bool = False) -> None:
         if not self.data_dir:
@@ -633,12 +653,12 @@ class Exchange:
         if not self.data_dir:
             return False
         try:
-            with open(self._path("market.json")) as f:
+            with open(self._path("market.json"), encoding="utf-8") as f:
                 self.feed.restore(json.load(f))
         except (OSError, ValueError):
             pass
         try:
-            with open(self._path("state.json")) as f:
+            with open(self._path("state.json"), encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
             return False
