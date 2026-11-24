@@ -3,6 +3,7 @@ import { Chart } from "./Chart";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
 import { Ticket, TicketSeed } from "./Ticket";
+import { jumpKey, modeKey, ReplayBar, ReplayButton, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { api, isOption, money, pct, signed, store, time, tone, underlyingOf, usd } from "./util";
 
 type Toast = { id: number; text: string; bad?: boolean };
@@ -24,6 +25,7 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [dialog, setDialog] = useState<null | "new" | "reset">(null);
+  const [replayPicker, setReplayPicker] = useState(false);
   const ws = useRef<WebSocket | null>(null);
   const toastId = useRef(0);
 
@@ -111,7 +113,17 @@ export default function App() {
     api("/watchlists/Main", { method: "PUT", body: list }).catch((e) => notify(`Could not save the watchlist: ${e.message}`, true));
   };
 
-  const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000);
+  // Switching between live and replay changes the active exchange: reload what belongs to it.
+  useModeSwitch(status, async () => {
+    const [list, wl, syms] = await Promise.all([loadAccounts(), api("/watchlists"), api("/symbols")]).catch(() => [[], {}, []]);
+    setAccountId((cur) => (list.find((a: any) => a.id === cur) ? cur : list[0]?.id || ""));
+    const main = wl.Main || Object.values(wl)[0] || [];
+    setWatch(main);
+    setSymbol((cur) => (syms.some((x: any) => x.symbol === cur) ? cur : main[0] || syms[0]?.symbol || cur));
+    setRefreshKey((k) => k + 1);
+  });
+
+  const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000, [modeKey(status)]);
   const ticketPos = positions.find((p) => p.symbol === seed.symbol);
   const stockPos = positions.find((p) => p.symbol === symbol);
   const openForSymbol = orders.filter((o) => o.symbol === symbol && ["working", "partially_filled"].includes(o.status));
@@ -129,8 +141,8 @@ export default function App() {
     <div className="app">
       <header className="top">
         <div className="brand">PaperDesk</div>
-        <div className="paper-banner" role="note">
-          Paper trading · no real money{status?.simulated_data ? " · simulated market data" : status?.delay_seconds ? ` · data delayed ${status.delay_seconds / 60} min` : ""}
+        <div className={status?.replay ? "paper-banner replay" : "paper-banner"} role="note">
+          {replayBanner(status) ?? <>Paper trading · no real money{status?.simulated_data ? " · simulated market data" : status?.delay_seconds ? ` · data delayed ${status.delay_seconds / 60} min` : ""}</>}
         </div>
         <div className="top-stats">
           <div><span>Account value</span><b>{usd(summary?.equity)}</b></div>
@@ -147,12 +159,14 @@ export default function App() {
           </select>
           <button className="ghost sm" onClick={() => setDialog("new")}>New account</button>
           <button className="ghost sm" onClick={() => setDialog("reset")}>Reset</button>
+          <ReplayButton status={status} onOpen={() => setReplayPicker(true)} />
         </div>
       </header>
+      <ReplayBar status={status} onStatus={setStatus} notify={notify} />
       {summary?.margin_call && (
         <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
       )}
-      <main>
+      <main key={modeKey(status) || "live"}>
         <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={setSymbol} onChange={saveWatch} />
         <div className="center-col">
           <section className="panel main-view">
@@ -163,7 +177,7 @@ export default function App() {
               ))}
             </div>
             <div className="view">
-              {view === "Chart" && <Chart symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
+              {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
               {view === "Options" && <OptionChain symbol={symbol} onTrade={(s, side, price) => setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() })} />}
               {view === "Company" && <Company info={info} />}
             </div>
@@ -184,6 +198,7 @@ export default function App() {
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
+      {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
       {dialog && (
         <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
           onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />
