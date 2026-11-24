@@ -18,7 +18,7 @@ export type AlertSeed = { kind?: string; symbol?: string; price?: number | strin
 const KINDS: [string, string][] = [
   ["price", "Price"], ["change", "Percent change"], ["volume", "Volume"], ["indicator", "Indicator"],
   ["option", "Option contract"], ["position", "Position gain or loss"], ["account", "Account value and margin"],
-  ["reminder", "Reminder"], ["calendar", "Dividend and split dates"],
+  ["reminder", "Reminder"], ["calendar", "Dividend, split and earnings dates"],
 ];
 const KIND_LABEL = Object.fromEntries(KINDS);
 const ACCOUNT_ONLY = ["position", "account", "calendar"];
@@ -226,14 +226,14 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
         {kind === "calendar" && <>
           <fieldset className="notif-types">
             <legend>For symbols this account holds, tell me about</legend>
-            {["dividend", "split"].map((ev) => (
+            {["dividend", "split", "earnings"].map((ev) => (
               <label key={ev} className="check"><input type="checkbox" checked={f.events.includes(ev)}
                 onChange={(e) => setF({ ...f, events: e.target.checked ? [...f.events, ev] : f.events.filter((x: string) => x !== ev) })} />
-                {ev === "dividend" ? "Dividend ex-dates" : "Stock splits"}</label>
+                {ev === "dividend" ? "Dividend ex-dates" : ev === "split" ? "Stock splits" : "Earnings reports"}</label>
             ))}
           </fieldset>
           <label>Days ahead<input value={f.days_before} inputMode="numeric" onChange={set("days_before")} /></label>
-          <p className="hint">Earnings dates are not available from the data feed, so there is no earnings alert.</p>
+          <p className="hint">Earnings reports come from the simulated research of the fictional companies; a live data feed does not supply them here.</p>
         </>}
 
         <label>{kind === "reminder" ? "Message" : "Note (optional)"}<input value={f.message} maxLength={200} onChange={set("message")} /></label>

@@ -230,7 +230,7 @@ export default function App() {
         onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
-      {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
+      {view === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
     </div>
   );
   const bottom = accountId && (

@@ -19,7 +19,8 @@ Kinds and their params:
   position   account, symbol, metric unrealized_pnl / unrealized_pct, op, value
   account    account, metric equity / buying_power / margin_excess / unrealized_pnl / day_pnl, op, value
   reminder   at (time), message; with repeat it comes back every `cooldown` seconds
-  calendar   account, events dividend/split, days_before: upcoming ex-dates of symbols held
+  calendar   account, events dividend/split/earnings, days_before: upcoming ex-dates (and earnings
+             reports, where the feed's research schedules them) of symbols held
 
 Firing rule: an alert fires when its condition is true and it is armed. A one-shot alert is then
 done (status triggered). A re-arming alert disarms; it arms again once its condition has been seen
@@ -43,7 +44,7 @@ ACCOUNT_METRICS = {"equity": "Account value", "buying_power": "Buying power", "m
                    "unrealized_pnl": "Unrealised gain/loss", "day_pnl": "Day gain/loss"}
 POSITION_METRICS = {"unrealized_pnl": "unrealised gain/loss", "unrealized_pct": "unrealised gain/loss %"}
 OPTION_METRICS = {"iv": "Implied volatility", "delta": "Delta"}
-CALENDAR_EVENTS = ("dividend", "split")
+CALENDAR_EVENTS = ("dividend", "split", "earnings")  # earnings: feeds whose research has a schedule
 DEFAULT_COOLDOWN = 900
 MAX_COOLDOWN = 30 * 86400
 MAX_MESSAGE = 200
@@ -232,9 +233,9 @@ def build(ex, req: dict, now: float) -> dict:
         p["at"] = at
         al["value"] = "0"
     elif kind == "calendar":
-        events = req.get("events") or list(CALENDAR_EVENTS)
+        events = req.get("events") or ["dividend", "split"]
         if not isinstance(events, list) or not events or any(e not in CALENDAR_EVENTS for e in events):
-            raise ValueError("calendar events must be a list of: dividend, split")
+            raise ValueError("calendar events must be a list of: dividend, split, earnings")
         try:
             days = int(req.get("days_before", 3))
         except (TypeError, ValueError):
@@ -334,7 +335,8 @@ def describe(al: dict) -> str:
         return f"Reminder at {when(p['at'])}{every}"
     if k == "calendar":
         ev = " and ".join(p.get("events", []))
-        return f"Upcoming {ev} ex-dates of symbols you hold, {p.get('days_before', 0)} days ahead"
+        noun = "dates" if "earnings" in p.get("events", []) else "ex-dates"
+        return f"Upcoming {ev} {noun} of symbols you hold, {p.get('days_before', 0)} days ahead"
     return k
 
 
