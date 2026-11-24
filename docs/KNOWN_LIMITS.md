@@ -20,6 +20,9 @@ while writing this list.
   (`paper-api.alpaca.markets`), whether the free plan includes corporate actions, news and delayed
   SIP data, and the units of Alpaca's option greeks (assumed per day for theta and per volatility point
   for vega). The `--check` command was run only without a key and with a fake key (tested).
+- **Alpaca crypto data.** Built only against the example responses in Alpaca's documentation; never run
+  with a real key (plan coverage, rate limits, stream limits, listed increments vs quoted prices). See
+  [CRYPTO.md](CRYPTO.md#what-has-not-been-tested-against-the-live-service).
 - **Finnhub.** Not tested against the live service at all, including its free per-minute limit.
 - **Windows.** `run.bat` is started by an automated Windows test, but nobody has used the Windows
   instructions by hand on a real PC while this guide was written. The firewall and Wi-Fi network
@@ -30,6 +33,10 @@ while writing this list.
 
 ## Simulated prices and data
 
+- **Crypto (see [CRYPTO.md](CRYPTO.md)).** The simulated coins are invented. One fee rate for every fill
+  (no maker/taker split, always taken in dollars); no linked orders or trailing stops; only USD pairs; crypto
+  day orders end at midnight UTC.
+
 - **The default market is fictional.** Prices follow a random walk with a fixed seed. Companies, their
   fundamentals, dividends and the yearly split are generated. Nothing about them predicts anything real.
 - **Simulated prices only move while PaperDesk runs.** Orders can only fill while it runs, in both
@@ -37,7 +44,7 @@ while writing this list.
 - **"Always open" is the default in simulated mode.** The market never closes. A "day" is a UTC day, so a
   Day order expires and T+1 settlement happens at midnight UTC (7 pm New York time in winter, 8 pm in
   summer).
-- **The depth ladder is always synthetic**, even with real data: it is built from the top-of-book quote.
+- **The depth ladder is synthetic for stocks**, even with real data (crypto pairs with Alpaca show Alpaca's order book): it is built from the top-of-book quote.
 - **Day P&L resets at midnight UTC in both session modes** (code reading), not at the market open, so with
   market hours it resets in the evening in New York.
 - **Replay sessions that come with the program are simulated.** Sessions built from one-minute bars are
