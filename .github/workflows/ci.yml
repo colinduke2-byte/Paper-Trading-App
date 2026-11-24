@@ -48,6 +48,8 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
+      - run: npm test
+        working-directory: frontend
       # Workers do not commit frontend/dist, so on a pull request the build is only handed over for review.
       - name: Upload the built UI
         if: github.event_name == 'pull_request'

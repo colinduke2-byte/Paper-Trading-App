@@ -450,3 +450,33 @@ test("Settings, Research and Reports work inside the phone shell", async ({ page
   }
   expect(found, "controls smaller than 40 px").toEqual([]);
 });
+
+test("Help opens from the menu, fits a phone and has 40 px targets", async ({ page, open }) => {
+  await open();
+  await page.getByRole("button", { name: "Menu" }).tap();
+  await page.getByRole("dialog", { name: "Menu" }).getByRole("button", { name: "Help", exact: true }).tap();
+  const help = page.getByRole("dialog", { name: "Help" });
+  await expect(help).toBeVisible();
+  await expect(help).toContainText("Getting started");
+  const found: string[] = [];
+  // Open every section: the targets must be big enough and nothing may push the page sideways.
+  const sections = help.locator("summary");
+  const n = await sections.count();
+  expect(n).toBeGreaterThanOrEqual(5);
+  for (let i = 0; i < n; i++) {
+    const s = sections.nth(i);
+    const open = await s.evaluate((el) => (el.parentElement as HTMLDetailsElement).open);
+    if (!open) await s.tap();
+    const box = await s.boundingBox();
+    if (box && box.height < 40) found.push(`summary ${i} is ${Math.round(box.height)} px tall`);
+  }
+  found.push(...await smallTargets(page, "Help dialog"));
+  expect(await overflow(page), "Help: no horizontal page scroll").toBeLessThanOrEqual(0);
+  const box = await help.boundingBox();
+  expect(box!.x, "Help dialog starts inside the screen").toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width, "Help dialog fits the width").toBeLessThanOrEqual(page.viewportSize()!.width + 1);
+  expect(box!.y + box!.height, "Help dialog fits the height").toBeLessThanOrEqual(page.viewportSize()!.height + 1);
+  expect(found, "targets under 40 px").toEqual([]);
+  await help.getByRole("button", { name: "Close help" }).tap();
+  await expect(help).toHaveCount(0);
+});

@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Chart } from "./Chart";
+import { Chart, SHORTCUTS_EVENT } from "./Chart";
+import { Shortcuts } from "./chart/Shortcuts";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
 import { BottomPanel } from "./Panels";
 import { feedBanner, Research } from "./Research";
@@ -7,6 +8,7 @@ import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
+import { HelpDialog } from "./Help";
 import { api, dateTime, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
 import { useSignOutAction } from "./Login";
 
@@ -31,6 +33,7 @@ export default function App() {
   const [dialog, setDialog] = useState<null | "new" | "reset" | "delete">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
@@ -165,6 +168,8 @@ export default function App() {
     ...(accounts.length > 1 && accountId ? [{ label: "Delete account", title: "Delete this paper account and its history", onClick: () => setDialog("delete") }] : []),
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
+    { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
+    { label: "Help", title: "How PaperDesk works", onClick: () => setHelpOpen(true) },
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
   ];
   const session = status ? `${status.session === "regular" ? "Market open" : status.session === "closed" ? "Market closed" : status.session === "pre" ? "Pre-market" : "After hours"} · ${time(status.time)}` : "Connecting…";
@@ -193,9 +198,12 @@ export default function App() {
       ))}
     </div>
   );
+  const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const mainView = (
     <div className="view">
-      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol} />}
+      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol}
+        accountId={accountId} notify={notify} onOrdersChanged={() => setRefreshKey((k) => k + 1)} scope={status?.replay ? `replay:${status.replay.session_id}` : "live"}
+        onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
       {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
@@ -211,13 +219,15 @@ export default function App() {
   );
   const depth = <DepthTape symbol={underlyingOf(symbol)} />;
   const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
-  const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const overlays = (
     <>
+      <Shortcuts symbols={watch} symbol={symbol} onSelect={setSymbol} accountId={accountId} orders={orders} notify={notify}
+        onChanged={() => setRefreshKey((k) => k + 1)} onTicket={small ? () => setScreen("Trade") : undefined} />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {settingsOpen && accountId && (
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}
