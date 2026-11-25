@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Callable, Optional
 
 from ..core import calendar as cal
-from .http import ProviderError, dec, parse_ts
+from .http import ProviderError, dec, parse_ts, web_url
 
 log = logging.getLogger("paperdesk.research")
 
@@ -60,11 +60,11 @@ def news_records(rows: list) -> list:
     """Alpaca /v1beta1/news articles -> plain records (newest first)."""
     out = []
     for r in rows or []:
-        images = {i.get("size"): i.get("url") for i in r.get("images") or []}
+        images = {i.get("size"): web_url(i.get("url")) for i in r.get("images") or [] if isinstance(i, dict)}
         out.append({"id": r.get("id"), "headline": r.get("headline") or "", "summary": r.get("summary") or "",
-                    "source": r.get("source") or "", "url": r.get("url") or "", "author": r.get("author") or "",
+                    "source": r.get("source") or "", "url": web_url(r.get("url")), "author": r.get("author") or "",
                     "created_at": parse_ts(r.get("created_at")), "updated_at": parse_ts(r.get("updated_at")),
-                    "symbols": r.get("symbols") or [], "image": images.get("thumb") or images.get("small"),
+                    "symbols": r.get("symbols") or [], "image": images.get("thumb") or images.get("small") or None,
                     "provider": "alpaca"})
     return sorted(out, key=lambda r: r["created_at"] or 0, reverse=True)
 
@@ -79,6 +79,10 @@ def envelope(source, items=None, *, as_of=None, available=True, stale=False, rea
 
 
 class _Cache:
+    """At most MAX_ROWS entries (keys include symbols and date windows from requests); the entry fetched
+    longest ago is dropped first."""
+    MAX_ROWS = 512
+
     def __init__(self, clock):
         self.clock, self.rows, self.lock = clock, {}, threading.Lock()
 
@@ -96,7 +100,10 @@ class _Cache:
                 return hit[1], hit[0], True, e.message
             return None, None, True, e.message
         with self.lock:
+            self.rows.pop(key, None)  # re-inserting moves the key to the newest end
             self.rows[key] = (now, value)
+            while len(self.rows) > self.MAX_ROWS:
+                del self.rows[next(iter(self.rows))]
         return value, now, False, None
 
 

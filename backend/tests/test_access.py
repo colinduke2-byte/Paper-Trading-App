@@ -337,7 +337,8 @@ def test_cross_origin_writes_are_refused(monkeypatch, env):
     assert c.post("/api/accounts", json=body, headers={"origin": "http://testserver",
                                                        "sec-fetch-site": "same-origin"}).status_code == 200
     assert c.post("/api/accounts", json=body).status_code == 200          # non-browser client
-    assert c.get("/api/accounts", headers={"origin": "http://evil.example"}).status_code == 200  # reads are safe
+    # reads too: another site must not be able to pull account data (hardening review); see test_hardening.py
+    assert c.get("/api/accounts", headers={"origin": "http://evil.example"}).status_code == 403
     with pytest.raises(WebSocketDisconnect):
         with c.websocket_connect("/ws", headers={"origin": "http://evil.example"}) as ws:
             ws.receive_json()

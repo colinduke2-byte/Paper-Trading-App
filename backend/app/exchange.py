@@ -32,6 +32,9 @@ MAX_QTY = Decimal(1_000_000)
 MAX_LINKED = 5  # orders in one one-cancels-other or one-triggers-other request
 MAX_GTD_DAYS = 366
 MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be larger than this
+MAX_ACCOUNTS = 100      # entity limits: each one keeps the state file and every tick bounded
+MAX_OPEN_ORDERS = 1000  # working orders per account
+MAX_WATCHLISTS = 50
 CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its intrinsic value, not exercised
 RUNNING_GAP = 120  # seconds: a longer gap between two ticks means the simulator was not running (or was paused)
 CLOSE_WAIT = 120  # seconds to wait for the provider's daily close before settling at an approximate price
@@ -169,6 +172,8 @@ class Exchange:
     # ---- accounts --------------------------------------------------------
     def create_account(self, name: str, type: str = "margin", starting_cash=Decimal("100000")) -> Account:
         starting_cash = _starting_cash(starting_cash)
+        if len(self.accounts) >= MAX_ACCOUNTS:
+            raise ValueError(f"there are already {MAX_ACCOUNTS} accounts; delete one first")
         name = (name or "").strip()[:40] or "Paper account"
         acct = Account(f"A{next(self._acct_seq):04d}", name, type, starting_cash, self.now())
         self.accounts[acct.id] = acct
@@ -179,14 +184,16 @@ class Exchange:
         """Start the account again with fresh cash. Its rule settings and tax-lot method are kept; positions,
         orders, history and the trade journal are cleared."""
         old = self.account(account_id)
+        # Validate and build the new account first: a bad value must leave the old state untouched.
         cash = _starting_cash(starting_cash) if starting_cash is not None else old.starting_cash
+        new = Account(old.id, old.name, old.type, cash, self.now())
+        new.settings = dict(old.settings)  # a reset keeps the account's rule settings
+        new.lot_method = old.lot_method  # ... and its tax-lot method
+        new.to_plain()  # the account must be saveable, or the next start-up could not load the state file
         for o in self.engine.active_orders():
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
-        new = Account(old.id, old.name, old.type, cash, self.now())
-        new.settings = dict(old.settings)  # a reset keeps the account's rule settings
-        new.lot_method = old.lot_method  # ... and its tax-lot method
         self._day_start_wanted.pop(old.id, None)
         self.accounts[old.id] = new
         self.dirty = True
@@ -789,6 +796,8 @@ class Exchange:
                 if o.account_id == account_id and o.client_id == str(req["client_id"])[:64]:
                     return [o] + [c for c in self.engine.orders.values()
                                   if c.id != o.id and (c.parent_id == o.id or c.oco_group == o.id)]
+        if sum(1 for o in self.engine.active_orders() if o.account_id == account_id) >= MAX_OPEN_ORDERS:
+            raise OrderRejected(f"this account already has {MAX_OPEN_ORDERS} working orders; cancel some first")
         orders = self._validate(a, req)
         entry = orders[0]
         worst = self._risk_check(a, orders)

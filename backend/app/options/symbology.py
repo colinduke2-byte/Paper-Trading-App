@@ -9,6 +9,7 @@ from typing import Optional
 from ..core import calendar as cal
 
 _RE = re.compile(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
+MAX_SYMBOL = 21  # the longest OCC symbol: a 6-letter root, YYMMDD, C or P and 8 strike digits
 
 
 @dataclass(frozen=True)
@@ -24,9 +25,17 @@ class Contract:
         return cal.close_ts(self.expiry)
 
 
-@lru_cache(maxsize=20000)
 def parse(symbol: str) -> Optional[Contract]:
-    m = _RE.match(symbol or "")
+    """The contract an OCC symbol names, or None. Anything longer than an OCC symbol is refused before
+    the cache, so untrusted input (a request path, a WebSocket list) cannot fill it with large strings."""
+    if not isinstance(symbol, str) or len(symbol) > MAX_SYMBOL:
+        return None
+    return _parse(symbol)
+
+
+@lru_cache(maxsize=20000)
+def _parse(symbol: str) -> Optional[Contract]:
+    m = _RE.match(symbol)
     if not m:
         return None
     root, yy, mm, dd, kind, strike = m.groups()

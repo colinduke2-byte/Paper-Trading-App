@@ -48,6 +48,24 @@ def dec(v) -> Optional[Decimal]:
     return Decimal(str(v))
 
 
+MAX_URL = 2048
+
+
+def web_url(v) -> str:
+    """A provider-supplied link, kept only when it is an absolute http or https URL. Anything else
+    (javascript:, data:, relative paths, overlong text) becomes "" so the UI never renders it as a link."""
+    if not isinstance(v, str):
+        return ""
+    v = v.strip()
+    if len(v) > MAX_URL or any(c in v for c in "\r\n\t\x00"):
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(v)
+    except ValueError:
+        return ""
+    return v if parts.scheme.lower() in ("http", "https") and parts.netloc else ""
+
+
 _FRACTION = re.compile(r"(\.\d{1,6})\d*")
 
 
@@ -72,16 +90,41 @@ class Transport:
         raise NotImplementedError
 
 
+MAX_RESPONSE = 32 * 1024 * 1024  # bytes in one provider response
+MAX_ERROR_BODY = 64 * 1024       # bytes kept from an error response (only its message is shown)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the credentials in the headers must only reach the configured host.
+    urllib then reports the 3xx as an HTTPError, which ``get`` returns as that status."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def read_bounded(fp, limit: int, host: str) -> bytes:
+    data = fp.read(limit + 1)
+    if len(data) > limit:
+        raise ProviderError(0, f"the response from {host} was larger than {limit // (1024 * 1024)} MB; "
+                               "it was not read")
+    return data
+
+
 class UrllibTransport(Transport):
-    """Standard-library HTTPS client. It honours HTTPS_PROXY like the rest of Python."""
+    """Standard-library HTTPS client. It honours HTTPS_PROXY like the rest of Python, never follows
+    redirects and reads at most MAX_RESPONSE bytes of a response."""
+
+    def __init__(self):
+        self._opener = urllib.request.build_opener(_NoRedirect)
 
     def get(self, url: str, headers: dict, timeout: float) -> tuple:
         req = urllib.request.Request(url, headers=headers, method="GET")
+        host = urllib.parse.urlsplit(url).hostname or "the provider"
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.status, dict(r.headers.items()), r.read().decode("utf-8", "replace")
+            with self._opener.open(req, timeout=timeout) as r:
+                return r.status, dict(r.headers.items()), read_bounded(r, MAX_RESPONSE, host).decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace") if e.fp else ""
+            body = e.fp.read(MAX_ERROR_BODY).decode("utf-8", "replace") if e.fp else ""
             return e.code, dict(e.headers.items()) if e.headers else {}, body
         except urllib.error.URLError as e:
             raise OSError(str(e.reason)) from None
