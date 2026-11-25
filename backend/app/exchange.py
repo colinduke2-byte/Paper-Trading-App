@@ -1,4 +1,6 @@
 """The simulated broker: wires market data, matching, accounts, risk and options."""
+import contextlib
+import copy
 import json
 import os
 import re
@@ -32,7 +34,7 @@ MAX_QTY = Decimal(1_000_000)
 MAX_LINKED = 5  # orders in one one-cancels-other or one-triggers-other request
 MAX_GTD_DAYS = 366
 MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be larger than this
-MAX_ACCOUNTS = 100      # entity limits: each one keeps the state file and every tick bounded
+MAX_ACCOUNTS = 1000     # entity limits: each one keeps the state file and every tick bounded
 MAX_OPEN_ORDERS = 1000  # working orders per account
 MAX_WATCHLISTS = 50
 CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its intrinsic value, not exercised
@@ -102,6 +104,9 @@ class Exchange:
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
         self.dirty = False
+        self._io_lock = threading.Lock()  # serialises file writes; never taken before the exchange lock is released
+        self._snapshot_seq = 0  # numbers snapshots so a late writer cannot overwrite a newer file
+        self._written: dict[str, int] = {}
         # Expiry settlement prices: (underlying, expiry ISO) -> (price, exact, note); fetches of the provider's
         # daily close in progress or finished: key -> {"started": ts, "done": bool}.
         self._settle_prices: dict = {}
@@ -194,6 +199,7 @@ class Exchange:
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
+        self.engine.reindex()
         self._day_start_wanted.pop(old.id, None)
         self.accounts[old.id] = new
         self.dirty = True
@@ -204,6 +210,7 @@ class Exchange:
         if len(self.accounts) == 1:
             raise ValueError("cannot delete the only account")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
+        self.engine.reindex()
         del self.accounts[account_id]
         self.dirty = True
 
@@ -283,6 +290,56 @@ class Exchange:
         elif status == "closed":
             rows = [o for o in rows if not o.active]
         return sorted(rows, key=lambda o: (o.created_at, o.id), reverse=True)
+
+    # ---- all-or-nothing changes ----------------------------------------------------
+    @contextlib.contextmanager
+    def _atomic(self, account_id: str):
+        """Run one change to an account as a unit: if the block raises, nothing of it remains.
+
+        A submit can book several fills (every leg of a multi-leg order, a bracket entry) and a replace
+        edits several fields; a fault half way must not leave an order without its fill, a fill without
+        its ledger posting or half an edit. Restored on failure: the account's ledger, lots, fills, closed
+        trades, lifecycle state and notifications, its open orders (and any order added), the event queue
+        and the fill counter. Order ids used by a failed request are not reused.
+        """
+        a = self.accounts.get(account_id)
+        if a is None:
+            yield
+            return
+        orders = self.engine.orders
+        n_orders = len(orders)
+        saved = [(o, dict(o.__dict__)) for o in self.engine.active_orders() if o.account_id == account_id]
+        led = a.ledger
+        n_txn, balances = len(led.transactions), dict(led.balances)
+        lots = {s: [copy.copy(l) for l in ls] for s, ls in a.lots.items()}
+        n_fills, n_closed, life = len(a.fills), len(a.closed), a.life.copy()
+        # `dirty` is not put back: the save thread sets it when a write fails, and a rolled-back request
+        # costs one extra save at most.
+        n_events = len(self.events)
+        notices = self.alerting.notices
+        notes, note_seq = list(notices.logs.get(account_id, ())), notices.seq
+        fill_seq = next(self.engine._fill_seq)
+        self.engine._fill_seq = count(fill_seq)
+        try:
+            yield
+        except BaseException:
+            if self.engine.orders is orders:
+                while len(orders) > n_orders:
+                    orders.popitem()
+            for o, fields in saved:
+                o.__dict__.clear()
+                o.__dict__.update(fields)
+            self.engine.reindex()  # orders open again, in their first order
+            del led.transactions[n_txn:]
+            led.balances = balances
+            a.lots = lots
+            del a.fills[n_fills:], a.closed[n_closed:], self.events[n_events:]
+            a.life = life
+            notices.logs[account_id], notices.seq = notes, note_seq
+            if not notes:
+                del notices.logs[account_id]
+            self.engine._fill_seq = count(fill_seq)
+            raise
 
     # ---- order entry -----------------------------------------------------
     def _check_symbol(self, account: Account, symbol: str):
@@ -788,6 +845,8 @@ class Exchange:
                                    "type": o.type, "role": o.role} for o in orders[1:]]}
 
     def submit(self, account_id: str, req: dict) -> list:
+        # Validation and the risk and rule checks change nothing but the order id counter, so the rollback
+        # snapshot is only taken once they have passed (a rejected order costs no copy).
         a = self.account(account_id)
         if not isinstance(req, dict):
             raise OrderRejected("an order must be a JSON object")
@@ -806,6 +865,12 @@ class Exchange:
         rule = self._rule_check(a, orders, worst)  # pattern day trader and settled-cash rules
         if rule:
             raise OrderRejected(rule)
+        with self._atomic(account_id):
+            self._place(orders)
+        return orders
+
+    def _place(self, orders: list) -> None:
+        entry = orders[0]
         now = self.now()
         sess, q = self.session(now), self.quote(entry.symbol)
         if entry.legs:
@@ -817,7 +882,6 @@ class Exchange:
         else:  # standalone one-cancels-other
             events = self.engine.submit_oco(orders, {o.symbol: self.quote(o.symbol) for o in orders}, now, sess)
         self._handle(events)
-        return orders
 
     def cancel(self, account_id: str, order_id: str) -> Order:
         o = self.engine.orders.get(order_id)
@@ -825,18 +889,24 @@ class Exchange:
             raise NotFound("no such order")
         if not o.active:
             raise ValueError("order is no longer open")
-        self._handle(self.engine.cancel(order_id, self.now(), "canceled by user"))
+        with self._atomic(account_id):
+            self._handle(self.engine.cancel(order_id, self.now(), "canceled by user"))
         return o
 
     def cancel_all(self, account_id: str) -> int:
         n = 0
-        for o in list(self.engine.active_orders()):
-            if o.account_id == account_id and o.active:
-                self._handle(self.engine.cancel(o.id, self.now(), "canceled by user"))
-                n += 1
+        with self._atomic(account_id):
+            for o in list(self.engine.active_orders()):
+                if o.account_id == account_id and o.active:
+                    self._handle(self.engine.cancel(o.id, self.now(), "canceled by user"))
+                    n += 1
         return n
 
     def replace(self, account_id: str, order_id: str, req: dict) -> Order:
+        with self._atomic(account_id):
+            return self._replace(account_id, order_id, req)
+
+    def _replace(self, account_id: str, order_id: str, req: dict) -> Order:
         o = self.engine.orders.get(order_id)
         if o is None or o.account_id != account_id:
             raise NotFound("no such order")
@@ -1418,11 +1488,34 @@ class Exchange:
 
     @staticmethod
     def _write(path: str, data: dict) -> None:
+        Exchange._write_text(path, json.dumps(data))
+
+    @staticmethod
+    def _read_text(path: str) -> str:
+        """The whole file, opened, read and closed in one step.
+
+        On Windows, opening a file raises PermissionError while it is being replaced (our own save
+        thread) or held open by another program (a virus scanner, a backup tool), so retry briefly
+        there; elsewhere PermissionError is a real permission problem and is raised at once.
+        """
+        attempts = 10 if os.name == "nt" else 1
+        for attempt in range(attempts):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return f.read()
+            except PermissionError:
+                if attempt == attempts - 1:
+                    raise
+                _time.sleep(0.02 * (attempt + 1))
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _write_text(path: str, text: str) -> None:
         # The temp file is created in the target directory, so the replace never crosses volumes.
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+                f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
             # On Windows os.replace raises PermissionError while another process (a virus scanner, an
@@ -1442,22 +1535,27 @@ class Exchange:
                 pass
             raise
 
-    def save(self, force: bool = False) -> None:
+    def save_plan(self, force: bool = False) -> list:
+        """What save() would write now, already serialised: [(file name, JSON text, sequence number)].
+
+        Call it while holding the exchange lock (it reads all state and resets `dirty`), then hand the
+        result to write_plan() after releasing the lock, so no disk I/O happens under it.
+        """
         if not self.data_dir:
-            return
-        os.makedirs(self.data_dir, exist_ok=True)
+            return []
+        files = []
         if self.dirty or force:
             # Cleared before the state is gathered (a change made meanwhile marks it dirty again) and set
             # back if the write fails, so a failed write is retried on the next save.
             self.dirty = False
             try:
-                self._write(self._path("state.json"), {
+                files.append(("state.json", json.dumps({
                     "version": 1,
                     "accounts": [a.to_plain() for a in self.accounts.values()],
                     "orders": [to_plain(o) for o in self.engine.orders.values()],
                     "watchlists": self.watchlists, "alerts": self.alerting.to_plain(),
                     "notifications": self.alerting.notices.to_plain(),
-                    "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})
+                    "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})))
             except BaseException:
                 self.dirty = True
                 raise
@@ -1466,7 +1564,30 @@ class Exchange:
             self._last_market_save = now
             snap = self.feed.snapshot()
             if snap:
-                self._write(self._path("market.json"), snap)
+                files.append(("market.json", json.dumps(snap)))
+        self._snapshot_seq += 1
+        return [(name, text, self._snapshot_seq) for name, text in files]
+
+    def write_plan(self, files: list) -> None:
+        """Write the result of save_plan() to disk. Needs no exchange lock; an older snapshot never
+        replaces a newer one, whichever thread gets here first."""
+        if not files:
+            return
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with self._io_lock:
+                for name, text, seq in files:
+                    if seq > self._written.get(name, 0):
+                        self._write_text(self._path(name), text)
+                        self._written[name] = seq
+        except BaseException:
+            self.dirty = True  # not on disk: the next save tries again
+            if any(name == "market.json" for name, _, _ in files):
+                self._last_market_save = 0.0  # ... and the market snapshot too, not a minute later
+            raise
+
+    def save(self, force: bool = False) -> None:
+        self.write_plan(self.save_plan(force))
 
     @staticmethod
     def _drop_unpriced_samples(a: Account) -> int:
@@ -1516,20 +1637,21 @@ class Exchange:
         if not self.data_dir:
             return False
         try:
-            with open(self._path("market.json"), encoding="utf-8") as f:
-                self.feed.restore(json.load(f))
+            self.feed.restore(json.loads(self._read_text(self._path("market.json"))))
         except (OSError, ValueError):
             pass
         try:
-            with open(self._path("state.json"), encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(self._read_text(self._path("state.json")))
         except (OSError, ValueError):
             return False
-        self.accounts = {a["id"]: Account.from_plain(a) for a in data["accounts"]}
-        for a in self.accounts.values():
+        # Parse everything first: a file that turns out to be unusable changes nothing.
+        accounts = {a["id"]: Account.from_plain(a) for a in data["accounts"]}
+        orders = [from_plain(Order, o) for o in data["orders"]]
+        seq = {k: int(data["seq"][k]) for k in ("order", "account", "alert", "fill", "expiry")}
+        for a in accounts.values():
             self._drop_unpriced_samples(a)
-        seq = data["seq"]
-        self.engine.restore([from_plain(Order, o) for o in data["orders"]], seq["fill"])
+        self.accounts = accounts
+        self.engine.restore(orders, seq["fill"])
         self.watchlists = data.get("watchlists", {})
         self.alerting.restore(data.get("alerts", []), data.get("notifications"))
         self._order_seq, self._acct_seq = count(seq["order"]), count(seq["account"])

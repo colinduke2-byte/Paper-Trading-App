@@ -503,16 +503,16 @@ def test_a_failed_save_stays_dirty_and_is_retried(monkeypatch):
     feed.set_quote("ABC", "99.99", "100.00", "100.00")
     ex.tick()
     ex.create_account("t", "margin", D("100000"))
-    real = Exchange._write
+    real = Exchange._write_text  # every save goes through it (the text is serialised under the lock first)
 
-    def broken(path, data):
+    def broken(path, text):
         raise OSError("disk full")
 
-    monkeypatch.setattr(Exchange, "_write", staticmethod(broken))
+    monkeypatch.setattr(Exchange, "_write_text", staticmethod(broken))
     with pytest.raises(OSError):
         ex.save()
     assert ex.dirty
-    monkeypatch.setattr(Exchange, "_write", staticmethod(real))
+    monkeypatch.setattr(Exchange, "_write_text", staticmethod(real))
     ex.save()
     assert not ex.dirty
     ex2 = Exchange(SimFeed(INFO), SimClock(T0), data_dir=tmp)
