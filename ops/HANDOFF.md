@@ -236,3 +236,68 @@ owner's go.
   worked on a later attempt (alerts, simulated research, discovery). If a session reports being
   blocked on commit, it is that; it has resolved itself each time so far.
 - PR 16 (simulated research, with earnings alerts through the notification centre) MERGED to main; bundled UI rebuilt. All 8 checks were green on the combination with alerts.
+
+## STATE AT HAND-OVER TO A NEW LEAD SESSION (2026-11-25 about 00:55 UTC) — read this section first
+
+Follow `ops/PLAN_TO_FINISH.md`. Owner's instructions since: finish the project; be economical with
+tokens; NO new Fable agents (use Opus for reviews and building, Sonnet for mechanical work); at most 4
+workers at a time; report to the owner only at merges, decisions and phase boundaries; the deferred
+list in the plan is accepted.
+
+### main is at 732c240 and now also contains
+PR 15 alerts and notification centre; PR 16 simulated research (statements, earnings gaps, news,
+calendar, earnings alerts); PR 24 fixes (single `.env` loader in `core/envfile.py`; `money.parse(x,
+what)` raising ValueError with field names; `core/errors.NotFound` instead of a global KeyError
+handler; `tests/test_api_fuzz.py` requires a baseline body for every non-GET route; shared
+`frontend/src/Dialog.tsx`; `calendar.trading_day`/`trading_day_start` as the one day definition;
+synthetic feed starts with 1,500 minutes of history; chain clicks seed a marketable limit;
+"Change..." on working orders; feed-derived simulated/real labels and default benchmark; fallback
+notice when Alpaca is unreachable). The two flaky e2e tests are fixed there.
+After each merge that changes `frontend/src` the lead rebuilds and commits `frontend/dist` on main
+(`cd frontend && npm install && npm run build`), until PR 23's auto-rebuild workflow is merged.
+
+### Phase 1 (release blockers): status
+| PR | Branch | Status | Next step |
+|---|---|---|---|
+| 23 | stream/rcfixes | B2 (expiry at zero price) and B4 (day orders after restart) fixed plus the release-review items. Was green except the midnight test (now fixed on main). Its author is merging main into it on the old lead's machine and will push. | When its head is newer than 19cf92c and checks are green: merge. If no new push appears, merge origin/main into it yourself (keep main's `trading_day` line in `_roll_sessions` with its `_settle_day_start` body; preflight stdout is now "host port"; use the shared Dialog; add fuzz baselines) and lower the default margin-call grace to 13 hours of market-open time. |
+| 26 | stream/threadsafety | One lock (`ctx.lock`) around tick, routes and saves; rollback on failed order actions; 506 backend tests. A review is in progress and will be posted as a comment on the PR. | Read the PR comment; have fixes made (Opus); merge main in; merge when green. Known follow-ups it listed: alerts engine fetches bars under the lock (must not, with a live feed); `/api/fundamentals` 500 when a live quote lacks day high/low. |
+| 28 | stream/cashfix | Cash-account negative-cash bug fixed (three root causes); touches only exchange.py and test_orders_review.py; 487 backend tests under 4 seeds. A review is in progress and will be posted as a comment on the PR. | Read the PR comment; fixes if any; merge main in; merge when green. |
+
+### Phase 2 (review fixes): nothing has been resumed yet
+- PR 13 lots: 7 review findings listed earlier in this file; the author's session
+  (session_01ByytwcAyVLJZvZxFGivyho) stopped at the usage limit, head 1d525cd may contain part of
+  the fixes. Check what is done against the list; finish the rest.
+- PR 14 crypto: findings listed earlier (the HIGH one: stop-market buy can overdraw); author session
+  session_01Byytwa7UbHxm5YYWZw1VQb stopped at the limit, head cf767bc. Same approach.
+- PR 17 provider actions and PR 19 backup: their Fable reviews were cut off by the limit and produced
+  nothing. Re-run each as ONE Opus review that posts its findings on the PR. Briefs for both are
+  summarised in the "Open pull requests" table and the updates above (17: stale-quote and empty-side
+  rules must not change simulated-feed behaviour; day roll must not stall; exactly-once corporate
+  actions. 19: crash consistency of segment files, the append-only assumption versus features that
+  rewrite history, migration fixtures, lock, restore safety).
+- stream/hardening: its cloud session (session_01ByytwYvYF7ikH9tiRUTe5a) never pushed a branch;
+  treat its work as lost unless that session can be resumed. PR 24 already covers part of its list
+  (non-numeric input 500s, WebSocket account validation, fuzz test). Remaining from the security
+  review: number magnitude/exponent bounds in `money.parse`, validation before state replacement in
+  reset, request body and entity count limits, symbol length cap before the option-symbol cache,
+  news links http/https only, no redirects and bounded responses in `marketdata/http.py`, research
+  cache bounds, bounded replay session file reads, CORP header and no cross-site `/api` GETs,
+  `/docs` off by default.
+- stream/crossbrowser (PR 11, head a663f20) and stream/uxpolish (head a4edc16 plus later snapshot on
+  wip/uxpolish; its full review is saved as docs/reviews/UX_REVIEW_2026-11-24.md on that branch) and
+  stream/soak (only on wip/soak) were cut off mid-work.
+
+### Phases 3 to 7: as in ops/PLAN_TO_FINISH.md
+Integrator order for `integration/wave2` from main: 17, 19, 13, 14, 18, 20, then hardening,
+crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owner testing, tag.
+
+### Practical notes for the new lead
+- Local agents and `wip/*` snapshots belong to the old lead's machine; a new session cannot resume
+  those agents. Work from the pushed branches (`stream/*`), using `wip/<name>` only to recover
+  unpushed files (`git checkout -b <new> origin/wip/<name>`).
+- Cloud worker sessions can be messaged by id with send_message if they still exist.
+- `gh pr create` does not work; use the REST form in CLAUDE.md. Merge with
+  `gh api -X PUT repos/colinduke2-byte/paper-trading-app/pulls/<n>/merge -f merge_method=merge -f sha=<head>`.
+- Check results: `gh api repos/colinduke2-byte/paper-trading-app/commits/<sha>/check-runs`.
+- Owner still needs to: create Alpaca paper keys; test on a real Windows PC and phone (phase 6);
+  decide on a LICENSE only if the repository ever goes public.
