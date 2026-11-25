@@ -352,3 +352,7 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   PR 30 (758ebff, account cap raised to 1000) waits on this; worker reports backend 699, e2e 102 passed.
 - Phase 3 integrator started: session_01ByytwYf74TQnjtG3k5yzNc on integration/wave2 (19, 13, 14, 18,
   20, 30, 11, uxpolish now; 17 and 28 to be added when ready). Runs all suites locally.
+- 02:50 UTC: integrator BLOCKED: `git commit` refused by the permission check in its session
+  (session_01ByytwYf74TQnjtG3k5yzNc), like the PR 17 fixer. Backup (PR 19) is merged in its working
+  tree with 4 interaction bugs fixed (732 backend tests pass), uncommitted. Owner must allow commits
+  in both sessions.
