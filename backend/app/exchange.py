@@ -499,7 +499,8 @@ class Exchange:
         with each one filled alone.
 
         A cash account cannot borrow, so it gets one more scenario: buys and sells all fill,
-        but the money from the sells has not arrived. That stops a resting purchase from
+        but the money from selling what it holds has not arrived (the premium for writing an
+        option does count: it comes with the obligation). That stops a resting purchase from
         spending the cash that secures a resting short put. (A sale that must fill before
         the order it triggers is the exception: its money is there by then.)
 
@@ -539,10 +540,15 @@ class Exchange:
                         moved = qty - closing
                         if oc.kind == "P":
                             qty = moved  # a put buy-back may not happen at all
+                    paid = qty  # the quantity whose price moves cash
+                    if sign < 0 and side == "both" and o.id not in triggering:
+                        # Money from closing a long position may not have arrived. The premium for
+                        # writing an option arrives with the obligation itself, so that part counts.
+                        paid = min(qty, max(qty - max(pos.get(o.symbol, ZERO), ZERO), ZERO)) if parse_option(o.symbol) else ZERO
                     pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * moved
                     cash -= self._fee(o.symbol, qty)
-                    if sign > 0 or side != "both" or o.id in triggering:
-                        cash -= sign * cents(qty * self._estimate_price(o) * multiplier(o.symbol))
+                    if paid > 0:
+                        cash -= sign * cents(paid * self._estimate_price(o) * multiplier(o.symbol))
 
                 # With both sides filling, sells go first so that a buy of the same option is seen
                 # as buying back the short the sell opened, and is not counted on (see above).
@@ -1001,7 +1007,7 @@ class Exchange:
         start finds it already in the past), the auction was missed and the order expires
         unfilled instead of silently waiting for another day's auction.
         """
-        self._enforce_cash_orders(now, "the account can no longer pay for this order at the current price")
+        self._enforce_cash_orders(now, "The account can no longer pay for this order at the current price")
         due = [o for o in self.engine.orders.values() if o.type in m.AUCTION_TYPES and o.status == m.WORKING
                and (o.auction_at is None or o.auction_at <= now)]
         self._due_open = set()
@@ -1021,7 +1027,7 @@ class Exchange:
 
     def _orders_after_feed(self, quotes: list, now: float, sess: str) -> None:
         """Run the opening auction on the first quotes of the session, then re-price multi-leg orders."""
-        self._enforce_cash_orders(now, "the account can no longer pay for this order at the current price")
+        self._enforce_cash_orders(now, "The account can no longer pay for this order at the current price")
         if self._due_open:
             due, self._due_open = self._due_open, set()
             self._handle(self.engine.on_auction("open", self.quote, now, only=due))
@@ -1151,7 +1157,7 @@ class Exchange:
                 else:
                     book(sym, m.SELL if long else m.BUY, n, ZERO, "expiration")
                 self.dirty = True
-        self._enforce_cash_orders(now, "the cash reserved for this order was used to settle an option at expiry")
+        self._enforce_cash_orders(now, "The cash reserved for this order was used to settle an option at expiry")
 
     def _free_to_exercise(self, a: Account, sym: str, c, buys_stock: bool) -> Decimal:
         """How many contracts of a long option a cash account can exercise without using cash or
@@ -1218,7 +1224,7 @@ class Exchange:
             for o in opening:
                 if not o.active:
                     continue  # already ended with its entry or its group
-                self._handle(self.engine.cancel(o.id, now, f"canceled: {cause}"))
+                self._handle(self.engine.cancel(o.id, now, cause))  # the order event also raises a notification
                 if passes():
                     break
 

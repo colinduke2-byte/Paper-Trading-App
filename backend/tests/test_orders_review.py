@@ -223,6 +223,31 @@ def test_exercise_does_not_spend_cash_reserved_for_an_open_buy_order():
     cash_account_is_sound(ex, a)
 
 
+def test_open_buy_back_of_a_short_put_does_not_free_the_cash_that_secures_it():
+    """Found by the widened property: cash went to -1.60 after the put was assigned."""
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "9576")
+    far_call, far_put = opt("C", 90, FAR), opt("P", 100, FAR)
+    at_expiry(ex, feed, clock, "96.86", NEAR)
+    [stop] = ex.submit(a, {"symbol": far_call, "side": "buy", "qty": 3, "type": "stop", "stop_price": "7.44", "tif": "gtc"})
+    [bid] = ex.submit(a, {"symbol": far_put, "side": "buy", "qty": 1, "type": "limit", "limit_price": "0.01", "tif": "gtc"})
+    assert stop.status == bid.status == "working"
+    # Selling the put needs 10,000 in cash. The stop may spend about 2,260 first, and the resting
+    # bid for the same put cannot be counted on to buy it back.
+    with pytest.raises(OrderRejected, match="insufficient cash to secure short options"):
+        ex.submit(a, {"symbol": far_put, "side": "sell", "qty": 1})
+    ex.cancel(a, stop.id)
+    assert ex.submit(a, {"symbol": far_put, "side": "sell", "qty": 1})[0].status == "filled"
+    # with the put open, its resting buy-back does not make room for anything else
+    with pytest.raises(OrderRejected, match="insufficient cash"):
+        ex.submit(a, {"symbol": far_call, "side": "buy", "qty": 3, "type": "stop", "stop_price": "7.44", "tif": "gtc"})
+    assert ex.summary(a)["buying_power"] < D("10")
+    move(ex, feed, clock, "ABC", "109.61")
+    at_expiry(ex, feed, clock, "60", FAR)
+    assert held(ex, a) == {"ABC": 100}
+    cash_account_is_sound(ex, a)
+
+
 def test_exercise_does_not_spend_the_cash_behind_a_later_short_put():
     ex, feed, clock = make_exchange()
     a = acct(ex, "cash", "10500")
@@ -279,7 +304,10 @@ def test_cash_account_buy_stop_is_canceled_when_the_price_gaps_past_what_it_can_
     ex.drain_events()
     move(ex, feed, clock, "ABC", "120")  # the stop would trigger and buy 100 shares at 120: 12,000
     assert stop.status == "canceled" and stop.filled_qty == 0
-    assert stop.reason == "canceled: the account can no longer pay for this order at the current price"
+    assert stop.reason == "The account can no longer pay for this order at the current price"
+    note = ex.alerting.notices.logs[a][-1]  # the user is told, with the reason
+    assert note["order_id"] == stop.id and note["category"] == "order" and note["title"] == "Order canceled"
+    assert note["text"].endswith("was canceled: the account can no longer pay for this order at the current price.")
     assert other.status == "working"  # only what was needed is canceled
     assert ex.account(a).cash == D("10200") and not ex.positions(a)
     assert [e["order"].id for e in ex.drain_events() if e["type"] == "order" and e["order"].status == "canceled"] == [stop.id]
