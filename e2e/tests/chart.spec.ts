@@ -146,9 +146,9 @@ test("a horizontal line stays after a reload, a timeframe change and in another 
   await page.reload();
   await chartReady(page);
   await check(page);
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1H", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1D", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 day", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
 
   // A fresh browser profile has no local cache: the drawing comes from the server.
@@ -180,18 +180,25 @@ test("drawing tools create, select, move and delete shapes", async ({ page, open
   const drag = async (a: { x: number; y: number }, b: { x: number; y: number }) => {
     await page.mouse.move(a.x, a.y); await page.mouse.down(); await page.mouse.move(b.x, b.y, { steps: 6 }); await page.mouse.up();
   };
+  // Each shape is counted before the next one is started, so no gesture runs while the last is still being added.
+  const count = (n: number) => expect(page.getByRole("button", { name: new RegExp(`^Drawings \\(${n}\\)`) })).toBeVisible();
   await page.getByRole("button", { name: "Trend line" }).click();
   await remeasure(); await drag(at(0.2, 0.3), at(0.4, 0.6));
+  await count(1);
   await page.getByRole("button", { name: "Ray" }).click();
-  // Two taps also draw a two-point shape.
+  // Two taps also draw a two-point shape. The ray runs on from its second point, up and to the right.
   await click(0.3, 0.5);
   await click(0.5, 0.4);
+  await count(2);
   await page.getByRole("button", { name: "Rectangle" }).click();
   await remeasure(); await drag(at(0.55, 0.2), at(0.7, 0.4));
+  await count(3);
   await page.getByRole("button", { name: "Fibonacci retracement" }).click();
   await remeasure(); await drag(at(0.75, 0.8), at(0.9, 0.2));
+  await count(4);
   await page.getByRole("button", { name: "Vertical line" }).click();
   await click(0.15, 0.5);
+  await count(5);
   await page.getByRole("button", { name: "Text note" }).click();
   await click(0.1, 0.8);
   await page.getByLabel("Note text").fill("Support test");
@@ -209,7 +216,10 @@ test("drawing tools create, select, move and delete shapes", async ({ page, open
   await page.getByRole("button", { name: /^Drawings/ }).click();
 
   // Clicking empty space clears the selection; picking from the list selects; Delete removes it.
-  await click(0.98, 0.02);
+  // The bottom right corner is empty whatever the data: the ray only rises to the right (how steeply depends on
+  // which bars its two points snapped to, so it can pass through the top right corner), the Fibonacci levels end
+  // at 80% of the height and every other shape is further left.
+  await click(0.97, 0.95);
   await expect(page.getByRole("button", { name: "Delete selected" })).toBeDisabled();
   await page.getByRole("button", { name: /^Drawings/ }).click();
   await list.getByRole("button", { name: /^Trend line/ }).click();
@@ -365,9 +375,9 @@ test("keyboard shortcuts and their help", async ({ page, open }) => {
   await search.blur();
 
   await page.keyboard.press("4");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1H", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.keyboard.press("2");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5M", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5 minutes", exact: true })).toHaveAttribute("aria-pressed", "true");
   const t = ticket(page);
   await page.keyboard.press("s");
   await expect(t.getByRole("button", { name: "Sell", exact: true })).toHaveClass(/on/);
@@ -426,7 +436,7 @@ test("no console errors when switching symbol, timeframe, indicators and views q
   const tfs = page.getByRole("group", { name: "Timeframe" });
   for (let round = 0; round < 3; round++) {
     for (const s of ["TECX", "MKTX", "NVLX", "MKTX"]) await watch.getByRole("cell", { name: s, exact: true }).click();
-    for (const tf of ["1M", "1D", "15M", "1W", "5M"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
+    for (const tf of ["1 minute", "1 day", "15 minutes", "1 week", "5 minutes"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
     await page.getByLabel("Chart type").selectOption(round % 2 ? "line" : "candles");
     await page.getByRole("tab", { name: "Options" }).click();
     await page.getByRole("tab", { name: "Chart" }).click();

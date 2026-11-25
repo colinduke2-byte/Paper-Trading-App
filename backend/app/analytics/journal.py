@@ -1,5 +1,6 @@
 """Trade journal: notes and tags on an order or a closed trade, stored in account.journal."""
 from typing import Optional
+from ..core.errors import NotFound
 
 TARGETS = ("order", "trade")
 MAX_NOTE, MAX_TAGS, MAX_TAG = 4000, 12, 32
@@ -55,7 +56,7 @@ def get(account, entry_id: str) -> dict:
     for j in account.journal:
         if j["id"] == entry_id:
             return j
-    raise KeyError(f"no journal entry {entry_id}")
+    raise NotFound(f"no journal entry {entry_id}")
 
 
 def update(account, entry_id: str, now: float, note=None, tags=None) -> dict:

@@ -2,6 +2,7 @@
 // another dialog is open, or with Ctrl, Cmd or Alt held, so the browser's own shortcuts keep working.
 import { useEffect, useRef, useState } from "react";
 import { api } from "../util";
+import { Dialog } from "../Dialog";
 import { SHORTCUTS_EVENT, TIMEFRAME_EVENT } from "../Chart";
 
 const TFS = ["1m", "5m", "15m", "1h", "1d", "1w"];
@@ -12,7 +13,7 @@ export const SHORTCUTS: { group: string; keys: string[]; what: string }[] = [
   { group: "General", keys: ["/"], what: "Search for a symbol" },
   { group: "General", keys: ["J"], what: "Next watchlist symbol" },
   { group: "General", keys: ["K"], what: "Previous watchlist symbol" },
-  { group: "Chart", keys: ["1", "–", "6"], what: "Timeframe 1m, 5m, 15m, 1h, 1d, 1w" },
+  { group: "Chart", keys: ["1", "–", "6"], what: "Timeframe 1m, 5m, 15m, 1h, 1D, 1W (1 minute to 1 week)" },
   { group: "Chart", keys: ["Delete"], what: "Remove the selected drawing (in draw mode)" },
   { group: "Chart", keys: ["Esc"], what: "Leave the drawing tool, then draw mode" },
   { group: "Order ticket", keys: ["B"], what: "Buy" },
@@ -112,8 +113,8 @@ export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify
 
   if (cancelAll)
     return (
-      <div className="ct-help-bg" onClick={() => !cancelAll.busy && setCancelAll(null)}>
-        <div className="ct-help" role="dialog" aria-modal="true" aria-label="Cancel all open orders" onClick={(e) => e.stopPropagation()}>
+      <Dialog bgClassName="ct-help-bg" className="ct-help" label="Cancel all open orders" destructive
+        onClose={() => !cancelAll.busy && setCancelAll(null)}>
           <div className="ct-confirm-body">
             <h3>Cancel all open orders?</h3>
             <p>{open.length === 0 ? "This account has no open orders." : `This cancels ${open.length} open order${open.length === 1 ? "" : "s"} on every symbol in this account.`}</p>
@@ -123,14 +124,12 @@ export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify
               <button type="button" className="ct-btn primary" disabled={cancelAll.busy || open.length === 0} onClick={doCancelAll}>Cancel all orders</button>
             </div>
           </div>
-        </div>
-      </div>
+      </Dialog>
     );
   if (!help) return null;
   const groups = [...new Set(SHORTCUTS.map((s) => s.group))];
   return (
-    <div className="ct-help-bg" onClick={() => setHelp(false)}>
-      <div className="ct-help" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={(e) => e.stopPropagation()}>
+    <Dialog bgClassName="ct-help-bg" className="ct-help" label="Keyboard shortcuts" onClose={() => setHelp(false)}>
         <h3>Keyboard shortcuts <button type="button" className="ct-btn" autoFocus aria-label="Close keyboard shortcuts" onClick={() => setHelp(false)}>×</button></h3>
         <p className="muted">Shortcuts do nothing while you are typing in a field.</p>
         {groups.map((gr) => (
@@ -146,7 +145,6 @@ export function Shortcuts({ symbols, symbol, onSelect, accountId, orders, notify
             </dl>
           </section>
         ))}
-      </div>
-    </div>
+    </Dialog>
   );
 }

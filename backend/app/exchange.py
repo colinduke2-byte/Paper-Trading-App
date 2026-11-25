@@ -23,6 +23,7 @@ from .matching.multileg import net_price, payoff
 from .options import chain as optchain
 from .options.symbology import describe, multiplier, parse as parse_option
 from .risk import margin
+from .core.errors import NotFound
 
 OPTION_FEE = Decimal("0.65")  # per contract
 STOCK_FEE = ZERO  # per share
@@ -42,6 +43,31 @@ def _in_range(*values) -> None:
 
 class OrderRejected(ValueError):
     pass
+
+
+FIELD_LABELS = {"qty": "quantity", "limit_price": "limit price", "stop_price": "stop price",
+                "trail_amount": "trail amount", "trail_percent": "trail percent", "take_profit": "take profit",
+                "stop_loss": "stop loss"}
+
+
+def _field(req: dict, key: str) -> Optional[Decimal]:
+    """An optional number from an order request; raises ValueError naming the field."""
+    v = req.get(key)
+    return None if v is None or v == "" else parse_num(v, FIELD_LABELS.get(key, key.replace("_", " ")))
+
+
+def _usd(x: Decimal) -> str:
+    x = cents(x)
+    return f"-${-x:,.2f}" if x < 0 else f"${x:,.2f}"
+
+
+def _starting_cash(value) -> Decimal:
+    v = D(value)
+    if v <= 0 or v > Decimal("1000000000"):
+        raise ValueError("starting cash must be more than 0 and at most 1,000,000,000")
+    if v != cents(v):
+        raise ValueError("starting cash can have at most 2 decimal places")
+    return v
 
 
 class Exchange:
@@ -122,9 +148,7 @@ class Exchange:
 
     # ---- accounts --------------------------------------------------------
     def create_account(self, name: str, type: str = "margin", starting_cash=Decimal("100000")) -> Account:
-        starting_cash = D(starting_cash)
-        if starting_cash <= 0 or starting_cash > Decimal("1000000000"):
-            raise ValueError("starting cash must be between 0 and 1,000,000,000")
+        starting_cash = _starting_cash(starting_cash)
         name = (name or "").strip()[:40] or "Paper account"
         acct = Account(f"A{next(self._acct_seq):04d}", name, type, starting_cash, self.now())
         self.accounts[acct.id] = acct
@@ -133,6 +157,7 @@ class Exchange:
 
     def reset_account(self, account_id: str, starting_cash=None) -> Account:
         old = self.account(account_id)
+        starting_cash = _starting_cash(starting_cash) if starting_cash is not None else None
         for o in self.engine.active_orders():
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
@@ -155,7 +180,7 @@ class Exchange:
         try:
             return self.accounts[account_id]
         except KeyError:
-            raise KeyError(f"no such account {account_id}")
+            raise NotFound(f"no such account {account_id}")
 
     def summary(self, account_id: str) -> dict:
         a = self.account(account_id)
@@ -378,11 +403,10 @@ class Exchange:
             symbol = str(req.get("symbol", "")).upper().strip()
             side, typ = req.get("side"), req.get("type", m.MARKET)
             tif = req.get("tif", m.DAY)
-            qty = parse_num(req.get("qty"))
-            num = lambda k: parse_num(req[k]) if req.get(k) not in (None, "") else None
-            limit, stop = num("limit_price"), num("stop_price")
-            trail_amt, trail_pct = num("trail_amount"), num("trail_percent")
-            take_profit, stop_loss = num("take_profit"), num("stop_loss")
+            qty = parse_num(req.get("qty"), FIELD_LABELS["qty"])
+            limit, stop = _field(req, "limit_price"), _field(req, "stop_price")
+            trail_amt, trail_pct = _field(req, "trail_amount"), _field(req, "trail_percent")
+            take_profit, stop_loss = _field(req, "take_profit"), _field(req, "stop_loss")
         except (ValueError, ArithmeticError) as e:
             raise OrderRejected(f"invalid number in order: {e}")
         _in_range(qty, limit, stop, trail_amt, trail_pct, take_profit, stop_loss)
@@ -574,6 +598,45 @@ class Exchange:
                     result = w
         return result
 
+    def _shortfall(self, account: Account, worst: "_Worst", entry: Optional[Order] = None,
+                   what: str = "this order") -> str:
+        """The risk check's reason with the amounts: what the order needs and what is available.
+
+        Both are measured against the account with its other open orders counted (as the buying power
+        shown in the app is), so the difference is exactly what this order would add."""
+        reason = worst.reason or "order rejected by risk check"
+        if not reason.startswith("insufficient"):
+            return reason  # structural: short selling or uncovered calls in a cash account
+        before = self._worst_case(account, [])
+        if account.type == "margin":
+            option = entry is not None and (bool(entry.legs) or multiplier(entry.symbol) == 100)
+            scale = Decimal(1) if option else margin.INITIAL
+            have = max(before.excess, ZERO) / scale if before.ok else ZERO
+            need = (before.excess - worst.excess) / scale if before.ok else (-worst.excess) / scale
+            kind = "option buying power" if option else "buying power"
+        else:
+            room = lambda w: w.cash_after - w.requirement
+            have = max(room(before), ZERO) if before.ok else ZERO
+            need = room(before) - room(worst) if before.ok else -room(worst)
+            kind = "cash"
+        if what == "the change" and reason in ("insufficient buying power", "insufficient cash"):
+            reason = "insufficient buying power for the change"
+        text = f"{reason}: {what} needs {_usd(max(need, ZERO))} of {kind} and {_usd(have)} is available"
+        if entry is not None and entry.stop_price is not None and entry.type in (m.STOP, m.STOP_LIMIT) \
+                and entry.side == m.BUY:
+            text += (f". A resting stop order reserves buying power as if it fills at its stop price ({_usd(entry.stop_price)}) "
+                     "or the current price, whichever is higher")
+        pos = {k: v for k, v in account.positions().items() if v != 0}
+        ev = margin.evaluate(account.type, account.cash, pos, self._marks(pos))
+        if account.type == "margin":
+            free = max(ev.excess, ZERO) / scale if ev.ok else ZERO
+        else:
+            free = max(account.cash - ev.requirement, ZERO) if ev.ok else ZERO
+        if cents(free - have) > 0:
+            whose = "your open orders, this one at its current size" if what == "the change" else "your other open orders"
+            text += f" ({_usd(free - have)} is reserved by {whose})"
+        return text
+
     def _not_riskier(self, account: Account, deltas: dict, cash_delta: Decimal) -> bool:
         """True when applying these position changes (and paying cash_delta) adds no risk.
 
@@ -715,7 +778,7 @@ class Exchange:
             warnings.append("One-cancels-other: a fill on one of these orders reduces or cancels the others.")
         if any(o.role in (m.EXIT, m.TRIGGERED) for o in orders[1:]):
             warnings.append("The triggered orders stay on hold until this order fills.")
-        return {"ok": ok, "reason": None if ok else rule or worst.reason, "symbol": entry.symbol,
+        return {"ok": ok, "reason": None if ok else rule or self._shortfall(a, worst, entry), "symbol": entry.symbol,
                 "description": describe(entry.symbol), "side": entry.side, "qty": entry.qty,
                 "estimated_price": price, "estimated_notional": notional, "estimated_fees": fee,
                 "estimated_total": notional + fee if entry.side == m.BUY else notional - fee,
@@ -737,7 +800,7 @@ class Exchange:
         entry = orders[0]
         worst = self._risk_check(a, orders)
         if not (worst.closing or worst.ok):
-            raise OrderRejected(worst.reason or "order rejected by risk check")
+            raise OrderRejected(self._shortfall(a, worst, entry))
         rule = self._rule_check(a, orders, worst)  # pattern day trader and settled-cash rules
         if rule:
             raise OrderRejected(rule)
@@ -757,7 +820,7 @@ class Exchange:
     def cancel(self, account_id: str, order_id: str) -> Order:
         o = self.engine.orders.get(order_id)
         if o is None or o.account_id != account_id:
-            raise KeyError("no such order")
+            raise NotFound("no such order")
         if not o.active:
             raise ValueError("order is no longer open")
         self._handle(self.engine.cancel(order_id, self.now(), "canceled by user"))
@@ -774,15 +837,14 @@ class Exchange:
     def replace(self, account_id: str, order_id: str, req: dict) -> Order:
         o = self.engine.orders.get(order_id)
         if o is None or o.account_id != account_id:
-            raise KeyError("no such order")
+            raise NotFound("no such order")
         a = self.account(account_id)
         if o.legs:
             raise OrderRejected("a multi-leg order cannot be changed; cancel it and enter a new one")
         try:
-            num = lambda k: parse_num(req[k]) if req.get(k) not in (None, "") else None
-            qty, limit, stop = num("qty"), num("limit_price"), num("stop_price")
+            qty, limit, stop = _field(req, "qty"), _field(req, "limit_price"), _field(req, "stop_price")
         except (ValueError, ArithmeticError) as e:
-            raise ValueError(f"invalid number: {e}")
+            raise OrderRejected(f"invalid number in the change: {e}")
         _in_range(qty, limit, stop)
         for v in (qty, limit, stop):
             if v is not None and v <= 0:
@@ -797,10 +859,10 @@ class Exchange:
         self._handle(self.engine.replace(order_id, self.now(), qty, limit, stop))
         # Held bracket and exit children are re-sized to what their entry filled when they are
         # released, so editing them cannot add risk; a held triggered order keeps its own size.
-        if (o.status != m.HELD or o.role == m.TRIGGERED) and not self._worst_case(a, []).ok \
+        if (o.status != m.HELD or o.role == m.TRIGGERED) and not (after := self._worst_case(a, [])).ok \
                 and not self._reduces_risk_after(a, o):
             o.qty, o.limit_price, o.stop_price = old
-            raise OrderRejected("insufficient buying power for the change")
+            raise OrderRejected(self._shortfall(a, after, o, "the change"))
         if o.status != m.HELD:  # pattern day trader and settled-cash rules, as on submit
             rule = self.lifecycle.pre_trade(a, o, None if self._reduces_risk_after(a, o) else self._worst_case(a, []))
             if rule:
@@ -824,9 +886,9 @@ class Exchange:
             if req.get(key) not in (None, ""):
                 raise OrderRejected("multi-leg orders are market or net-limit orders without stops or brackets")
         try:
-            qty = parse_num(req.get("qty", 1))
-            limit = parse_num(req["limit_price"]) if req.get("limit_price") not in (None, "") else None
-            ratios = [parse_num(l.get("ratio", 1)) for l in raw]
+            qty = parse_num(req.get("qty", 1), FIELD_LABELS["qty"])
+            limit = _field(req, "limit_price")
+            ratios = [parse_num(l.get("ratio", 1), f"leg {i} ratio") for i, l in enumerate(raw, 1)]
         except (ValueError, ArithmeticError) as e:
             raise OrderRejected(f"invalid number in order: {e}")
         _in_range(qty, limit, *ratios)
@@ -956,7 +1018,7 @@ class Exchange:
                          "ratio": l["ratio"], "qty": leg_qty, "bid": q.bid, "ask": q.ask, "estimated_price": px,
                          "source": sources[l["symbol"]],
                          "position_before": held, "position_after": held + (leg_qty if l["side"] == m.BUY else -leg_qty)})
-        return {"ok": ok, "reason": None if ok else rule or worst.reason, "underlying": o.symbol, "qty": o.qty,
+        return {"ok": ok, "reason": None if ok else rule or self._shortfall(a, worst, o), "underlying": o.symbol, "qty": o.qty,
                 "type": m.LIMIT if o.limit_price is not None else m.MARKET, "tif": o.tif, "legs": rows,
                 "net_price": abs(net), "price_effect": effect(net),
                 "market_net_price": abs(market_net), "market_price_effect": effect(market_net),
@@ -1093,7 +1155,9 @@ class Exchange:
         return quotes
 
     def _roll_sessions(self, now: float, sess: str) -> None:
-        day = int(now // 86400)
+        # Day P&L restarts with the trading day: the New York date in "us" mode, the UTC day in "always"
+        # mode (where day orders also expire at that boundary, the next on-open/on-close auction time).
+        day = (cal.trading_day(now, "us" if self.session_mode == "us" else "always") - cal.EPOCH).days
         if self._last_day is not None and day != self._last_day:
             for a in self.accounts.values():
                 a.day_start_equity = self.summary(a.id)["equity"]
