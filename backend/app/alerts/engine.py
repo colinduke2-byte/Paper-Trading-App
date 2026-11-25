@@ -13,6 +13,12 @@ Indexes (rebuilt from the stored alerts on load; only active alerts are indexed)
 
 Everything reads time from the exchange clock, so replay (a sandbox exchange with its own engine)
 behaves the same as live, and alerts made in a replay stay in the replay's exchange.
+
+Alerts are created and evaluated under the exchange lock (docs/CONCURRENCY.md), so nothing here may ask
+a data provider. Price history is read with `feed.bars_ready`, which answers from memory or returns
+None; a live feed then loads the history on its own thread. Until it has arrived the alert is not
+evaluated (its last value says so), and the series is seeded or advanced on a later tick. Calendar
+alerts whose feed cannot list corporate actions yet are tried again a few seconds later.
 """
 import heapq
 from decimal import Decimal
@@ -29,6 +35,8 @@ from .notifications import EventStream, NotificationCentre
 
 FEED_CHECK_SECONDS = 5
 PRICES_CHECK_SECONDS = 15
+CALENDAR_RETRY_SECONDS = 5  # exchange time between tries while the feed cannot list corporate actions yet
+WAITING_FOR_HISTORY = "waiting for price history"
 SYMBOL_KINDS = ("price", "change", "volume", "position", "option")
 WEEK_OFFSET = 4 * 86400  # weekly bars start on Monday (see BarStore)
 
@@ -48,6 +56,9 @@ class Series:
         self.reset()
 
     def reset(self) -> None:
+        self.seeded = False  # history pushed; until then the series is not advanced or evaluated
+        self.waiting = False  # a bar closed and the history after `mark` has not been read yet
+        self.mark = None  # feed.history_mark() taken when that bar closed
         self.calc = indicators.make(self.indicator, self.period)
         self.last_time: Optional[float] = None  # time of the last closed bar pushed
         self.bucket: Optional[float] = None  # start of the bar that was forming at the last check
@@ -92,6 +103,8 @@ class Alerting:
         self._heap: list = []  # (time, alert id)
         self._avg_volume: dict = {}  # (symbol, day start) -> average daily volume
         self._cal_day = None
+        self._cal_waiting: set = set()  # calendar alerts whose feed could not list actions yet
+        self._cal_retry_at = float("-inf")
         self._feed_ok = True
         self._feed_checked = float("-inf")
         self._prices_checked = float("-inf")
@@ -193,6 +206,8 @@ class Alerting:
                 self._series_by_symbol.setdefault(al["symbol"], set()).add(key)
                 self._seed(series)
             series.alerts.add(aid)
+            if not series.seeded:
+                al["last_value"] = WAITING_FOR_HISTORY
         elif k == "account":
             self._by_account.setdefault(al["account_id"], set()).add(aid)
         elif k == "calendar":
@@ -226,6 +241,7 @@ class Alerting:
             if not ids:
                 del self._by_account[al["account_id"]]
         self._calendar.discard(aid)
+        self._cal_waiting.discard(aid)
         # heap entries are dropped lazily when they come due
 
     @staticmethod
@@ -256,12 +272,19 @@ class Alerting:
                 self._eval_account(aid_acct, now)
         if self._calendar:
             day = self.ex.lifecycle.today()
+            todo = ()
             if day != self._cal_day:
                 self._cal_day = day
-                for aid in tuple(self._calendar):
+                todo = tuple(self._calendar)
+            elif self._cal_waiting and now >= self._cal_retry_at:
+                todo = tuple(self._cal_waiting)
+            if todo:
+                self._cal_waiting = set()
+                for aid in todo:
                     al = self.alerts.get(aid)
-                    if al is not None and al["status"] == "active":
-                        self._eval_calendar(al, now)
+                    if al is not None and al["status"] == "active" and self._eval_calendar(al, now) is False:
+                        self._cal_waiting.add(aid)
+                self._cal_retry_at = now + CALENDAR_RETRY_SECONDS
         self._monitor(now)
 
     def _due(self, now: float) -> None:
@@ -414,7 +437,10 @@ class Alerting:
         if key not in self._avg_volume:
             if len(self._avg_volume) > 1000:
                 self._avg_volume.clear()
-            rows = [b for b in self.ex.feed.bars(symbol, "1d", 31) if b["time"] < day][-30:]
+            rows = self.ex.feed.bars_ready(symbol, "1d", 31)
+            if rows is None:
+                return None  # the feed is still loading the history: ask again on a later tick
+            rows = [b for b in rows if b["time"] < day][-30:]
             vols = [b["volume"] for b in rows if b["volume"]]
             self._avg_volume[key] = Decimal(str(round(sum(vols) / len(vols)))) if vols else None
         return self._avg_volume[key]
@@ -422,23 +448,44 @@ class Alerting:
     # ---- indicators --------------------------------------------------------------------------
     def _seed(self, s: Series) -> None:
         s.reset()
+        self._fill(s)
+
+    def _fill(self, s: Series) -> bool:
+        """Push the history of a new or reset series. False while the feed does not have it in memory."""
         now = self.ex.now()
         start = bucket_start(s.tf, now)
         need = indicators.warmup(s.indicator, s.period) + 60
-        rows = [b for b in self.ex.feed.bars(s.symbol, s.tf, need) if b["time"] < start]
+        rows = self.ex.feed.bars_ready(s.symbol, s.tf, need)
+        if rows is None:
+            return False
         for b in rows:
-            s.push(float(b["close"]))
-            s.last_time = b["time"]
+            if b["time"] < start:
+                s.push(float(b["close"]))
+                s.last_time = b["time"]
         s.prev_diff = s.diff  # history does not count as a crossing
         s.bucket = start
+        s.seeded = True
+        return True
 
     def _advance_series(self, s: Series, now: float) -> None:
+        if not s.seeded:
+            if not self._fill(s):
+                for aid in s.alerts:
+                    al = self.alerts.get(aid)
+                    if al is not None:
+                        al["last_value"] = WAITING_FOR_HISTORY
+            return
         start = bucket_start(s.tf, now)
-        if start == s.bucket:
+        if start != s.bucket:
+            s.bucket = start
+            s.waiting, s.mark = True, self.ex.feed.history_mark()  # only history read from now on has the closed bar
+        if not s.waiting:
             return  # the forming bar has not closed yet: O(1)
-        s.bucket = start
-        rows = [b for b in self.ex.feed.bars(s.symbol, s.tf, 4) if b["time"] < start
-                and (s.last_time is None or b["time"] > s.last_time)]
+        rows = self.ex.feed.bars_ready(s.symbol, s.tf, 4, s.mark)
+        if rows is None:
+            return  # the feed is loading it: come back on a later tick
+        s.waiting = False
+        rows = [b for b in rows if b["time"] < start and (s.last_time is None or b["time"] > s.last_time)]
         if len(rows) >= 4 and s.last_time is not None:  # a gap (the clock jumped): rebuild from history
             self._seed(s)
             rows = []
@@ -485,7 +532,8 @@ class Alerting:
             v = D(values[al["params"]["metric"]])
             self._check(al, self._cond(al["op"], v, D(al["value"])), v, now)
 
-    def _eval_calendar(self, al: dict, now: float) -> None:
+    def _eval_calendar(self, al: dict, now: float) -> Optional[bool]:
+        """False when the feed could not list corporate actions (on_tick then tries again shortly)."""
         self.evaluations += 1
         a = self.ex.accounts.get(al["account_id"])
         if a is None:
@@ -503,7 +551,9 @@ class Alerting:
             acts = self.ex.feed.corporate_actions(today, today + timedelta(days=p["days_before"]))
         except Exception as e:  # a provider error must not stop the tick
             al["last_value"] = f"calendar unavailable: {e}"
-            return
+            return False
+        if str(al.get("last_value") or "").startswith("calendar unavailable"):
+            al["last_value"] = None  # it is available again
         due = []  # (date, symbol, id, kind, text)
         for act in acts:
             if act.symbol not in held or act.kind not in p["events"]:
