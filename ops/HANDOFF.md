@@ -316,3 +316,12 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
 - Phase 2 resumed: lots author session_01ByytwcAyVLJZvZxFGivyho (PR 13) and crypto author
   session_01Byytwa7UbHxm5YYWZw1VQb (PR 14) asked to finish fix lists, merge main, comment per finding.
   Opus review of PR 17: session_01ByytwYofFEfccUETS1aWHu (posts on the PR). PR 19 review next.
+- 01:12 UTC: PR 23 MERGED (main 509a043); the ui-dist workflow now rebuilds frontend/dist on main
+  automatically (no manual rebuilds). PR 13 lots fixed at 7d1c23f and PR 14 crypto fixed at 1211fff
+  (each with a per-finding PR comment): ready for the integrator.
+- PR 26 review: approve with fixes. PR 25's session declined new scope, so worker
+  session_01ByytwYu2xXB35KoQk8wvu6 builds `stream/threadsafety-final` from PR 25 + review fixes and
+  opens one PR superseding 25 and 26.
+- PR 28 review: SEND BACK, seven blocking items (comment on PR 28). Worker
+  session_01Byytwbmbp2zVBAAd9s3p93 fixes them on stream/cashfix. Cash invariant still open on main.
+- PR 19 review: session_01ByytwYu2DnD9MJeK4CGJKQ. PR 22 waiting for green checks to merge.
