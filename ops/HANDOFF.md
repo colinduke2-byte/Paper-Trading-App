@@ -347,3 +347,8 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   PRs 25 and 26 are included in it: owner to close them. PR 30 hardening: pixel-7 e2e fails (likely
   the cross-site rule vs the phone path); sent back to its worker. PR 28 green at 375afda but its
   worker is still doing items 10 and 12; merge after that, updated with main.
+- 02:30 UTC: GITHUB ACTIONS STOPPED: jobs are not started ("recent account payments have failed or
+  your spending limit needs to be increased"). Owner must fix billing; no merges until checks run.
+  PR 30 (758ebff, account cap raised to 1000) waits on this; worker reports backend 699, e2e 102 passed.
+- Phase 3 integrator started: session_01ByytwYf74TQnjtG3k5yzNc on integration/wave2 (19, 13, 14, 18,
+  20, 30, 11, uxpolish now; 17 and 28 to be added when ready). Runs all suites locally.
