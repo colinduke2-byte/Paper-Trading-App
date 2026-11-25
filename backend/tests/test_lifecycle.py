@@ -132,7 +132,9 @@ def test_reverse_split_on_a_short_position_charges_cash_in_lieu():
     # Basis removed 1,499.85 x 0.5 / 1.5 = 499.95; realised = 499.95 - 500 = -0.05.
     assert acc.position("ABC") == -1 and acc.cost_basis("ABC") == D("-999.90")
     assert acc.realized == D("-0.05") and ex.summary(a)["cash"] == before["cash"] - D("500.00")
-    assert ex.summary(a)["equity"] == before["equity"]
+    # The split leaves account value unchanged; the night's borrow fee, accrued and owed, is counted in it.
+    after = ex.summary(a)
+    assert after["accrued_charges"] > 0 and after["equity"] == before["equity"] - after["accrued_charges"]
     ledger_ok(acc)
 
 
@@ -276,7 +278,7 @@ def test_margin_interest_and_borrow_fee_hand_calculated():
     ex.tick()  # Nov 24 to Nov 30 = 7 days, posted on Dec 1
     [t] = txns(ex, debit, "interest")
     assert t.postings == [("expense:margin_interest", D("70.00")), ("cash", D("-70.00"))]
-    assert t.memo == "Margin interest for November 2026 (7.2% a year, actual/360)"
+    assert t.memo == "Margin interest for November 2026: 70.00 (7.2% a year for 7 days; actual/360)"
     [t] = txns(ex, short, "borrow")
     assert t.postings == [("expense:borrow_fees", D("7.00")), ("cash", D("-7.00"))]
     assert not txns(ex, short, "interest") and not txns(ex, cash, "interest")  # no debit; cash accounts never
@@ -469,20 +471,22 @@ def test_partial_fills_of_one_closing_order_are_one_day_trade():
 def test_margin_call_grace_then_liquidation():
     ex, feed, clock = make_exchange()
     deep(ex, feed, clock, "100")
-    a = acct(ex)
+    # A 6-minute grace period (the default is 13 hours), counted tick by tick while the app runs.
+    a = acct(ex, margin_call_grace_hours="0.1")
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1900})  # 190,000: cash -90,000
     [resting] = ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 100, "type": "limit", "limit_price": "200", "tif": "gtc"})
     deep(ex, feed, clock, "60")
     # equity 1,900 x 60 - 90,000 = 24,000; maintenance 25% x 114,000 = 28,500
     s = ex.summary(a)
-    assert s["margin_call"] and s["margin_call_since"] == clock.now() and s["liquidation_at"] == clock.now() + 48 * 3600
+    assert s["margin_call"] and s["margin_call_since"] == clock.now() and s["liquidation_at"] == clock.now() + 360
     [t] = logs(ex, a, "margin_call")
     assert t.startswith("Margin call: equity 24,000.00 is below the 28,500.00 maintenance requirement (deficit 4,500.00)")
     assert not txns(ex, a, "margin_call")  # call events are not ledger entries
-    clock.advance(47 * 3600)
-    ex.tick()
+    for _ in range(5):
+        clock.advance(60)
+        ex.tick()
     assert ex.account(a).position("ABC") == 1900 and resting.active
-    clock.advance(3600)
+    clock.advance(60)
     ex.tick()
     # Each share sold cuts the requirement by 15.00 but costs 0.01 of spread: 4,500 / 14.99 -> 301 shares at 59.99.
     # Cash -90,000 + 301 x 59.99 = -71,943.01; equity 1,599 x 60 - 71,943.01 = 23,996.99 >= 23,985.00
@@ -512,7 +516,7 @@ def test_margin_call_grace_then_liquidation():
 
 def test_margin_call_met_by_recovery_and_liquidation_can_be_disabled():
     ex, feed, clock = make_exchange()
-    a = acct(ex)
+    a = acct(ex, margin_call_grace_hours="0.01")
     keep = acct(ex, margin_call_liquidation=False)
     deep(ex, feed, clock, "100")
     for x in (a, keep):
@@ -522,6 +526,9 @@ def test_margin_call_met_by_recovery_and_liquidation_can_be_disabled():
     assert logs(ex, a, "margin_call")[-1].startswith("Margin call met: equity 43,000.00")  # 2% above: at once
     deep(ex, feed, clock, "60")
     clock.advance(100 * 3600)
+    ex.tick()  # a pause does not count toward the grace period
+    assert ex.account(a).position("ABC") == 1900
+    clock.advance(60)
     ex.tick()
     assert ex.account(keep).position("ABC") == 1900 and ex.summary(keep)["liquidation_at"] is None
     assert ex.account(a).position("ABC") < 1900
@@ -535,12 +542,24 @@ def test_liquidation_waits_for_the_regular_session_in_us_mode():
     a = acct(ex, margin_call_grace_hours="1")
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1900})
     deep(ex, feed, clock, "60")
+    for _ in range(59):  # 59 minutes of the regular session count
+        clock.advance(60)
+        ex.tick()
+    for _ in range(10):  # after hours: no more counts
+        clock.advance(60)
+        ex.tick()
+    assert ex.account(a).position("ABC") == 1900 and ex.account(a).life.margin_call_counted == 59 * 60
     clock.set(datetime(2026, 11, 21, 12, 0, tzinfo=cal.NY).timestamp())  # Saturday: market closed
     ex.tick()
     assert ex.account(a).position("ABC") == 1900
     clock.set(datetime(2026, 11, 23, 9, 30, 5, tzinfo=cal.NY).timestamp())
+    ex.tick()  # the first tick after a pause never liquidates; it says how much grace is left
+    assert ex.account(a).position("ABC") == 1900
+    assert "Open market time left before positions are liquidated: 1 minute." in logs(ex, a, "margin_call")[-1]
+    clock.advance(60)
     ex.tick()
-    assert ex.account(a).position("ABC") == 1599
+    # 1,595, not 1,599: the weekend's accrued margin interest (owed, so in account value) deepened the call.
+    assert ex.account(a).position("ABC") == 1595
 
 
 # ---- settings, persistence and API ---------------------------------------------------------------------

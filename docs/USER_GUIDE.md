@@ -448,7 +448,9 @@ notice appears: "Margin call: account value … is below the … maintenance req
 orders are accepted until this is resolved." The call clears when equity is 2% above maintenance, or
 after it has stayed at or above maintenance for 5 minutes.
 
-If it is still open after the **grace period** (48 hours by default), and the setting "Liquidate on
+If it is still open after the **grace period** (13 hours of open market time by default, which is two
+regular trading days in US session mode; only time while the market is open and PaperDesk is running
+counts), and the setting "Liquidate on
 unmet margin calls" is on, PaperDesk cancels your open orders and sells positions with market orders,
 largest maintenance requirement first, until the call is met. It only does this during the regular
 session, and it will not leave a short option uncovered that was covered before. The Settings dialog

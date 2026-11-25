@@ -235,8 +235,12 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
   .m-acct .m-acct-stats { margin: 0; }
 }
 
-/* The chart library's attribution logo stays visible, but a stray tap while panning must not leave the app. */
+/* The chart library's attribution logo stays visible, but a stray tap while panning must not leave the app.
+   The working link to tradingview.com its licence asks for is in Help, About (a full-size target, away from
+   the chart); the desktop layout also shows it under the chart. On a phone the line under the chart is left
+   out: the chart needs the height, and a link that small next to the panning area is easy to hit by mistake. */
 .m-shell a#tv-attr-logo { pointer-events: none; }
+.m-shell .ct-credit { display: none; }
 
 /* Replay controls: one compact row (session, clock, play/pause, exit) under the top bar; "More" opens
    the step, speed, progress and jump controls. The views shrink to make room in either state. */
