@@ -25,17 +25,17 @@ there is no lock order between exchange objects to get wrong.
 
 | Context | Thread | What it does with exchange state | How it is made safe |
 |---|---|---|---|
-| Tick loop (`server.py: loop`, `turn`) | asyncio task that hands each turn to the `paperdesk-tick` thread | `ex.tick()` or `replay.advance()`, `ex.save_plan()`, builds one message per WebSocket client | `turn()` holds `ctx.lock` (priority waiter). Returns the snapshot text and the messages |
+| Tick loop (`server.py: loop`, `turn`) | asyncio task that hands each turn to the `paperdesk-tick` thread | `ex.tick()` or `replay.advance()`, builds one message per WebSocket client, then `ex.save_plan()` | `turn()` holds `ctx.lock` (priority waiter). Returns the snapshot text and the messages. `save_plan()` is its last step: it resets `dirty`, so nothing after it may fail. A fault while building one client's message skips that client only. The wall time handed to a replay is counted once, also when the turn fails after advancing |
 | Saving (`ex.write_plan`) | `paperdesk-save` thread | none: writes text produced under the lock | Runs without `ctx.lock`. `Exchange._io_lock` serialises writers; snapshots are numbered, so an older one never replaces a newer file |
 | Broadcast (`server.py: broadcast`) | event loop | none: sends the messages `turn()` built | No lock held while awaiting `send_json` |
-| WebSocket endpoint `/ws` | event loop | none: edits its own entry in `ctx.clients` | `ctx.clients` is only replaced item by item; readers copy it with `list(...)` |
-| Plain `def` routes under `/api` (orders, accounts, settings, journal, watchlists, alerts and notifications, reports, lifecycle, replay pause/resume/speed, status) | Starlette worker threads, up to 40 at once | read and change everything | Wrapped centrally by `app/api/locking.py`: the whole handler runs under `ctx.lock`, and its result is copied before the lock is released |
+| WebSocket endpoint `/ws` | event loop | none: edits its own entry in `ctx.clients` | `ctx.clients` is only replaced item by item; readers copy it with `list(...)`. The account a client asks for is kept only when it is a string |
+| Plain `def` routes under `/api` (orders, accounts, settings, journal, watchlists, alerts and alert rules including `POST`/`PATCH /api/alert-rules`, notifications, reports, lifecycle, replay pause/resume/speed, status) | Starlette worker threads, up to 40 at once | read and change everything | Wrapped centrally by `app/api/locking.py`: the whole handler runs under `ctx.lock`, and its result is copied before the lock is released |
 | Market data routes (`/api/symbols`, `quotes`, `bars`, `depth`, `trades`, `fundamentals`, `movers`, `screener`, `options/*`) | worker threads | read the feed only (a live feed may call the provider) | `@unlocked`. The feed hands data over through its own structures (below) |
 | `/api/accounts/{id}/analytics`, `/statements/{month}` (+`/html`) | worker threads | price history from the feed, then the account | `@unlocked`: fetch prices first, then one `with ctx.locked():` block for the account |
 | `/api/research/*` | worker threads | provider data; `ctx.ex.feed` and `is_stock` only | exempt by path |
 | `/api/chartstate*` | worker threads | none: chart settings in `chartstate.json` | exempt by path. Its own lock guards its document and its file write (a leaf lock) |
 | `/api/auth/*`, access middleware | event loop (login is `async`) and worker threads | none: the session store | exempt by path. `Sessions.lock` and the login limiter are leaf locks |
-| Replay start / exit (`ctx.enter_replay`, `ctx.exit_replay`) | worker threads | swap `ctx.ex`, `ctx.replay`; snapshot live or the sandbox | `@unlocked` routes; the swap and snapshot happen in one `ctx.locked()` block, the session file is read before it and state files are written after it |
+| Replay start / exit (`ctx.enter_replay`, `ctx.exit_replay`) | worker threads | swap `ctx.ex`, `ctx.replay`; snapshot live or the sandbox | `@unlocked` routes; the swap and snapshot happen in one `ctx.locked()` block, the session file is read before it and state files are written after it. Both routes hold the replay route's `sandbox_busy` mutex (taken before `ctx.lock`, waits up to 10 s, then `409`), so a start never removes the sandbox directory while an exit is still writing it. A failed write of the live state on start is logged; live stays dirty and is saved after the exit |
 | Replay step / seek (`ReplayController._command`) | worker threads | run up to thousands of sandbox ticks | `@unlocked` routes. The controller holds its command lock for the whole command and takes `ctx.lock` in slices of about 20 ms, so ticks, broadcasts and other requests carry on |
 | Live feed: stream thread (`alpaca-stream`) and poller (`alpaca-poller`) | daemon threads | must not touch exchange state. They write quotes into the feed's own map under `AlpacaFeed._lock`; `feed.step()` (called by the tick, under `ctx.lock`) moves them into the exchange | Hand-over through the feed's lock. The poller asks which symbols are wanted through `ctx.live_interest()`, which reads under `ctx.lock` with a 0.5 s limit and otherwise returns the previous list |
 | Alert price history (`alpaca-history`, `AlpacaFeed.load_wanted_bars`) | daemon thread | must not touch exchange state. It fetches the bars that alerts asked for and stores them in the feed's bar cache under `AlpacaFeed._lock` | Alerts are created and evaluated under `ctx.lock`, so they read history only with `feed.bars_ready()`, which answers from memory or returns `None` and notes the request. The alert is not evaluated until a later tick finds the history in memory (see "Alerts and price history") |
@@ -52,9 +52,11 @@ there is no lock order between exchange objects to get wrong.
 3. `ctx.lock` may be held when `Exchange._io_lock` is taken (a direct `ex.save()` in tests and tools).
    The server never does this: it writes after releasing `ctx.lock`. A thread holding `_io_lock`
    never asks for `ctx.lock`.
-4. `Sessions.lock`, the login limiter, `RateLimiter.lock`, the research cache lock, the chart-state
-   lock and the replay route's `starting` mutex are leaves: nothing else is taken while they are held, and the auth code
-   never touches `ctx.lock`.
+4. The replay route's `sandbox_busy` mutex may be held when `ctx.lock` is taken (start and exit),
+   never the other way round.
+5. `Sessions.lock`, the login limiter, `RateLimiter.lock`, the research cache lock and the chart-state
+   lock are leaves: nothing else is taken while they are held, and the auth code never touches
+   `ctx.lock`.
 
 ## What the lock guarantees
 
@@ -71,11 +73,19 @@ there is no lock order between exchange objects to get wrong.
   `Exchange._atomic`: if anything raises half way (the second leg of a multi-leg fill, a lifecycle
   hook, an invalid field of a replace), the account's ledger, lots, fills, lifecycle state, its orders,
   the event queue and the fill counter are put back. Order ids used by a failed request are not reused.
+  `dirty` is not put back (the save thread sets it when a write fails; a rolled-back request costs one
+  extra save at most). A submit takes its snapshot only after validation and the risk and rule checks,
+  so a rejected order costs no copy. The snapshot reads the account's open orders from the matching
+  engine's open-order index (`MatchingEngine._open`, pruned as it is read) and copies the lifecycle
+  state with `AccountLife.copy()`, so its cost follows the account's open orders and unsettled sales,
+  not every order the exchange ever had.
 - **Notifications.** The notifier listens on `ex.events` (an `EventStream`); every append happens under
   the lock, so notifications are written under it too, and a rolled-back order change takes its
   notifications back.
 - **Saving in two steps.** `plan = ex.save_plan()` serialises under the lock and does no I/O;
-  `ex.write_plan(plan)` does only I/O and is called after the lock is released.
+  `ex.write_plan(plan)` does only I/O and is called after the lock is released. A failed write sets
+  `dirty` again and, when the plan held `market.json`, makes the next plan include it too (rather than
+  a minute of exchange time later).
 - **State files.** `state.json` is serialised to text under the lock and written with an atomic
   replace, so every file on disk is a consistent state that loads. `load()` parses the whole file
   before it changes anything.
@@ -88,10 +98,13 @@ Not covered:
   already ran is kept; the tick is not transactional.
 - Taking the snapshot for `state.json` serialises the whole state under the lock (about 8 ms per
   500 orders with their fills). It is the longest regular hold; an incremental format would shorten it.
+- A successful submit still copies the account's lots, open orders and lifecycle state for the
+  rollback; for an account with many thousands of unsettled sales that is a few milliseconds under
+  the lock.
 
 ## Alerts and price history
 
-Indicator alerts and volume alerts measured against the average need bars. `Alerting.create` runs in a
+Indicator alerts and volume alerts measured against the average need bars. `Alerting.create` and `Alerting.update` (`POST` and `PATCH /api/alert-rules`) run in a
 locked route and `Alerting.on_tick` runs in the tick, so neither may call `feed.bars()` (with a live
 feed that is a provider request of up to several seconds). They use two feed methods instead:
 
@@ -126,8 +139,10 @@ Rules:
 
 - **Never do anything slow in a locked route**: no provider or other network call (`feed.bars`,
   `feed.option_chain`, `feed.option_expirations`, the research hub), no file reading or writing,
-  no `time.sleep`. A test runs every GET route against a live feed and fails if a provider request is
-  made while the lock is held.
+  no `time.sleep`. A test runs every route against a live feed (GET routes, then every POST, PUT,
+  PATCH and DELETE route with a body from its `CHANGE_BODIES` table) and fails if a provider request
+  is made while the lock is held. A new changing route that needs a body to get past validation gets
+  an entry in that table.
 - If the route needs something slow, mark it and lock only around the state:
 
   ```python
@@ -168,7 +183,10 @@ Rules:
 ## Tests
 
 - `tests/test_concurrency.py`: the lock, route coverage, `503` while the lock is stuck, no provider
-  call under the lock (routes, alert creation and alert evaluation in the tick), tick priority, atomic order changes, ordered saves, sliced replay commands.
+  call under the lock (every route, alert creation and editing, alert evaluation in the tick), tick
+  priority, a broadcast fault that keeps the snapshot, replay pacing after a failed turn, atomic order
+  changes and their cost, the open-order index (Hypothesis), ordered saves and retried failed writes,
+  replay start against exit, sliced replay commands.
 - `tests/test_concurrency_stress.py`: many threads submit, cancel, replace, reset, change settings,
   step a replay and switch modes while the loop ticks every 5 ms; then the ledger invariants, order
   and fill accounting and every `state.json` written along the way are checked. Seeded and bounded

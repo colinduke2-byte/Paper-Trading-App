@@ -7,6 +7,7 @@ import threading
 import time
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 from fastapi.testclient import TestClient
 
 from app.api import locking as api_locking
@@ -280,6 +281,25 @@ def test_an_async_api_route_must_say_how_it_handles_the_lock():
         api_locking.unlocked("")
 
 
+# Bodies for the changing routes in the walk below; every other one gets {}. Each of these must answer 200,
+# so a route that reaches the provider only past validation is really exercised.
+COVERED_CALL = {"qty": 1, "legs": [{"symbol": "AAPL", "side": "buy", "ratio": 100},
+                                  {"symbol": "AAPL240426C00162500", "side": "sell", "ratio": 1}]}
+CHANGE_BODIES = {
+    ("POST", "/api/accounts"): {"name": "Second", "type": "cash", "starting_cash": "1000"},
+    ("POST", "/api/accounts/{aid}/orders/preview"): {"symbol": "AAPL", "side": "buy", "qty": 1},
+    ("POST", "/api/accounts/{aid}/orders"): {"symbol": "AAPL", "side": "buy", "qty": 1},
+    ("POST", "/api/accounts/{aid}/multileg/preview"): COVERED_CALL,
+    ("POST", "/api/accounts/{aid}/multileg"): COVERED_CALL,
+    ("PUT", "/api/watchlists/{name}"): ["AAPL", "MSFT"],
+    ("POST", "/api/alerts"): {"symbol": "AAPL", "op": "above", "price": "500"},
+    ("POST", "/api/alert-rules"): {"kind": "indicator", "symbol": "AAPL", "indicator": "sma", "period": 5,
+                                   "tf": "1m", "op": "crosses_above"},
+    ("PATCH", "/api/alert-rules/{alert_id}"): {"period": 7, "tf": "1d"},
+    ("PUT", "/api/accounts/{aid}/lot-method"): {"method": "lifo"},
+}
+
+
 def test_no_route_asks_the_data_provider_while_holding_the_lock():
     """A live feed fetches bars, chains and research over the network. None of that may happen under the lock."""
     from app.marketdata.alpaca import AlpacaFeed
@@ -333,6 +353,23 @@ def test_no_route_asks_the_data_provider_while_holding_the_lock():
         assert "AAPL" in ctx.live_interest() and "MSFT" not in ctx.live_interest()
         assert time.monotonic() - t0 < 3
     assert "MSFT" in ctx.live_interest()
+    # Every route that changes something, with a body that gets it past validation where one is needed.
+    # An indicator alert first, so the PATCH below edits one (fill_path's alert id is the first alert).
+    assert c.post("/api/alert-rules", json=CHANGE_BODIES[("POST", "/api/alert-rules")]).json()["id"] == "AL00001"
+    walked, ok = 0, set()
+    for method, path, _ in sorted(api_routes(app), key=lambda r: (r[0] == "DELETE" or "/reset" in r[1]
+                                                                   or r[1].startswith("/api/replay/"))):
+        if method == "GET":
+            continue
+        url = fill_path(path, aid).replace("MKTX", "AAPL").replace("2026-11", "2024-03")
+        r = c.request(method, url, json=CHANGE_BODIES.get((method, path), {}), params={"account_id": aid})
+        walked += 1
+        if r.status_code == 200:
+            ok.add((method, path))
+    assert walked >= 30
+    must_work = {k for k in CHANGE_BODIES if k[0] != "DELETE"}
+    assert must_work <= ok, f"the body table no longer gets these past validation: {sorted(must_work - ok)}"
+    assert under_lock == []
 
 
 def test_alerts_never_ask_the_data_provider_while_holding_the_lock():
@@ -472,7 +509,7 @@ def test_a_stuck_request_delays_the_tick_but_cannot_break_or_block_the_server(mo
 
 def test_requests_cannot_starve_the_tick(tmp_path):
     """Eight threads take the lock back to back; the tick still gets in after almost every one of them."""
-    c, app, ex = make_app(tmp_path, run_loop=True, tick_seconds=0.001)
+    c, app, ex = make_app(tmp_path, run_loop=True, tick_seconds=0.01)
     ctx = app.state.ctx
     stop, holds = threading.Event(), [0]
 
@@ -480,7 +517,7 @@ def test_requests_cannot_starve_the_tick(tmp_path):
         while not stop.is_set():
             with ctx.locked("hog"):
                 holds[0] += 1
-                time.sleep(0.003)  # a slow request holding the lock
+                time.sleep(0.03)  # a slow request; longer than any timer step (Windows: about 16 ms)
 
     with c:
         hogs = [threading.Thread(target=hog, daemon=True) for _ in range(8)]
@@ -488,7 +525,7 @@ def test_requests_cannot_starve_the_tick(tmp_path):
             h.start()
         assert wait_for(lambda: holds[0] >= 8)
         turns0, holds0 = ctx.metrics["turns"], holds[0]
-        assert wait_for(lambda: holds[0] >= holds0 + 120, 30)
+        assert wait_for(lambda: holds[0] >= holds0 + 60, 30)
         turns, held_n = ctx.metrics["turns"] - turns0, holds[0] - holds0
         stop.set()
         for h in hogs:
@@ -516,6 +553,66 @@ def test_a_tick_that_raises_is_reported_and_the_market_goes_on(tmp_path, capsys)
 
 
 # ---- saving ---------------------------------------------------------------------------------------------------
+def test_a_fault_while_building_the_broadcast_does_not_cost_the_snapshot(tmp_path):
+    c, app, ex = make_app(tmp_path, run_loop=True, tick_seconds=0.005)
+    ctx, aid = app.state.ctx, list(ex.accounts)[0]
+    path = os.path.join(ex.data_dir, "state.json")
+    with c, c.websocket_connect("/ws") as ws:
+        ws.send_json({"symbols": ["MKTX"], "account": aid})
+        assert wait_for(lambda: ctx.clients and list(ctx.clients.values())[0]["account"] == aid)
+        ex.positions = lambda account_id: (_ for _ in ()).throw(RuntimeError("fault in the broadcast"))
+        assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
+
+        def saved():
+            with open(path, encoding="utf-8") as f:
+                return len(json.load(f)["orders"])
+        assert wait_for(lambda: os.path.exists(path) and saved() == 1), "the order never reached state.json"
+        assert ctx.metrics["errors"] > 0
+
+
+def test_a_bad_account_from_a_websocket_client_breaks_nothing(tmp_path):
+    """An unhashable account id is dropped; the other client still gets its messages, the state is saved."""
+    c, app, ex = make_app(tmp_path, run_loop=True, tick_seconds=0.005)
+    ctx, aid = app.state.ctx, list(ex.accounts)[0]
+    path = os.path.join(ex.data_dir, "state.json")
+    with c, c.websocket_connect("/ws") as bad, c.websocket_connect("/ws") as good:
+        bad.send_json({"symbols": ["MKTX"], "account": []})
+        good.send_json({"symbols": ["MKTX"], "account": aid})
+        assert wait_for(lambda: len(ctx.clients) == 2 and aid in [v["account"] for v in ctx.clients.values()])
+        assert None in [v["account"] for v in ctx.clients.values()]
+        assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
+        assert wait_for(lambda: os.path.exists(path) and len(json.load(open(path, encoding="utf-8"))["orders"]) == 1)
+        for _ in range(50):
+            msg = good.receive_json()
+            if msg.get("positions"):
+                break
+        assert msg["positions"][0]["symbol"] == "MKTX"
+    assert ctx.metrics["errors"] == 0
+
+
+def test_a_turn_that_fails_after_the_replay_advanced_does_not_run_the_replay_fast(tmp_path):
+    """Wall time passed to the replay is counted once, even when the turn raises after advancing it."""
+    c, app, ex = make_app(tmp_path, run_loop=True, tick_seconds=0.01, replay_tick_seconds=0.01)
+    ctx = app.state.ctx
+    with c:
+        assert c.post("/api/replay/start", json={"session": SESSION.split(".")[0]}).status_code == 200
+        rp = ctx.replay
+        given, real = [], rp.advance
+
+        def advance(elapsed):
+            given.append(elapsed)
+            real(elapsed)
+            raise RuntimeError("fault after the replay advanced")
+        rp.advance = advance
+        t0 = time.monotonic()
+        assert wait_for(lambda: len(given) >= 20, 10)
+        wall = time.monotonic() - t0
+        rp.advance = real
+    assert ctx.metrics["errors"] >= 20
+    # Without the fix every failed turn passes the whole time since the start again.
+    assert sum(given) <= wall + 0.5, f"{sum(given):.2f} s given to the replay over {wall:.2f} s"
+
+
 def test_snapshot_is_taken_in_memory_and_an_older_one_never_overwrites_a_newer_one(tmp_path):
     ex, feed, clock = make_exchange(str(tmp_path))
     a = ex.create_account("t", "margin", D("100000"))
@@ -665,6 +762,129 @@ def test_cancel_all_is_all_or_nothing():
     assert ex.cancel_all(a.id) == 3
 
 
+def test_a_rejected_submit_takes_no_rollback_snapshot(monkeypatch):
+    """Validation and the risk and rule checks change nothing, so a rejected order costs no copy."""
+    from app.exchange import OrderRejected
+    from app.lifecycle.state import AccountLife
+    ex, feed, clock = make_exchange()
+    a = ex.create_account("t", "cash", D("1000"))
+    copies = []
+    real = AccountLife.copy
+    monkeypatch.setattr(AccountLife, "copy", lambda self: copies.append(1) or real(self))
+    before = book(ex, a)
+    with pytest.raises(OrderRejected):
+        ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 1000})  # far more than the cash
+    with pytest.raises(OrderRejected):
+        ex.submit(a.id, {"symbol": "NOPE", "side": "buy", "qty": 1})
+    assert copies == [] and book(ex, a) == before
+    ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 1})
+    assert copies == [1]
+
+
+def test_a_rolled_back_request_keeps_a_failed_write_mark():
+    """The save thread sets `dirty` when a write fails; a request failing at the same moment must not clear it."""
+    ex, feed, clock = make_exchange()
+    a = ex.create_account("t", "margin", D("100000"))
+    ex.dirty = False
+    handle = ex._handle
+
+    def save_fails_meanwhile(events):
+        ex.dirty = True  # what write_plan() does on another thread when the disk is full
+        raise RuntimeError("fault in the request")
+    ex._handle = save_fails_meanwhile
+    with pytest.raises(RuntimeError):
+        ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 1})
+    ex._handle = handle
+    assert ex.dirty and not ex.engine.orders
+
+
+def test_a_failed_market_snapshot_write_is_retried_on_the_next_turn(tmp_path, monkeypatch):
+    ex = Exchange(SyntheticFeed(seed=3, now=T0), SimClock(T0), data_dir=str(tmp_path))
+    ex.create_account("t", "margin", D("1000"))
+    ex.tick()
+    plan = ex.save_plan(force=True)
+    assert "market.json" in [name for name, _, _ in plan]
+    real = Exchange._write_text
+
+    def full(path, text):
+        raise OSError("disk full")
+    monkeypatch.setattr(Exchange, "_write_text", staticmethod(full))
+    with pytest.raises(OSError):
+        ex.write_plan(plan)
+    monkeypatch.setattr(Exchange, "_write_text", staticmethod(real))
+    assert ex.dirty
+    again = ex.save_plan()  # no simulated time has passed
+    assert {name for name, _, _ in again} == {"state.json", "market.json"}
+    ex.write_plan(again)
+    assert os.path.exists(os.path.join(str(tmp_path), "market.json"))
+
+
+@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(st.lists(st.tuples(st.sampled_from(["limit", "market", "cancel", "move", "cancel_all", "fail"]),
+                          st.integers(0, 6)), min_size=1, max_size=25))
+def test_the_open_order_index_always_matches_a_walk_of_every_order(steps):
+    """active_orders() reads an index instead of every order; it must give what the full walk gives, in order."""
+    ex, feed, clock = make_exchange()
+    a = ex.create_account("t", "margin", D("100000"))
+    b = ex.create_account("u", "margin", D("100000"))
+    for kind, n in steps:
+        acct = (a, b)[n % 2]
+        try:
+            if kind == "limit":
+                ex.submit(acct.id, {"symbol": "ABC", "side": "buy", "qty": 1, "type": "limit",
+                                    "limit_price": f"{95 + n}.00", "tif": "gtc"})
+            elif kind == "market":
+                ex.submit(acct.id, {"symbol": "ABC", "side": "buy", "qty": 1, "take_profit": "130.00",
+                                    "stop_loss": "70.00"})
+            elif kind == "cancel":
+                open_ = [o for o in ex.engine.active_orders() if o.account_id == acct.id]
+                if open_:
+                    ex.cancel(acct.id, open_[n % len(open_)].id)
+            elif kind == "move":
+                move(ex, feed, clock, "ABC", f"{94 + n * 2}.00")
+            elif kind == "cancel_all":
+                ex.cancel_all(acct.id)
+            else:  # a request that fails after its fill and is rolled back
+                on_fill = ex.lifecycle.on_fill
+                ex.lifecycle.on_fill = lambda *x: (_ for _ in ()).throw(RuntimeError("fault"))
+                try:
+                    ex.submit(acct.id, {"symbol": "ABC", "side": "buy", "qty": 1})
+                except RuntimeError:
+                    pass
+                finally:
+                    ex.lifecycle.on_fill = on_fill
+        except (ValueError, KeyError):
+            pass
+        assert ex.engine.active_orders() == [o for o in ex.engine.orders.values() if o.active]
+        assert ex.engine.active_orders("ABC") == [o for o in ex.engine.orders.values() if o.active]
+    ex.reset_account(b.id)
+    assert ex.engine.active_orders() == [o for o in ex.engine.orders.values() if o.active]
+    assert problems(ex) == []
+
+
+@settings(max_examples=60, deadline=None)
+@given(st.lists(st.tuples(st.text(max_size=3), st.decimals(-1000, 1000, places=2), st.text(max_size=3)), max_size=8),
+       st.dictionaries(st.text(max_size=3), st.lists(st.tuples(st.text(max_size=3), st.decimals(0, 10, places=0),
+                                                               st.booleans()).map(list), max_size=3), max_size=3),
+       st.lists(st.lists(st.text(max_size=3), max_size=3), max_size=4))
+def test_account_life_copy_is_equal_and_independent(unsettled, opened, log):
+    from app.lifecycle.state import AccountLife
+    life = AccountLife(unsettled=[list(u) for u in unsettled], opened=opened, log=log,
+                       accrual_rates={"interest": {"0.05": [D("1.25"), 3]}},
+                       pending_dividends=[{"symbol": "ABC", "amount": "1.00"}])
+    before = json.dumps(life.to_plain(), sort_keys=True, default=str)
+    c = life.copy()
+    assert json.dumps(c.to_plain(), sort_keys=True, default=str) == before
+    for lots in c.opened.values():
+        for lot in lots:
+            lot[1] = D(-1)
+    for v in (c.unsettled, c.log, c.pending_dividends, *c.opened.values(), *c.unsettled, *c.log):
+        v.append("x")
+    c.accrual_rates["interest"]["0.05"][0] = D(0)
+    c.pending_dividends[0]["amount"] = "9"
+    assert json.dumps(life.to_plain(), sort_keys=True, default=str) == before
+
+
 # ---- replay commands ------------------------------------------------------------------------------------------------
 def test_a_long_seek_holds_the_lock_only_in_short_slices(tmp_path, monkeypatch):
     monkeypatch.setattr("app.marketdata.replay.control.SLICE_SECONDS", 0.001)  # many slices even on a fast machine
@@ -720,3 +940,49 @@ def test_step_under_the_lock_never_waits_for_the_command_lock_and_exit_stops_a_r
     assert c.post("/api/replay/exit").status_code == 200
     seeking.join(10)
     assert not seeking.is_alive() and rp.closed and rp.now() < rp.end and ctx.ex is ex
+
+
+def test_a_start_waits_until_an_exit_has_written_the_sandbox(tmp_path, monkeypatch):
+    """The exit writes the sandbox after releasing the exchange lock; a start from a second browser at that
+    moment would remove the same directory. It waits for the exit instead, and then starts cleanly."""
+    c, app, ex = make_app(tmp_path)
+    ctx = app.state.ctx
+    session = SESSION.split(".")[0]
+    assert c.post("/api/replay/start", json={"session": session}).status_code == 200
+    sandbox = ctx.ex
+    writing, go_on, order = threading.Event(), threading.Event(), []
+    real = sandbox.write_plan
+
+    def slow_write(files):
+        writing.set()
+        go_on.wait(10)
+        order.append("exit wrote")
+        real(files)
+    sandbox.write_plan = slow_write
+    exiting, out_exit = in_thread(lambda: c.post("/api/replay/exit").status_code)
+    assert writing.wait(5) and ctx.replay is None  # the exchange lock is released, the files are not written
+    starting, out_start = in_thread(lambda: (order.append("start"), c.post("/api/replay/start",
+                                                                            json={"session": session}).status_code)[1])
+    time.sleep(0.2)
+    assert ctx.replay is None, "the start ran while the exit was still writing the sandbox"
+    go_on.set()
+    exiting.join(10)
+    starting.join(10)
+    assert out_exit["value"] == 200 and out_start["value"] == 200
+    assert order == ["start", "exit wrote"] and ctx.replay is not None
+    assert c.post("/api/replay/exit").status_code == 200
+
+
+def test_a_replay_starts_even_when_the_live_state_cannot_be_written(tmp_path, monkeypatch):
+    c, app, ex = make_app(tmp_path)
+    ctx = app.state.ctx
+    real = ex.write_plan
+
+    def full(files):
+        ex.dirty = True
+        raise OSError("disk full")
+    ex.write_plan = full
+    r = c.post("/api/replay/start", json={"session": SESSION.split(".")[0]})
+    assert r.status_code == 200 and ctx.replay is not None and ex.dirty  # live is saved again later
+    ex.write_plan = real
+    assert c.post("/api/replay/exit").status_code == 200 and ctx.ex is ex

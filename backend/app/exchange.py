@@ -189,6 +189,7 @@ class Exchange:
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
+        self.engine.reindex()
         new = Account(old.id, old.name, old.type, cash, self.now())
         new.settings = dict(old.settings)  # a reset keeps the account's rule settings
         new.lot_method = old.lot_method  # ... and its tax-lot method
@@ -202,6 +203,7 @@ class Exchange:
         if len(self.accounts) == 1:
             raise ValueError("cannot delete the only account")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
+        self.engine.reindex()
         del self.accounts[account_id]
         self.dirty = True
 
@@ -299,12 +301,14 @@ class Exchange:
             return
         orders = self.engine.orders
         n_orders = len(orders)
-        saved = [(o, dict(o.__dict__)) for o in orders.values() if o.account_id == account_id and o.active]
+        saved = [(o, dict(o.__dict__)) for o in self.engine.active_orders() if o.account_id == account_id]
         led = a.ledger
         n_txn, balances = len(led.transactions), dict(led.balances)
         lots = {s: [copy.copy(l) for l in ls] for s, ls in a.lots.items()}
-        n_fills, n_closed, life = len(a.fills), len(a.closed), copy.deepcopy(a.life)
-        n_events, dirty = len(self.events), self.dirty
+        n_fills, n_closed, life = len(a.fills), len(a.closed), a.life.copy()
+        # `dirty` is not put back: the save thread sets it when a write fails, and a rolled-back request
+        # costs one extra save at most.
+        n_events = len(self.events)
         notices = self.alerting.notices
         notes, note_seq = list(notices.logs.get(account_id, ())), notices.seq
         fill_seq = next(self.engine._fill_seq)
@@ -318,6 +322,7 @@ class Exchange:
             for o, fields in saved:
                 o.__dict__.clear()
                 o.__dict__.update(fields)
+            self.engine.reindex()  # orders open again, in their first order
             del led.transactions[n_txn:]
             led.balances = balances
             a.lots = lots
@@ -327,7 +332,6 @@ class Exchange:
             if not notes:
                 del notices.logs[account_id]
             self.engine._fill_seq = count(fill_seq)
-            self.dirty = dirty
             raise
 
     # ---- order entry -----------------------------------------------------
@@ -834,10 +838,8 @@ class Exchange:
                                    "type": o.type, "role": o.role} for o in orders[1:]]}
 
     def submit(self, account_id: str, req: dict) -> list:
-        with self._atomic(account_id):
-            return self._submit(account_id, req)
-
-    def _submit(self, account_id: str, req: dict) -> list:
+        # Validation and the risk and rule checks change nothing but the order id counter, so the rollback
+        # snapshot is only taken once they have passed (a rejected order costs no copy).
         a = self.account(account_id)
         if not isinstance(req, dict):
             raise OrderRejected("an order must be a JSON object")
@@ -854,6 +856,12 @@ class Exchange:
         rule = self._rule_check(a, orders, worst)  # pattern day trader and settled-cash rules
         if rule:
             raise OrderRejected(rule)
+        with self._atomic(account_id):
+            self._place(orders)
+        return orders
+
+    def _place(self, orders: list) -> None:
+        entry = orders[0]
         now = self.now()
         sess, q = self.session(now), self.quote(entry.symbol)
         if entry.legs:
@@ -865,7 +873,6 @@ class Exchange:
         else:  # standalone one-cancels-other
             events = self.engine.submit_oco(orders, {o.symbol: self.quote(o.symbol) for o in orders}, now, sess)
         self._handle(events)
-        return orders
 
     def cancel(self, account_id: str, order_id: str) -> Order:
         o = self.engine.orders.get(order_id)
@@ -1547,6 +1554,8 @@ class Exchange:
                         self._written[name] = seq
         except BaseException:
             self.dirty = True  # not on disk: the next save tries again
+            if any(name == "market.json" for name, _, _ in files):
+                self._last_market_save = 0.0  # ... and the market snapshot too, not a minute later
             raise
 
     def save(self, force: bool = False) -> None:

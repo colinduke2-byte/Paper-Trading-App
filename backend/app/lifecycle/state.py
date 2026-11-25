@@ -3,7 +3,7 @@
 Stored under the "lifecycle" key of `Account.to_plain()`. Every field has a default so
 state files written before this existed still load.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from typing import Optional
 
@@ -35,6 +35,12 @@ class AccountLife:
     liquidation_paused: bool = False
     prices_missing: list = field(default_factory=list)
     log: list = field(default_factory=list)  # [ts, kind, message]: margin calls, liquidation, adjustments
+
+    def copy(self) -> "AccountLife":
+        """An independent copy, for rolling a failed request back. Every field holds only lists, dicts and
+        immutable values (str, Decimal, numbers, None), so copying the containers is enough; much faster
+        than copy.deepcopy for an account with thousands of unsettled sales."""
+        return AccountLife(**{f.name: _copy(getattr(self, f.name)) for f in fields(self)})
 
     def unsettled_total(self) -> Decimal:
         return sum((D(a) for _, a, _ in self.unsettled), ZERO)
@@ -74,3 +80,11 @@ def _lots(v) -> list:
     if isinstance(v, (str, int)):  # format before opening lots were tracked: one uncounted lot
         return [[None, D(v), False]]
     return [[i, D(q), bool(c)] for i, q, c in v]
+
+
+def _copy(v):
+    if isinstance(v, list):
+        return [_copy(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _copy(x) for k, x in v.items()}
+    return v

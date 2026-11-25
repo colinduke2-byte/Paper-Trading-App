@@ -1,6 +1,7 @@
 """Historical replay API. While a replay runs, ctx.ex is the replay sandbox, so every other endpoint
 (quotes, charts, orders, accounts) works on the replayed market without changes."""
 import os
+import contextlib
 import threading
 
 from fastapi import Body, HTTPException
@@ -17,7 +18,20 @@ SLOW = "reads session files or runs many ticks; takes the exchange lock itself i
 
 
 def register(app, ctx) -> None:
-    starting = threading.Lock()  # one start at a time: two would build their sandbox in the same directory
+    # The sandbox directory has one user at a time: a start builds it (and first removes what is there), an
+    # exit writes its last state into it after the exchange lock is released. Always taken before the
+    # exchange lock, never while holding it.
+    sandbox_busy = threading.Lock()
+    SANDBOX_WAIT = 10.0
+
+    @contextlib.contextmanager
+    def sandbox_turn():
+        if not sandbox_busy.acquire(timeout=SANDBOX_WAIT):
+            raise HTTPException(409, "A replay is still being started or closed. Try again in a moment.")
+        try:
+            yield
+        finally:
+            sandbox_busy.release()
 
     def dirs() -> list:
         return session_dirs(ctx.live.data_dir)
@@ -44,12 +58,8 @@ def register(app, ctx) -> None:
     @app.post("/api/replay/start")
     @unlocked(SLOW)
     def start(body: dict = Body(...)):
-        if not starting.acquire(blocking=False):
-            raise HTTPException(409, "A replay is already being started.")
-        try:
+        with sandbox_turn():
             return _start(body)
-        finally:
-            starting.release()
 
     def _start(body: dict):
         if ctx.replay is not None:
@@ -113,8 +123,9 @@ def register(app, ctx) -> None:
     @unlocked(SLOW)
     def exit_replay():
         active()
-        try:
-            ctx.exit_replay()
-        except RuntimeError as e:
-            raise HTTPException(409, str(e))
+        with sandbox_turn():  # a start from another browser waits until the sandbox files are written
+            try:
+                ctx.exit_replay()
+            except RuntimeError as e:
+                raise HTTPException(409, str(e))
         return state()

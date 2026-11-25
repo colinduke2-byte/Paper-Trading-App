@@ -139,7 +139,10 @@ class AppContext:
             self.replay = controller
             self.ex = controller.ex
             self._publish()
-        self.live.write_plan(files)  # disk I/O after the lock is released
+        try:
+            self.live.write_plan(files)  # disk I/O after the lock is released
+        except OSError as e:  # the replay is running already; live stays dirty and is saved after the exit
+            print(f"replay start: the live state could not be written yet: {e!r}")
 
     def exit_replay(self) -> None:
         """Return to the live exchange exactly as it was when the replay started."""
@@ -182,13 +185,18 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         st = status()
         out = []
         for ws, sub in list(clients.items()):
-            msg = {"type": "tick", "status": st,
-                   "quotes": {s: r for s in list(sub["symbols"]) if (r := quote_row(ex, s))}}
-            acct = sub.get("account")
-            if acct in ex.accounts:
-                msg["account"] = plain(ex.summary(acct))
-                msg["positions"] = plain(ex.positions(acct))
-            msg["events"] = [plain(e) for e in events if e.get("account_id") in (None, acct)]
+            try:
+                msg = {"type": "tick", "status": st,
+                       "quotes": {s: r for s in list(sub["symbols"]) if (r := quote_row(ex, s))}}
+                acct = sub.get("account")
+                if isinstance(acct, str) and acct in ex.accounts:
+                    msg["account"] = plain(ex.summary(acct))
+                    msg["positions"] = plain(ex.positions(acct))
+                msg["events"] = [plain(e) for e in events if e.get("account_id") in (None, acct)]
+            except Exception as e:  # one client's fault must not cost the others their message
+                metrics["errors"] += 1
+                print(f"broadcast error: {e!r}")
+                continue
             out.append((ws, msg))
         return out
 
@@ -219,9 +227,16 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 rp.advance(elapsed)  # ticks the sandbox once per simulated second
             else:
                 ex.tick()
+            try:
+                out = messages(ex)
+            except Exception as e:  # a broadcast fault must not cost the snapshot of a tick that already ran
+                metrics["errors"] += 1
+                print(f"broadcast error: {e!r}")
+                out = []
             idle = work["saving"] is None or work["saving"].done()
+            # The last statement that can fail: once save_plan() has reset `dirty`, the plan must reach
+            # the caller, or the changes it holds are not written until the next change.
             files = ex.save_plan() if idle else []  # still dirty next turn when the last write is not done
-            out = messages(ex)
         finally:
             ctx.lock.release()
         wait, took = got - asked, time.monotonic() - got
@@ -244,13 +259,15 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         while True:
             try:
                 wall = time.monotonic()
-                ex, files, out = await running.run_in_executor(work["tick"], turn, wall - last)
-                last = wall
+                # Counted once, also when the turn raises after it advanced (a replay must not run fast)
+                elapsed, last = wall - last, wall
+                ex, files, out = await running.run_in_executor(work["tick"], turn, elapsed)
                 work["stuck"] = False
                 if files:
                     work["saving"] = work["save"].submit(write, ex, files)
                 await broadcast(out)
             except Busy as e:  # a request holds the lock for too long: skip the turn, try again next time
+                last -= elapsed  # nothing advanced: the next turn catches up on this time
                 if not work["stuck"]:
                     print(f"tick skipped: {e}")
                 work["stuck"] = True
