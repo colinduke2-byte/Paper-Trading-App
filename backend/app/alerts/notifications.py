@@ -200,7 +200,7 @@ class NotificationCentre:
         "split": ("split", "info", "Stock split applied"),
         "margin interest": ("account", "info", "Margin interest"),
         "short borrow fee": ("account", "info", "Short borrow fee"),
-        "expiration": ("option", "warning", "Option expiry settlement"),
+        "expiration": ("account", "warning", "Option expiry settlement"),
         "day_start": ("account", "info", "Day P&L"),
     }
 
