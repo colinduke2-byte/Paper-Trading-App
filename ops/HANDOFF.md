@@ -301,3 +301,4 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
 - Check results: `gh api repos/colinduke2-byte/paper-trading-app/commits/<sha>/check-runs`.
 - Owner still needs to: create Alpaca paper keys; test on a real Windows PC and phone (phase 6);
   decide on a LICENSE only if the repository ever goes public.
+- UPDATE 01:10 UTC: PR 23 pushed, head ed44cd8, main merged in, grace default now 13 hours. Author reports backend 581 passed, e2e 101 passed with 1 failure it calls a click race (chart.spec.ts:460, the replay drawing test; passed twice alone: a third flaky test to fix properly, no retries). Next step: wait for checks on ed44cd8 and merge if green.
