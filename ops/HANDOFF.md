@@ -343,3 +343,7 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   PR 30 (stream/hardening) opened; checks running.
   PR 17 fixer (session_01ByytwbfYBDGd6t6MFSgJ37) finished but its commit was refused by the
   permission check: the OWNER must allow the commit in that session. The integrator waits for it.
+- 02:17 UTC: PR 29 (thread safety + alerts off the lock + review fixes) MERGED. Release blocker B3 closed.
+  PRs 25 and 26 are included in it: owner to close them. PR 30 hardening: pixel-7 e2e fails (likely
+  the cross-site rule vs the phone path); sent back to its worker. PR 28 green at 375afda but its
+  worker is still doing items 10 and 12; merge after that, updated with main.
