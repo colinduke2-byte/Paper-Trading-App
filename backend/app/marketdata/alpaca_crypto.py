@@ -155,6 +155,8 @@ class AlpacaCryptoFeed(AlpacaFeed):
                                           or WebsocketsConnection, sleep=kw.get("sleep", time.sleep),
                                           clock=self.wall_clock)
         self.crypto_info: dict = {}
+        self._symbols: dict = {}
+        self._symbols_key = None
         self.crypto_error: Optional[str] = None
         self._cstate: dict = {}
         self._cchanged: set = set()  # pairs with news since the last step (kept apart from the stock set)
@@ -163,7 +165,14 @@ class AlpacaCryptoFeed(AlpacaFeed):
 
     # ---- symbols ------------------------------------------------------------------------------
     def symbols(self) -> dict:
-        return {**self.info, **self.crypto_info} if self.crypto_info else self.info
+        """Stocks and crypto pairs. The merged table is rebuilt only when either table is replaced
+        (both are only ever swapped whole), not copied on every call."""
+        if not self.crypto_info:
+            return self.info
+        key = (id(self.info), id(self.crypto_info))
+        if self._symbols_key != key:
+            self._symbols, self._symbols_key = {**self.info, **self.crypto_info}, key
+        return self._symbols
 
     def _crypto_assets_path(self) -> Optional[Path]:
         return Path(self.data_dir) / "alpaca_crypto_assets.json" if self.data_dir else None

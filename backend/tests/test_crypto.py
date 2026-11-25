@@ -788,3 +788,13 @@ def test_changing_an_order_checks_what_is_left_to_fill():
         ex.replace(m.id, o.id, {"qty": "0.01"})  # 0.0005 left is below the 0.001 minimum
     ex.replace(m.id, o.id, {"qty": "0.0105"})
     assert o.qty == D("0.0105")
+
+
+def test_alpaca_symbol_table_is_cached_until_a_table_is_replaced():
+    feed, _ = crypto_feed()
+    feed.load_assets()
+    a = feed.symbols()
+    assert feed.symbols() is a and "BTC/USD" in a
+    feed.crypto_info = {k: v for k, v in feed.crypto_info.items() if k != "ETH/USD"}  # a reload swaps the table
+    b = feed.symbols()
+    assert b is not a and "ETH/USD" not in b and "BTC/USD" in b
