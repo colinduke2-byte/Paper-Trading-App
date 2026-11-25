@@ -11,6 +11,7 @@ Rules for a change to the format (also in docs/STATE_FORMAT.md):
   * A file with a version above CURRENT_VERSION is refused (never overwritten): it was written by a newer
     PaperDesk, and this build cannot know what it would lose.
 """
+import re
 from dataclasses import MISSING, fields
 from decimal import Decimal, InvalidOperation
 from typing import Callable
@@ -127,9 +128,44 @@ def migrate(d: dict) -> tuple:
         v = version_of(d)
     try:
         d = fill_defaults(d)
+        raise_counters(d)
     except (KeyError, TypeError, ValueError, AttributeError, InvalidOperation) as e:
         raise StateFormatError(f"a field has the wrong type ({type(e).__name__}: {e})") from e
     return d, start
+
+
+_ID = re.compile(r"^([A-Z]+)(\d+)$")
+
+
+def _max_id(ids, prefix: str) -> int:
+    best = 0
+    for i in ids:
+        m = _ID.match(i) if isinstance(i, str) else None
+        if m and m.group(1) == prefix:
+            best = max(best, int(m.group(2)))
+    return best
+
+
+def raise_counters(d: dict) -> None:
+    """Make every id counter larger than the largest id of its kind in the document, so the next order, fill,
+    account or alert never gets the id of an existing one (a hand-edited or inconsistent backup)."""
+    seq = d.get("seq")
+    if not isinstance(seq, dict):
+        return
+    accounts = [a for a in d.get("accounts") or () if isinstance(a, dict)]
+    fills = [f.get("id") for a in accounts for f in a.get("fills") or () if isinstance(f, dict)]
+    wanted = {"order": _max_id((o.get("id") for o in d.get("orders") or () if isinstance(o, dict)), "O"),
+              "account": _max_id((a.get("id") for a in accounts), "A"),
+              "fill": _max_id(fills, "F"), "expiry": _max_id(fills, "X"),
+              "alert": _max_id((x.get("id") for x in d.get("alerts") or () if isinstance(x, dict)), "AL")}
+    for k, top in wanted.items():
+        if isinstance(seq.get(k), int) and not isinstance(seq.get(k), bool) and seq[k] <= top:
+            seq[k] = top + 1
+    life = d.get("lifecycle")
+    if isinstance(life, dict):
+        top = _max_id(fills, "L")
+        if not isinstance(life.get("seq"), int) or life["seq"] <= top:
+            life["seq"] = top + 1
 
 
 # ---- validation -----------------------------------------------------------------------------------
@@ -248,6 +284,7 @@ def validate(d: dict) -> None:
     for k, v in d["watchlists"].items():
         _type(v, list, f"watchlists.{k}")
     _type(d.get("alerts"), list, "alerts")
+    _type(d.get("notifications"), (dict, list), "notifications", optional=True)
     _type(d.get("seq"), dict, "seq")
     for k in ("order", "account", "alert", "fill", "expiry"):
         _type(d["seq"].get(k), int, f"seq.{k}")

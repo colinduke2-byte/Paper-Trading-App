@@ -7,8 +7,14 @@ file exists but nobody holds the lock on it. The holder writes who it is (proces
 <data>/.paperdesk.lock.json, which is only used for the message a second process prints.
 
 Where the file system cannot lock files at all (some network shares), the fallback rule is the info file: it
-counts as held while the same host's process id is still running (POSIX), or while the holder refreshes it
-(heartbeat() every few minutes; older than STALE_SECONDS means stale).
+counts as held while the same host's process id is still running (POSIX), or while the holder refreshes it.
+The holder refreshes it from its own thread every HEARTBEAT_SECONDS; older than STALE_SECONDS means stale.
+Two limits of that fallback, by nature: the age rule decides before the pid check, so a holder that stops
+refreshing for STALE_SECONDS (a suspended laptop) loses the folder; and the check-then-write is not atomic, so
+two servers started within the same moment on such a file system could both pass. The OS lock has neither.
+
+Only the live exchange holds the lock: a replay swaps in a sandbox exchange with its own folder inside the data
+folder, and the live exchange (ctx.live), which carries data_lock, never changes.
 """
 import errno
 import json
@@ -19,6 +25,7 @@ from typing import Optional
 
 LOCK, INFO = ".paperdesk.lock", ".paperdesk.lock.json"
 STALE_SECONDS = 600.0
+HEARTBEAT_SECONDS = 60.0
 
 
 class DataDirLocked(RuntimeError):
@@ -88,7 +95,15 @@ class DataDirLock:
                 raise DataDirLocked(self._message(info))
         self._fh = fh
         self._write_info()
+        if self.fallback:
+            import threading
+            self._stop = threading.Event()
+            threading.Thread(target=self._beat, args=(self._stop,), daemon=True, name="paperdesk-lock").start()
         return self
+
+    def _beat(self, stop) -> None:
+        while not stop.wait(HEARTBEAT_SECONDS):
+            self.heartbeat()
 
     def _os_lock(self, fh) -> Optional[bool]:
         """True when this process now holds the lock, False when someone else does."""
@@ -143,6 +158,9 @@ class DataDirLock:
         fh, self._fh = self._fh, None
         if fh is None:
             return
+        stop = getattr(self, "_stop", None)
+        if stop is not None:
+            stop.set()
         try:
             os.unlink(self.info_path)
         except OSError:

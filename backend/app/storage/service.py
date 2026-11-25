@@ -184,15 +184,26 @@ class DataService:
             ex = ctx.live
             st = ex.store
             in_recovery = st is not None and st.blocked
+            if in_recovery:
+                st.ensure_copy()  # raises: then nothing is restored (the damaged files would be lost)
             if self.backups is not None and not in_recovery:
                 doc, market, info = self._serialise(ex)
                 self.backups.create(snapshot_kind, doc, market, info)  # raises: then nothing is restored
-            import json
-            ex.apply_document(json.loads(json.dumps(arc.doc)))  # a copy: the exchange must not share lists with it
-            if arc.market is not None:
-                ex.feed.restore(arc.market)
-                ex.lifecycle.repair_feed()
+            # Files first (the step most likely to fail), then memory; a failure in memory puts the old state back.
             self._write_sessions(ex, arc.sessions)
+            import json
+            before = ex.to_document()
+            before_market = ex.feed.snapshot() if arc.market is not None else None
+            try:
+                ex.apply_document(json.loads(json.dumps(arc.doc)))  # a copy: the exchange must not share lists with it
+                if arc.market is not None:
+                    ex.feed.restore(arc.market)
+                    ex.lifecycle.repair_feed()
+            except Exception:
+                ex.apply_document(before)
+                if before_market:
+                    ex.feed.restore(before_market)
+                raise
             if st is not None:
                 if in_recovery:
                     st.end_recovery()
@@ -272,6 +283,7 @@ class DataService:
             st = ex.store
             if st is None or not st.blocked:
                 raise RuntimeError("the data folder is not in recovery")
+            st.ensure_copy()  # raises: then the damaged files stay as they are
             ex.accounts, ex.engine.orders = {}, {}
             create_defaults(ex)
             st.end_recovery()

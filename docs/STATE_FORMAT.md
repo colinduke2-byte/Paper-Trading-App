@@ -42,7 +42,12 @@ On disk, `state.json` keeps the big lists that only ever grow in `segments/` ins
 * an account's `ledger`, `fills` and `closed` may be `{"$segment": "segments/<account>-<token>.<list>.jsonl", "count": N}`:
   the list is the first N lines of that file, one JSON value per line;
 * an entry of `orders` may be a string, the id of a finished order whose JSON is a line in the file named by
-  `orders_segment` (`{"$segment": "segments/orders-<token>.orders.jsonl"}`).
+  `orders_segment` (`{"$segment": "segments/orders-<token>.orders.jsonl"}`). The file can also hold lines that
+  `state.json` does not name: orders removed by a reset, or orders appended by a save that was cut off before its
+  `state.json` was written. After such a crash the order counter is back where `state.json` left it, so an id
+  in a stale line can be given out again. Two rules keep that safe: only the ids `state.json` names count as
+  saved (a reused id is appended again when its new order finishes), and when an id appears on more than one
+  line the last one wins (a saved order's line is never followed by another line for the same id).
 
 Backups, archives and account exports always hold the self-contained form (everything inline); a reference to a
 segment in an uploaded file is refused.
@@ -60,7 +65,15 @@ is not rewritten.
 
 The save is two steps so that it fits a server that serialises under its exchange lock and writes outside it:
 `plan = ex.save_plan()` (pure: builds bytes, no file I/O) and `ex.write_plan(plan)` (file I/O only). Plans written
-out of order never go backwards (an older plan than the last one written is skipped).
+out of order never go backwards. The state part and the market part are tracked separately: the state part of a
+plan is skipped only if a newer plan's state part was written already, and likewise for the market part. A
+market-only plan never causes a state plan to be skipped, or the other way round.
+
+The lists in segments are meant to be append-only. Each save checks the last entry already on disk for every
+list against memory. If it was changed in place, or a list was cleared and refilled to the same length, that
+account's segments are rewritten in full (and a warning is logged) instead of keeping the old version. A
+change to an older entry that leaves the last one alone is not detected until the next compaction, so code that
+edits history must replace the list object (that starts a new generation) rather than edit it.
 
 `tests/test_storage_faults.py` checks this by dying at every fsync, rename and delete of a save, and by killing
 a writer process with SIGKILL at random moments; after each, the folder must load, pass the ledger checks, and
@@ -72,9 +85,12 @@ hold the state of a save that was started and no older than the last save that f
 
 | fills | full rewrite (before) | a save after one more trade (now) |
 |---|---|---|
-| 1,000 | 1.1 MB, 15 ms to serialise + 3 ms to write | 48 KB state.json + 0.8 KB appended, 1 ms + 3 ms |
-| 5,000 | 5.7 MB, 83 ms + 9 ms | 234 KB + 0.8 KB, 4 ms + 3 ms |
-| 10,000 | 11.4 MB, 222 ms + 15 ms | 466 KB + 0.8 KB, 9 ms + 3 ms |
+| 1,000 | 1.3 MB, 14 ms to serialise + 3 ms to write | 166 KB state.json + 0.8 KB appended, 1 ms + 2 ms |
+| 5,000 | 5.8 MB, 66 ms + 8 ms | 352 KB + 0.8 KB, 4 ms + 2 ms |
+| 10,000 | 11.5 MB, 140 ms + 15 ms | 584 KB + 0.8 KB, 7 ms + 3 ms |
+
+(Measured again after merging the notification centre from main: its list, up to about 120 KB, is in every
+state.json.)
 
 Before this change every save rewrote everything, and the tick loop saves whenever anything changed (every
 second while orders work), so 10,000 fills meant about 11 MB written and a quarter of a second of serialising per
@@ -98,6 +114,12 @@ screen, with three choices:
 
 * **Restore the latest backup** (or pick another one): the newest backup that passes every check;
 * **Start fresh** with new paper accounts (the damaged files stay in `recovery/`);
+
+Before either of the first two choices overwrites anything, the damaged files must be kept somewhere. The copy to
+`recovery/` is made at start-up. If it failed (usually because the disk is full, which is also a common cause of
+the damage), the copy is tried again. Failing that, `state.json` and `segments/` are renamed aside, to
+`state.json.damaged-<time>` and `segments.damaged-<time>`, which needs no space. If even that fails, the choice is
+refused and nothing changes. The recovery screen says when no copy exists yet.
 * **Quit** without changing anything (stops the server, as Ctrl+C would).
 
 The same is available over the API: `GET /api/data/recovery`, `POST /api/data/recovery/restore {"backup"?}`,
@@ -120,7 +142,15 @@ Windows) and holds it while it runs. A second server on the same folder stops at
 server (process N on HOST, started …) is already using the data folder …". The operating system drops the lock
 when the process ends, however it ends, so a lock file left by a crash never blocks a restart. On file systems
 that cannot lock files the info file decides: held while that host's process is alive (Linux, macOS) or while its
-heartbeat (refreshed every 30 seconds by the running server) is younger than 10 minutes.
+heartbeat (refreshed every minute by a thread of the lock itself) is younger than 10 minutes. Two limits of
+that fallback:
+* the age rule is checked first, so a holder that stops refreshing for 10 minutes (a suspended laptop) loses
+  the folder even though its process is alive;
+* the check-then-write is not atomic, so two servers started within the same moment on such a file system could
+  both start.
+
+The OS lock has neither problem. Only the live exchange holds the lock: a replay runs a sandbox exchange in
+`replay/`, and the live exchange, which keeps the lock, stays the same.
 
 ## Versions and migrations: the rules for changing the format
 
@@ -137,6 +167,7 @@ heartbeat (refreshed every 30 seconds by the running server) is younger than 10 
 4. Before the first save after a conversion, the original files are kept byte for byte as a `pre-migration`
    backup.
 5. Unknown newer versions are refused, never "best-effort" loaded.
+6. A new kind of id needs its counter added to `schema.raise_counters()`.
 
 Version history:
 
@@ -172,10 +203,18 @@ the replay sessions.
 Restoring (`POST /api/data/restore/preview` with the zip as the body, or `{"backup": name}`; then
 `POST /api/data/restore/apply {"token"}`) checks the whole file before anything is touched: at most 64 MB
 uploaded, at most 200 files, only the names above (no absolute paths, `..`, backslashes, folders or links), no
-encryption, at most 256 MB per file and 512 MB in total once unpacked, no file compressed more than 100:1 above
+encryption, at most 64 MB unpacked for `manifest.json`, `state.json` and `market.json` (they are parsed in memory),
+256 MB for each replay session and 512 MB in total, no session file name that Windows reserves for a device
+(`CON`, `NUL`, `COM1` …) or that ends in a dot, no file compressed more than 100:1 above
 1 MB (decompression bombs), the real unpacked size against the declared one, every checksum, then the state's
 version, conversion, structure and ledger invariants. The preview says what would change, account by account,
-and which symbols are not in the current feed. Applying takes a `pre-restore` backup first.
+and which symbols are not in the current feed. Applying takes a `pre-restore` backup first, then writes the
+replay session files, then replaces the state in memory. If any step fails, the state stays as it was.
+
+Every id counter in a loaded, restored or imported document is raised above the largest id of its kind already
+in it: orders `O…`, fills `F…`, lifecycle fills `L…` (the lifecycle's own counter), expiry fills `X…`,
+accounts `A…` and alerts `AL…`. So a hand-edited or inconsistent backup can never make the next order or fill
+replace an existing one.
 
 ## Moving one account
 

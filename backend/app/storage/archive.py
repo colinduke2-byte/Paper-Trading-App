@@ -34,7 +34,10 @@ MAX_TOTAL = 512 * 1024 * 1024          # uncompressed, whole archive
 MAX_RATIO = 100                        # uncompressed / compressed, for members above RATIO_FLOOR
 RATIO_FLOOR = 1024 * 1024
 MAX_MEMBERS = 200
-_NAME = re.compile(r"^(manifest\.json|state\.json|market\.json|sessions/[A-Za-z0-9][A-Za-z0-9._-]{0,99})$")
+MAX_JSON = 64 * 1024 * 1024           # uncompressed manifest.json, state.json, market.json: parsed in memory
+# Session files: no path parts, no trailing dot, and none of the names Windows reserves for devices.
+_NAME = re.compile(r"^(manifest\.json|state\.json|market\.json|"
+                   r"sessions/(?!(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$))[A-Za-z0-9][A-Za-z0-9._-]{0,99}(?<!\.))$")
 
 
 class ArchiveError(ValueError):
@@ -85,7 +88,8 @@ def build(doc: dict, market: Optional[dict] = None, sessions: Optional[dict] = N
 
 
 def _read_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo, budget: list) -> bytes:
-    limit = min(info.file_size, MAX_MEMBER, budget[0])
+    cap = MAX_MEMBER if info.filename.startswith("sessions/") else MAX_JSON
+    limit = min(info.file_size, cap, budget[0])
     out, total = [], 0
     with zf.open(info) as f:
         while True:
@@ -124,7 +128,7 @@ def read(data: bytes, max_upload: int = MAX_UPLOAD) -> Archive:
             raise ArchiveError(f"the archive holds a folder or link named {n!r}")
         if i.flag_bits & 0x1:
             raise ArchiveError("the archive is encrypted; PaperDesk backups never are")
-        if i.file_size > MAX_MEMBER:
+        if i.file_size > (MAX_MEMBER if n.startswith("sessions/") else MAX_JSON):
             raise ArchiveError(f"{n} would unpack to {i.file_size // (1024 * 1024)} MB, more than PaperDesk accepts")
         if i.file_size > RATIO_FLOOR and i.file_size > max(i.compress_size, 1) * MAX_RATIO:
             raise ArchiveError(f"{n} is compressed suspiciously well (possible zip bomb), so it was not unpacked")

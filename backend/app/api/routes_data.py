@@ -135,6 +135,8 @@ def register(app, ctx) -> None:
             need_backups()
             try:
                 arc = svc.backups.read(str(name))
+            except KeyError:
+                raise HTTPException(404, f"There is no backup named {str(name)[:80]}.")
             except archive.ArchiveError as e:
                 bad(e)
             source = f"backup {name}"

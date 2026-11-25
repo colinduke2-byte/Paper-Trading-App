@@ -87,7 +87,9 @@ class StateStore:
         self._wlock = threading.Lock()   # one writer at a time
         self._meta = threading.Lock()    # committed segment positions (read by plan, written by write)
         self._seq = 0
-        self._written_seq = 0
+        self._written_state_seq = 0      # seq of the newest plan whose state reached the disk
+        self._written_market_seq = 0     # the same for market.json (a market-only plan never hides a state plan)
+        self._tails: dict = {}           # list segment name -> encoded last committed entry (append-only check)
         self._segs: dict = {}            # name -> [entries, byte offset] committed on disk
         self._order_ids: dict = {}       # orders segment name -> set of order ids committed in it
         self._gens: dict = {}            # account id -> {"token", "objs": (ledger, fills, closed)}
@@ -157,6 +159,7 @@ class StateStore:
             orders_name = self._seg_name("orders", self._orders_token, "orders")
             committed_ids = set() if compact else set(self._order_ids.get(orders_name, ()))
             gens = self._gens
+            tails = dict(self._tails)
             if compact:
                 gens.clear()
                 self._loaded_tokens.clear()
@@ -178,13 +181,15 @@ class StateStore:
                 if have > sizes[kind]:  # a list shrank: never expected, so start this account again
                     g["token"] = self._token()
                     return self._replan_after_shrink(accounts, orders, head, market, app_version)
+                if have and name in tails and encode(_entry(a, kind, have - 1)) != tails[name]:
+                    # The last entry already on disk was changed in place (the lists are meant to be
+                    # append-only): rewrite this account's segments rather than keep the old version.
+                    log.warning("an entry of %s's %s already saved was changed in place; rewriting its segments",
+                                a.id, kind)
+                    g["token"] = self._token()
+                    return self._replan_after_shrink(accounts, orders, head, market, app_version)
                 if sizes[kind] > have:
-                    if kind == "ledger":
-                        rows = a.ledger.to_plain(start=have)
-                    elif kind == "fills":
-                        rows = [to_plain(f) for f in a.fills[have:]]
-                    else:
-                        rows = a.closed[have:]
+                    rows = _entries(a, kind, have)
                     plan.segments.append(SegmentWrite(name, have, [encode(r) + b"\n" for r in rows],
                                                       fresh=name not in segs))
                 if sizes[kind] == 0 and name not in segs:
@@ -227,7 +232,9 @@ class StateStore:
             self._loaded_tokens.clear()
 
     def _replan_after_shrink(self, *args):
-        log.warning("a saved list got shorter than what is on disk; rewriting that account's segments")
+        log.warning("a saved list no longer matches what is on disk; rewriting that account's segments")
+        with self._meta:
+            self._seq -= 1  # the abandoned plan never existed
         return self.plan(*args)
 
     # ---- writing (file I/O only) ------------------------------------------------------------------
@@ -239,38 +246,46 @@ class StateStore:
         if self.blocked:
             raise SaveBlocked("saving is off while the data directory is in recovery")
         with self._wlock:
-            if plan.seq <= self._written_seq:
-                return True  # a newer plan was already written; it holds everything this one has
+            # A part of a plan is skipped only when a newer plan already wrote that same part: a newer state
+            # holds everything an older state has, but a market-only plan says nothing about the state.
+            do_state = plan.state is not None and plan.seq > self._written_state_seq
+            do_market = plan.market is not None and plan.seq > self._written_market_seq
+            if not do_state and not do_market:
+                return True
+            segments = plan.segments if do_state else []
             t0 = time.perf_counter()
             self.last_attempt = self.wall()
             appended = 0
             try:
                 os.makedirs(self.dir, exist_ok=True)
-                if plan.segments:
+                if segments:
                     os.makedirs(self.path(SEGMENTS), exist_ok=True)
-                for seg in plan.segments:
+                for seg in segments:
                     appended += self._append(seg)
-                if plan.segments:
+                if segments:
                     fsutil.fsync_dir(self.path(SEGMENTS))
-                same = (plan.state is not None and not plan.segments and self._last_state is not None
-                        and plan.state == self._last_state)
-                if plan.state is not None and not same:
+                same = (do_state and not segments and self._last_state is not None and plan.state == self._last_state)
+                if do_state and not same:
                     fsutil.atomic_write_bytes(self.path(STATE), plan.state)
                     self._last_state = plan.state
-                if plan.market is not None:
+                if do_market:
                     fsutil.atomic_write_bytes(self.path(MARKET), plan.market)
             except OSError as e:
                 self._failed(e)
                 return False
-            self._written_seq = plan.seq
+            if do_state:
+                self._written_state_seq = plan.seq
+            if do_market:
+                self._written_market_seq = plan.seq
             self.last_ms = (time.perf_counter() - t0) * 1000
-            self.last_bytes = {"state": len(plan.state or b""), "appended": appended, "market": len(plan.market or b"")}
+            self.last_bytes = {"state": len(plan.state) if do_state else 0, "appended": appended,
+                               "market": len(plan.market) if do_market else 0}
             self.saves += 1
             if self.error:
                 log.info("saving works again after %d failed attempt(s)", self.attempts)
             self.error, self.failing_since, self.attempts, self.retry_at = None, None, 0, 0.0
             self.last_save = self.wall()
-            if plan.state is not None:
+            if do_state:
                 self._collect(plan.referenced)
             return True
 
@@ -320,6 +335,8 @@ class StateStore:
             self._segs[seg.name] = [(cur[0] if have else 0) + len(lines), offset + len(data)]
             if keys is not None:
                 ids.update(keys)
+            else:
+                self._tails[seg.name] = lines[-1].rstrip(b"\n")
         return len(data)
 
     def _collect(self, referenced: set) -> None:
@@ -340,6 +357,7 @@ class StateStore:
             with self._meta:
                 self._segs.pop(rel, None)
                 self._order_ids.pop(rel, None)
+                self._tails.pop(rel, None)
 
     # ---- loading -----------------------------------------------------------------------------------
     def load(self) -> LoadResult:
@@ -418,7 +436,7 @@ class StateStore:
         accounts = doc.get("accounts")
         if not isinstance(accounts, list):
             return tokens
-        segs, order_ids = {}, {}
+        segs, order_ids, tails = {}, {}, {}
         for a in accounts:
             if not isinstance(a, dict):
                 continue
@@ -432,6 +450,8 @@ class StateStore:
                 rows, offset = self._read_lines(name, count)
                 a[kind] = rows
                 segs[name] = [count, offset]
+                if rows:
+                    tails[name] = encode(rows[-1])
                 m = re.match(r"^segments/(.+)-([0-9a-f]+)\.", name)
                 if m and m.group(1) == a.get("id"):
                     tokens[a["id"]] = m.group(2)
@@ -445,9 +465,14 @@ class StateStore:
             for r in rows:
                 if not (isinstance(r, dict) and isinstance(r.get("id"), str)):
                     raise schema.StateFormatError(f"{name} holds an entry that is not an order")
+                # The last line for an id wins: an earlier one can be left by a save that was cut off before
+                # its state.json was written, for an order whose id was then given out again.
                 by_id[r["id"]] = r
             segs[name] = [len(rows), offset]
-            order_ids[name] = set(by_id)
+            # Committed are only the ids this state.json refers to. Lines for other ids belong to a save that
+            # never finished (or to orders since removed); their ids may be reused, and the reused order must
+            # then be appended again, not mistaken for the old line.
+            order_ids[name] = {o for o in doc.get("orders") or () if isinstance(o, str)}
             m = re.match(r"^segments/orders-([0-9a-f]+)\.orders", name)
             self._orders_token = m.group(1) if m else None
         orders = doc.get("orders")
@@ -462,7 +487,7 @@ class StateStore:
                     out.append(o)
             doc["orders"] = out
         with self._meta:
-            self._segs, self._order_ids = segs, order_ids
+            self._segs, self._order_ids, self._tails = segs, order_ids, tails
             self._gens = {}
         return tokens
 
@@ -537,10 +562,68 @@ class StateStore:
                     except OSError:
                         pass
 
+    def ensure_copy(self) -> str:
+        """Before a recovery choice replaces the files on disk: make sure the damaged files are kept somewhere.
+
+        Copying them aside can fail for the very reason they were damaged (a full disk), so try the copy again,
+        and failing that move the files aside by renaming them, which needs no space. Raises RuntimeError when
+        neither works: then nothing may be overwritten."""
+        rec = self.recovery or {}
+        if rec.get("copy"):
+            return rec["copy"]
+        copy = self.quarantine(rec.get("reason", "damaged"))
+        if copy is None:
+            copy = self._move_aside()
+        if copy is None:
+            raise RuntimeError("the damaged files could not be copied or moved aside (the disk may be full or "
+                               "read-only), so nothing was changed. Free some space and try again, or copy the "
+                               f"folder {self.dir} somewhere safe first")
+        if self.recovery is not None:
+            self.recovery["copy"] = copy
+        return copy
+
+    def _move_aside(self) -> Optional[str]:
+        stamp = fsutil.stamp(self.wall())
+        moved = []
+        try:
+            for name in (STATE, SEGMENTS):
+                src = self.path(name)
+                if os.path.exists(src):
+                    dst = self.path(f"{name}.damaged-{stamp}")
+                    os.rename(src, dst)
+                    moved.append(dst)
+        except OSError as e:
+            log.error("could not move the damaged files aside (%s)", _describe_os_error(e))
+            for dst in moved:  # put back what was moved, so the folder stays as it was found
+                try:
+                    os.rename(dst, dst.rsplit(".damaged-", 1)[0])
+                except OSError:
+                    pass
+            return None
+        if not moved:
+            return None
+        log.info("moved the damaged files aside: %s", ", ".join(moved))
+        with self._meta:
+            self._segs, self._order_ids, self._tails = {}, {}, {}
+        return " and ".join(moved)
+
     def end_recovery(self) -> None:
         with self._meta:
             self.recovery = None
             self._compact = True
+
+
+def _entries(a, kind: str, start: int) -> list:
+    from ..core.models import to_plain
+    if kind == "ledger":
+        return a.ledger.to_plain(start=start)
+    if kind == "fills":
+        return [to_plain(f) for f in a.fills[start:]]
+    return a.closed[start:]
+
+
+def _entry(a, kind: str, i: int):
+    return _entries(a, kind, i)[0]
 
 
 def _describe_os_error(e: OSError) -> str:

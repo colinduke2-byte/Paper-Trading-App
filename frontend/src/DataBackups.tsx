@@ -212,7 +212,8 @@ function RecoveryScreen({ recovery, onDone }: { recovery: Recovery; onDone: () =
         <p>{recovery.reason}.</p>
         <p className="muted">{newer
           ? "This version cannot read it without risking losing what the newer version stored, so it has not touched the file. Update PaperDesk, or choose below."
-          : "Nothing has been overwritten."}{recovery.copy ? ` A copy of the files is kept in ${recovery.copy}.` : ""}</p>
+          : "Nothing has been overwritten."}{recovery.copy ? ` A copy of the files is kept in ${recovery.copy}.`
+            : " No copy of the damaged files could be made yet (the disk may be full). Before restoring or starting fresh, PaperDesk copies or moves them aside, and does neither if it cannot."}</p>
         <div className="recovery-choices">
           <button className="primary" disabled={busy || rows.length === 0} onClick={() => restore()}>
             {rows.length ? `Restore the latest backup (${dateTime(rows[0].created_ts)})` : "No backups to restore"}
