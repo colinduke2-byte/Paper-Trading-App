@@ -336,3 +336,10 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
 - Still to schedule: hardening redo (list above) and crossbrowser/uxpolish completion feed into phase 3.
 - 01:41 UTC: PR 19 backup fixed at af09dff (all 8 findings; comment on PR 19): ready for the integrator.
   Hardening redo started: session_01ByytwaV1tubqxRNvcHv97i on stream/hardening (opens a PR to main).
+- 02:00 UTC: PR 29 (stream/threadsafety-final, supersedes 25 and 26) opened; Windows (PermissionError
+  on state.json in the stress test) and macOS (seek timing) backend jobs fail; sent back to its worker.
+  PR 28 cashfix at 375afda: 7 blocking items fixed; items 10 (reverse split can overdraw a cash
+  account, lifecycle/splits.py) and 12 (sorted option symbols) being done by the same worker.
+  PR 30 (stream/hardening) opened; checks running.
+  PR 17 fixer (session_01ByytwbfYBDGd6t6MFSgJ37) finished but its commit was refused by the
+  permission check: the OWNER must allow the commit in that session. The integrator waits for it.
