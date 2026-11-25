@@ -798,3 +798,32 @@ def test_alpaca_symbol_table_is_cached_until_a_table_is_replaced():
     feed.crypto_info = {k: v for k, v in feed.crypto_info.items() if k != "ETH/USD"}  # a reload swaps the table
     b = feed.symbols()
     assert b is not a and "ETH/USD" not in b and "BTC/USD" in b
+
+
+def test_dollar_amount_market_buy_never_spends_more_than_the_amount_on_a_thin_book():
+    ex, feed, clock, m, c = make(cash=D("200000"))
+    set_coin(feed, "40000.00", size="0.05")  # thin: 0.05 coin per price level
+    ex.tick()
+    [o] = ex.submit(c.id, {"symbol": COIN, "side": "buy", "notional": "100000"})
+    spent = c.ledger.transactions[-1]
+    trade_value = sum(-v for a, v in spent.postings if a == CASH) - o.fees
+    assert o.status == "filled" and trade_value <= D("100000") and trade_value > D("99900")
+
+
+def test_a_non_positive_limit_with_a_dollar_amount_names_the_price():
+    ex, feed, clock, m, c = make()
+    with pytest.raises(OrderRejected, match="the limit price must be positive"):
+        ex.submit(c.id, {"symbol": COIN, "side": "buy", "notional": "100", "type": "limit", "limit_price": "-5"})
+
+
+def test_alerts_and_notifications_work_for_crypto_pairs():
+    ex, feed, clock, m, c = make(price="0.004213", qinc="1", pinc="0.000001", mn="100")
+    cl = TestClient(create_app(ex, run_loop=False))
+    r = cl.post("/api/alert-rules", json={"kind": "price", "symbol": COIN, "op": "above", "price": "0.0045"})
+    assert r.status_code == 200, r.text
+    vol = cl.post("/api/alert-rules", json={"kind": "volume", "symbol": COIN, "op": "above", "value": "1000000"})
+    assert vol.status_code == 200 and vol.json()["description"] == "SIMCOIN/USD volume today reaches 1,000,000 SIMCOIN"
+    move(ex, feed, clock, "0.004400", step="0.000001")  # a Saturday: crypto alerts fire at weekends too
+    move(ex, feed, clock, "0.004600", step="0.000001")
+    [n] = ex.alerting.notices.list(m.id, category="alert", limit=50)
+    assert n["symbol"] == COIN and n["text"] == "SIMCOIN/USD rises to 0.0045: now 0.0046."

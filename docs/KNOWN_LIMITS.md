@@ -35,7 +35,9 @@ while writing this list.
 
 - **Crypto (see [CRYPTO.md](CRYPTO.md)).** The simulated coins are invented. One fee rate for every fill
   (no maker/taker split, always taken in dollars); no linked orders or trailing stops; only USD pairs; crypto
-  day orders end at midnight UTC.
+  day orders end at midnight UTC. Annualised report statistics (volatility, Sharpe) assume 252 trading
+  periods a year and New York days, so they are slightly off for accounts that hold crypto, which trades
+  every day.
 
 - **The default market is fictional.** Prices follow a random walk with a fixed seed. Companies, their
   fundamentals, dividends and the yearly split are generated. Nothing about them predicts anything real.

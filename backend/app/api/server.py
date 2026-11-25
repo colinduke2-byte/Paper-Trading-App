@@ -340,8 +340,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     @app.get("/api/options/expirations/{symbol}")
     def expirations(symbol: str):
         ex = ctx.ex
-        if ex.asset_class(_stock(symbol)) == "crypto":
-            return []  # crypto pairs have no listed options
+        _stock(symbol)  # a BASE/USD pair never reaches here: the path has no slash (crypto has no options)
         today = cal.ny_date(ex.now())
         listed = ex.feed.option_expirations(symbol.upper()) or optchain.expirations(today)
         return [{"date": d.isoformat(), "dte": (d - today).days} for d in listed

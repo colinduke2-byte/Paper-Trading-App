@@ -261,7 +261,7 @@ class AlpacaCryptoFeed(AlpacaFeed):
                 if not sym or ts is None:
                     continue
                 st = self._cstate.setdefault(sym, CryptoState(sym))
-                if m["T"] == "q":
+                if m.get("T") == "q":
                     ok = st.apply_quote(m, ts)
                 else:
                     ok = st.apply_trade(m, ts, count_volume=bool(st.day_start) and ts >= st.day_start)

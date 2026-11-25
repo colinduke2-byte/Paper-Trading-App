@@ -588,6 +588,9 @@ class Exchange:
         for label, v in (("limit price", limit), ("stop price", stop)):
             if v is not None and v > 0 and not assets.on_step(v, spec.price_increment):
                 raise OrderRejected(f"the {label} for {symbol} must be a multiple of {spec.price_increment.normalize():f}")
+        for label, v in (("limit price", limit), ("stop price", stop)):
+            if v is not None and v <= 0:
+                raise OrderRejected(f"the {label} must be positive")
         if qty is not None and notional is not None:
             raise OrderRejected("give a quantity or a dollar amount, not both")
         if notional is not None:
@@ -601,7 +604,13 @@ class Exchange:
             ref = limit if typ == m.LIMIT and limit is not None else (q.ask if side == m.BUY else q.bid) if q else None
             if ref is None or ref <= 0:
                 raise OrderRejected(f"no quote available for {symbol}, so the dollar amount cannot be converted")
-            qty = assets.floor_to(notional / ref, spec.qty_increment)
+            step = spec.qty_increment
+            qty = assets.floor_to(notional / ref, step)
+            if typ == m.MARKET and side == m.BUY:
+                # A market buy walks the book, so size it on the walked price: the spend never exceeds the amount.
+                while qty > 0 and cents(qty * self.engine._walk(q, side, qty)) > notional:
+                    smaller = assets.floor_to(notional / self.engine._walk(q, side, qty), step)
+                    qty = smaller if smaller < qty else qty - step
         if qty is None or qty <= 0:
             raise OrderRejected("quantity must be positive")
         whole = side == m.SELL and qty == account.position(symbol)  # selling all of it is always allowed

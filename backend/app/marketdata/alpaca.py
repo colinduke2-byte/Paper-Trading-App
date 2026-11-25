@@ -692,7 +692,7 @@ class AlpacaFeed(MarketDataProvider):
                 if not sym or ts is None:
                     continue
                 st = self._state.setdefault(sym, SymbolState(sym))
-                if m["T"] == "q":
+                if m.get("T") == "q":
                     ok = st.apply_quote(m, ts)
                 else:
                     ok = st.apply_trade(m, ts, count_volume=cal.ny_date(ts) == today)
