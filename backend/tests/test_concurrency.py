@@ -145,6 +145,8 @@ UNLOCKED_READS = {
     "/api/replay/sessions",  # reads session files
     "/api/auth/state", "/api/research/sources", "/api/research/news/{symbol}", "/api/research/calendar/{symbol}",
     "/api/research/corporate-actions/{symbol}", "/api/research/fundamentals/{symbol}",
+    "/api/research/news", "/api/research/economic-calendar", "/api/research/earnings-calendar",
+    "/api/research/statements/{symbol}",
     "/api/chartstate", "/api/chartstate/drawings/{sym}",  # chart settings: their own file and lock, no exchange state
 }
 SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_every_changing_route_answers_busy...
@@ -410,18 +412,18 @@ def test_a_tick_that_raises_is_reported_and_the_market_goes_on(tmp_path, capsys)
 def test_snapshot_is_taken_in_memory_and_an_older_one_never_overwrites_a_newer_one(tmp_path):
     ex, feed, clock = make_exchange(str(tmp_path))
     a = ex.create_account("t", "margin", D("100000"))
-    first = ex.snapshot(force=True)
-    assert not os.path.exists(tmp_path / "state.json"), "snapshot() must not touch the disk"
+    first = ex.save_plan(force=True)
+    assert not os.path.exists(tmp_path / "state.json"), "save_plan() must not touch the disk"
     assert [name for name, _, _ in first] == ["state.json"] and not ex.dirty
     # the snapshot is text: later changes to live state cannot leak into it
     ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 10})
     assert json.loads(first[0][1])["orders"] == [] and ex.dirty
-    second = ex.snapshot()
-    ex.write_snapshot(second)
-    ex.write_snapshot(first)  # a slow writer arriving late
+    second = ex.save_plan()
+    ex.write_plan(second)
+    ex.write_plan(first)  # a slow writer arriving late
     saved = json.loads((tmp_path / "state.json").read_text())
     assert len(saved["orders"]) == 1 and len(saved["accounts"][0]["fills"]) == 1
-    assert ex.snapshot() == []  # nothing changed, nothing to write
+    assert ex.save_plan() == []  # nothing changed, nothing to write
     ex.save(force=True)
     assert json.loads((tmp_path / "state.json").read_text()) == saved
 
@@ -429,10 +431,10 @@ def test_snapshot_is_taken_in_memory_and_an_older_one_never_overwrites_a_newer_o
 def test_a_failed_write_leaves_the_exchange_dirty_so_the_next_save_retries(tmp_path, monkeypatch):
     ex, feed, clock = make_exchange(str(tmp_path))
     ex.create_account("t", "margin", D("100000"))
-    files = ex.snapshot()
+    files = ex.save_plan()
     monkeypatch.setattr(Exchange, "_write_text", staticmethod(lambda path, text: (_ for _ in ()).throw(OSError("disk full"))))
     with pytest.raises(OSError):
-        ex.write_snapshot(files)
+        ex.write_plan(files)
     assert ex.dirty
     monkeypatch.undo()
     ex.save()
@@ -457,12 +459,12 @@ def test_the_tick_loop_saves_off_the_lock_and_the_file_matches_memory(tmp_path):
     c, app, ex = make_app(tmp_path, run_loop=True, tick_seconds=0.002)
     ctx, aid = app.state.ctx, list(ex.accounts)[0]
     writes = []
-    write = ex.write_snapshot
+    write = ex.write_plan
 
     def watched(files):
         writes.append((ctx.lock.holder(), held(), threading.current_thread().name))
         return write(files)
-    ex.write_snapshot = watched
+    ex.write_plan = watched
     with c:
         for i in range(10):
             assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
