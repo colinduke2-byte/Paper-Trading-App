@@ -302,3 +302,17 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
 - Owner still needs to: create Alpaca paper keys; test on a real Windows PC and phone (phase 6);
   decide on a LICENSE only if the repository ever goes public.
 - UPDATE 01:10 UTC: PR 23 pushed, head ed44cd8, main merged in, grace default now 13 hours. Author reports backend 581 passed, e2e 101 passed with 1 failure it calls a click race (chart.spec.ts:460, the replay drawing test; passed twice alone: a third flaky test to fix properly, no retries). Next step: wait for checks on ed44cd8 and merge if green.
+
+## NEW LEAD: session_01ByytwXuyEEXyEihpExRGHy (from 2026-11-25 00:55 UTC)
+- Old lead (session_01ByytwY8Vod3giYjEJ9ytS9) retired: starts nothing, merges nothing. Its two local
+  reviews (PR 26, PR 28) post as PR comments, expected by about 01:15; if absent by 01:45, re-run on Opus.
+- Owner instruction: keep going through PLAN_TO_FINISH.md without waiting between steps; stop only
+  for the owner's decisions; keep this file current.
+- PR 21 (cash exercise vs later short put) is superseded by PR 28; PR 27 (synthetic prior-day bars)
+  is superseded by main's HISTORY_MINUTES=1500. Closing them was refused by the permission check:
+  owner to close.
+- PR 22 (fundamentals 500) and PR 28 updated with main (GitHub update-branch) to re-run checks.
+- PR 25 (alerts off the lock) carries stream/threadsafety: merge after PR 26, then update.
+- Phase 2 resumed: lots author session_01ByytwcAyVLJZvZxFGivyho (PR 13) and crypto author
+  session_01Byytwa7UbHxm5YYWZw1VQb (PR 14) asked to finish fix lists, merge main, comment per finding.
+  Opus review of PR 17: session_01ByytwYofFEfccUETS1aWHu (posts on the PR). PR 19 review next.
