@@ -30,6 +30,9 @@ def cash_account_is_sound(ex, a):
     account = ex.account(a)
     assert account.cash >= 0, f"negative cash {account.cash}"
     assert all(n > 0 for s, n in account.positions().items() if not parse(s)), "short stock in a cash account"
+    pos = {s: n for s, n in account.positions().items() if n != 0}
+    ev = margin.evaluate("cash", account.cash, pos, ex._marks(pos))
+    assert ev.ok, f"{ev.reason} (cash {account.cash}, positions {pos})"  # no uncovered call, no unsecured put
 
 
 # ---- 1. cash accounts and assignment --------------------------------------------------------
@@ -120,15 +123,68 @@ SINGLE_SYMS = EX_SYMS + ["ABC"]
 FAR_SYMS = [s for s in EX_SYMS if parse(s).expiry == FAR] + ["ABC"]
 
 
+def resting(draw, symbol, side):
+    """A good-till-canceled limit away from the market or a stop: it normally stays open for a while."""
+    stock = symbol == "ABC"
+    req = {"symbol": symbol, "side": side,
+           "qty": draw(st.sampled_from([100, 100, 200, 50])) if stock else draw(st.integers(1, 3)), "tif": "gtc"}
+    if draw(st.booleans()):
+        px = draw(st.integers(6000, 9900) if side == "buy" else st.integers(10100, 14000)) if stock \
+            else draw(st.integers(1, 40) if side == "buy" else st.integers(800, 3000))
+        req.update(type="limit", limit_price=str(Decimal(px) / 100))
+    else:
+        px = draw(st.integers(10100, 12500) if side == "buy" else st.integers(7500, 9900)) if stock \
+            else draw(st.integers(600, 2500) if side == "buy" else st.integers(1, 30))
+        req.update(type="stop", stop_price=str(Decimal(px) / 100))
+    return req
+
+
 @st.composite
 def cash_script(draw, symbols=SINGLE_SYMS, most=10):
     """Orders and price moves. About one order in three is a resting order: a limit away from the
     market, a stop, or an on-open/on-close order, so that open orders are normally still working
-    when options expire."""
+    when options expire. Linked orders (one-cancels-other, one-triggers-other, brackets) and changes
+    and cancellations of open orders are mixed in."""
     steps = []
     for _ in range(draw(st.integers(0, most))):
-        kind = draw(st.sampled_from(["single", "single", "resting", "resting", "multi", "move"]))
-        if kind == "move":
+        kind = draw(st.sampled_from(["single", "single", "resting", "resting", "multi", "move",
+                                     "oco", "oto", "bracket", "replace", "cancel"]))
+        if kind == "oco":
+            members = [resting(draw, draw(st.sampled_from(symbols)), draw(st.sampled_from(["buy", "sell"])))
+                       for _ in range(draw(st.integers(2, 3)))]
+            for r in members:
+                r["qty"] = int(r["qty"])
+            steps.append(("order", {"oco": members}))
+        elif kind == "oto":
+            symbol = draw(st.sampled_from(symbols))
+            entry = resting(draw, symbol, draw(st.sampled_from(["buy", "sell"]))) if draw(st.booleans()) \
+                else {"symbol": symbol, "side": draw(st.sampled_from(["buy", "sell"])),
+                      "qty": 100 if symbol == "ABC" else draw(st.integers(1, 3))}
+            kids = [resting(draw, draw(st.sampled_from(symbols)), draw(st.sampled_from(["buy", "sell"])))
+                    for _ in range(draw(st.integers(1, 2)))]
+            if draw(st.booleans()):  # an exit: closes the entry with whatever it filled
+                exit_ = {k: v for k, v in kids[0].items() if k not in ("symbol", "side", "qty")}
+                kids = [exit_]
+            steps.append(("order", {**entry, "triggers": kids}))
+        elif kind == "bracket":
+            symbol = draw(st.sampled_from(symbols))
+            side = draw(st.sampled_from(["buy", "sell"]))
+            ref = Decimal(100) if symbol == "ABC" else Decimal(draw(st.integers(100, 1500))) / 100
+            up, down = ref * Decimal(draw(st.integers(105, 300))) / 100, ref * Decimal(draw(st.integers(20, 95))) / 100
+            take, stop = (up, down) if side == "buy" else (down, up)
+            req = {"symbol": symbol, "side": side, "qty": 100 if symbol == "ABC" else draw(st.integers(1, 3)),
+                   "take_profit": str(take.quantize(Decimal("0.01"))), "stop_loss": str(stop.quantize(Decimal("0.01")))}
+            steps.append(("order", req))
+        elif kind == "replace":
+            change = {}
+            if draw(st.booleans()):
+                change["qty"] = str(draw(st.sampled_from([1, 2, 3, 5, 100, 200, 300])))
+            if draw(st.booleans()):
+                change["limit_price"] = str(Decimal(draw(st.integers(1, 15000))) / 100)
+            steps.append(("replace", draw(st.integers(0, 50)), change))
+        elif kind == "cancel":
+            steps.append(("cancel", draw(st.integers(0, 50))))
+        elif kind == "move":
             steps.append(("move", Decimal(draw(st.integers(8000, 12000))) / 100))
         elif kind in ("single", "resting"):
             symbol = draw(st.sampled_from(symbols))
@@ -169,6 +225,14 @@ def play(ex, feed, clock, a, steps):
     for step in steps:
         if step[0] == "move":
             move(ex, feed, clock, "ABC", step[1])
+        elif step[0] in ("replace", "cancel"):
+            open_ = sorted((o for o in ex.engine.orders.values() if o.account_id == a and o.active), key=lambda o: o.id)
+            if open_:
+                o = open_[step[1] % len(open_)]
+                try:
+                    ex.replace(a, o.id, step[2]) if step[0] == "replace" else ex.cancel(a, o.id)
+                except (OrderRejected, ValueError):
+                    pass
         else:
             try:
                 ex.submit(a, step[1])
@@ -224,9 +288,12 @@ def test_exercise_does_not_spend_cash_reserved_for_an_open_buy_order():
 
 
 def test_open_buy_back_of_a_short_put_does_not_free_the_cash_that_secures_it():
-    """Found by the widened property: cash went to -1.60 after the put was assigned."""
+    """Found by the widened property: cash went to -1.60 after the put was assigned.
+
+    (Started with 9,576 before the reservation became monotone: the resting 0.01 bid now reserves its
+    1.65 even though it could only buy back the put sold below, so the sale needs 2.00 more.)"""
     ex, feed, clock = make_exchange()
-    a = acct(ex, "cash", "9576")
+    a = acct(ex, "cash", "9578")
     far_call, far_put = opt("C", 90, FAR), opt("P", 100, FAR)
     at_expiry(ex, feed, clock, "96.86", NEAR)
     [stop] = ex.submit(a, {"symbol": far_call, "side": "buy", "qty": 3, "type": "stop", "stop_price": "7.44", "tif": "gtc"})
