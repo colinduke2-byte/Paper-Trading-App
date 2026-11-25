@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import Body, Query
 
 from ..alerts import model
+from ..core.errors import NotFound
 from ..alerts.notifications import CATEGORIES, SEVERITIES
 from ..marketdata.feed import TIMEFRAMES
 
@@ -54,7 +55,7 @@ def register(app, ctx) -> None:
     # ---- notifications --------------------------------------------------------------------
     def _account(aid: str) -> str:
         if aid not in ctx.ex.accounts:
-            raise KeyError(f"no such account {aid}")
+            raise NotFound(f"no such account {aid}")
         return aid
 
     @app.get("/api/notifications")
