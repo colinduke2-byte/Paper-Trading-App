@@ -232,3 +232,23 @@ def test_live_feed_follows_browser_subscriptions():
     ex.watchlists = {"Main": ["SPY"]}
     c.app.state.ctx.clients[object()] = {"symbols": ["TSLA"], "account": None}
     assert feed.wanted()[:2] == ["SPY", "TSLA"]
+
+
+def test_fundamentals_work_before_the_daily_bar_has_arrived():
+    c, ex, feed, _ = live_client()
+    q = feed.quote("AAPL")
+    assert q.high is None and q.low is None  # the saved snapshot carries no daily bar for AAPL
+    r = c.get("/api/fundamentals/AAPL")
+    assert r.status_code == 200, r.text
+    f = r.json()
+    daily = feed.bars("AAPL", "1d", 252)
+    assert f["symbol"] == "AAPL" and f["simulated"] is False
+    assert f["high_52w"] == (max(b["high"] for b in daily) if daily else None)
+    assert f["low_52w"] == (min(b["low"] for b in daily) if daily else None)
+
+
+def test_fundamentals_report_no_range_when_there_are_no_bars_and_no_daily_high_or_low():
+    c, ex, feed, _ = live_client()
+    feed.bars = lambda symbol, timeframe, limit=None: []
+    f = c.get("/api/fundamentals/AAPL").json()
+    assert f["high_52w"] is None and f["low_52w"] is None and f["avg_volume_30d"] is None
