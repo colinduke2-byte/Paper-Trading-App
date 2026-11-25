@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from hypothesis import given, settings, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 from app.api.server import create_app
 from app.core import calendar as cal
@@ -115,6 +115,37 @@ def test_cash_account_buying_back_a_covered_call_may_not_spend_the_cash_behind_a
     cash_account_is_sound(ex, a)
 
 
+def test_cash_account_exercise_leaves_the_cash_behind_a_later_short_put_and_the_shares_behind_a_later_short_call():
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", "9003")
+    far_put, near_call = opt("P", 90, FAR), opt("C", 90, NEAR)
+    ex.submit(a, {"symbol": far_put, "side": "sell", "qty": 1})
+    move(ex, feed, clock, "ABC", "80")
+    ex.submit(a, {"symbol": near_call, "side": "buy", "qty": 1})
+    cash = ex.summary(a)["cash"]
+    assert D("9000") <= cash < D("18000")  # secures the put, cannot also pay for 100 shares at 90
+    at_expiry(ex, feed, clock, "92", NEAR)
+    account = ex.account(a)
+    assert held(ex, a) == {far_put: -1} and account.cash == cash + D("200")  # closed for 2.00, not exercised
+    assert account.fills[-1].kind == "closed at expiry"
+    at_expiry(ex, feed, clock, "60", FAR)
+    assert held(ex, a) == {"ABC": 100} and ex.account(a).cash == cash + D("200") - D("9000")
+    cash_account_is_sound(ex, a)
+    # shares behind a later covered call are not delivered on an earlier long put
+    far_call, near_put = opt("C", 100, FAR), opt("P", 100, NEAR)
+    ex2, feed, clock = make_exchange()
+    b = acct(ex2, "cash", "20000")
+    ex2.submit(b, {"symbol": "ABC", "side": "buy", "qty": 100})
+    ex2.submit(b, {"symbol": far_call, "side": "sell", "qty": 1})
+    ex2.submit(b, {"symbol": near_put, "side": "buy", "qty": 1})
+    cash = ex2.summary(b)["cash"]
+    at_expiry(ex2, feed, clock, "91", NEAR)
+    assert held(ex2, b) == {"ABC": 100, far_call: -1} and ex2.account(b).cash == cash + D("900")
+    at_expiry(ex2, feed, clock, "120", FAR)
+    assert held(ex2, b) == {} and ex2.account(b).cash == cash + D("900") + D("10000")
+    cash_account_is_sound(ex2, b)
+
+
 SINGLE_SYMS = EX_SYMS + ["ABC"]
 
 
@@ -143,6 +174,11 @@ def cash_script(draw):
 
 @settings(max_examples=250, deadline=None)
 @given(cash_script(), st.integers(1000, 60000), st.integers(6000, 14000), st.integers(6000, 14000))
+# A call bought next to a cash-secured put of a later expiry: exercising it must not spend the put's cash.
+@example(steps=[("order", {"symbol": opt("P", 90, FAR), "side": "sell", "qty": 1}),
+                ("order", {"symbol": opt("C", 90, NEAR), "side": "buy", "qty": 1}),
+                ("move", Decimal("80"))] + [("order", {"symbol": opt("C", 90, NEAR), "side": "buy", "qty": 1})] * 7,
+         cash=9003, near_px=9001, far_px=6000)
 def test_cash_account_never_ends_an_expiry_with_negative_cash_or_short_stock(steps, cash, near_px, far_px):
     ex, feed, clock = make_exchange()
     a = acct(ex, "cash", str(cash))

@@ -1120,8 +1120,17 @@ class Exchange:
                         # A cash account cannot borrow money or shares. Contracts it cannot settle
                         # in shares are closed for their intrinsic value in cash instead, as a
                         # broker would close them just before the last bell.
-                        settle = min(n, (max(a.cash, ZERO) // (c.strike * 100)) if buys_stock
-                                     else (max(a.position(c.underlying), ZERO) // 100))
+                        # Cash that secures its other short puts, and shares that cover its other
+                        # short calls (a later expiry, say), are spoken for and cannot be used here.
+                        others = [(k, -q) for s, q in a.positions().items()
+                                  if q < 0 and s != sym and (k := parse_option(s)) is not None]
+                        if buys_stock:
+                            spare = a.cash - sum((q * k.strike * 100 for k, q in others if k.kind == "P"), ZERO)
+                            settle = min(n, max(spare, ZERO) // (c.strike * 100))
+                        else:
+                            spare = a.position(c.underlying) - sum((q * 100 for k, q in others
+                                                                     if k.kind == "C" and k.underlying == c.underlying), ZERO)
+                            settle = min(n, max(spare, ZERO) // 100)
                     if settle > 0:
                         book(sym, m.SELL if long else m.BUY, settle, ZERO, kind)
                         book(c.underlying, m.BUY if buys_stock else m.SELL, settle * 100, c.strike, kind)
