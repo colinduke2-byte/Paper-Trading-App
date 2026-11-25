@@ -94,12 +94,28 @@ def baselines(aid, oid, jid, calls):
         ("PUT", "/api/chartstate/settings"): {"updated": 1, "data": {"type": "candles"}},
         ("PUT", "/api/chartstate/drawings/NVLX"): {"updated": 1, "data": [{"id": "d1"}]},
         ("DELETE", "/api/chartstate"): None,
+        ("POST", "/api/alert-rules"): [
+            {"kind": "price", "symbol": "NVLX", "op": "above", "price": "10", "account_id": aid, "repeat": False,
+             "cooldown": 60, "expires_at": None, "expires_in_hours": None, "message": "m"},
+            {"kind": "change", "symbol": "NVLX", "op": "above", "value": "5", "basis": "reference", "reference": "10"},
+            {"kind": "volume", "symbol": "NVLX", "value": "1000", "mode": "level"},
+            {"kind": "indicator", "symbol": "NVLX", "indicator": "rsi", "tf": "1d", "period": 14, "op": "above", "value": "70"},
+            {"kind": "option", "symbol": calls[0], "op": "above", "metric": "delta", "value": "0.5"},
+            {"kind": "position", "account_id": aid, "symbol": "NVLX", "op": "below", "metric": "unrealized_pnl", "value": "-5"},
+            {"kind": "account", "account_id": aid, "op": "below", "metric": "equity", "value": "5"},
+            {"kind": "reminder", "in_minutes": "5", "at": None, "message": "m", "repeat": True, "cooldown": 120},
+            {"kind": "calendar", "account_id": aid, "events": ["dividend"], "days_before": 3},
+        ],
+        ("PATCH", "/api/alert-rules/ALID"): {"price": "11", "enabled": False, "message": "x", "cooldown": 60},
+        ("DELETE", "/api/alert-rules/ALID"): None,
+        ("POST", "/api/notifications/read"): {"account_id": aid, "ids": ["n1"], "read": True},
+        ("DELETE", "/api/notifications"): None,
     }
 
 
 def _template(path, aid, oid, jid):
     return path.replace(aid, "{aid}").replace(oid, "{oid}").replace(jid, "{jid}").replace("/Fuzz", "/{name}") \
-        .replace("/AL99999", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym}")
+        .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym}")
 
 
 def variants(body):
@@ -155,8 +171,12 @@ def test_no_route_answers_bad_input_with_a_server_error(setup):
             a = next(iter(ctx.ex.accounts))
             oid = working_order(c, a)
             jid = journal_entry(c, a, oid)
-            real = path.replace(aid, a).replace("OID", oid).replace("JID", jid)
-            bodies = list(variants(base)) + WHOLE if base is not None else WHOLE
+            r = c.post("/api/alert-rules", json={"kind": "price", "symbol": "NVLX", "op": "above", "price": "100000"})
+            assert r.status_code == 200, r.text
+            real = path.replace(aid, a).replace("OID", oid).replace("JID", jid).replace("ALID", r.json()["id"])
+            bases = base if isinstance(base, list) and base and isinstance(base[0], dict) and "kind" in base[0] else [base]
+            bodies = [v for b in bases if b is not None for v in variants(b)] + WHOLE
+            base = bases[0]
             for body in bodies:
                 check(c, method, real, json=body)
                 if ctx.replay is not None and not replay_active:

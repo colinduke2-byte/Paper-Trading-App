@@ -349,7 +349,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             raise NotFound(f"no quote has arrived for {symbol} yet")
         return {"underlying": symbol, "expiry": expiry, "spot": float(q.last), "simulated": True,
                 "source": "model", "source_label": "model prices, not market data",
-                "rows": plain(optchain.chain(symbol, exp, float(q.last), ex.feed.base_vol(symbol), ex.now()))}
+                "rows": plain(optchain.chain(symbol, exp, float(q.last), ex.feed.base_vol(symbol), ex.now(),
+                                             ex.feed.event_variance(symbol, cal.close_ts(exp), ex.now())))}
 
     # ---- accounts ------------------------------------------------------------
     @app.get("/api/accounts")

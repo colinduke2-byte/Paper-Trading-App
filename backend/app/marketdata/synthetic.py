@@ -58,6 +58,7 @@ class SyntheticFeed(MarketDataProvider):
 
     def __init__(self, seed: int = 7, now: float = 0.0, history_days: int = 520, always_open: bool = True):
         super().__init__()
+        self.seed = seed
         self.rng = random.Random(seed)
         self.always_open = always_open
         self.year_seconds = ALWAYS_OPEN_SECONDS_PER_YEAR if always_open else TRADING_SECONDS_PER_YEAR
@@ -68,6 +69,11 @@ class SyntheticFeed(MarketDataProvider):
                               "shares_outstanding": shares * 1_000_000, "eps": eps, "dividend": div,
                               "type": "etf" if sector == "ETF" else "stock"}
         self._generate_history(now, history_days)
+        # Simulated research (earnings, economic releases, news). Releases after `sim_born` move prices.
+        from .simresearch import SimResearch
+        self.sim_born = self._moves_through = now
+        self._next_move = None
+        self.research = SimResearch(self, seed, applies_moves=True)
 
     # ---- history -------------------------------------------------------
     def _generate_history(self, now: float, days: int) -> None:
@@ -149,6 +155,7 @@ class SyntheticFeed(MarketDataProvider):
         out = []
         today = self._trading_day(now)
         market = self.rng.gauss(0, 1)
+        moves = self._due_moves(now)  # earnings and economic releases: log return per symbol
         for sym, info in self.info.items():
             prev = self.quotes[sym]
             dt = min(max(now - prev.ts, 0.0), 5.0) or 1.0
@@ -163,11 +170,14 @@ class SyntheticFeed(MarketDataProvider):
                 drop = self._ex_drop.pop(sym)
                 low = lambda v: max(v - drop, CENT)
                 prev = Quote(**{**prev.__dict__, "last": low(prev.last), "open": low(prev.open), "low": low(prev.low)})
+            gap = moves.get(sym)
+            if gap:  # the price gaps to the new level; stops resting beyond it fill at the gap price
+                prev = Quote(**{**prev.__dict__, "last": max(cents(prev.last * Decimal(repr(math.exp(gap)))), CENT)})
             sigma = info["vol"] * math.sqrt(dt / self.year_seconds)
             shock = sigma * (0.5 * market + 0.87 * self.rng.gauss(0, 1))
             last = cents(prev.last * Decimal(repr(math.exp(shock))))
             last = max(last, CENT)
-            trade = self.rng.random() < 0.7
+            trade = self.rng.random() < 0.7 or bool(gap)
             size = Decimal(self.rng.choice([1, 5, 10, 25, 50, 100, 100, 100, 200, 300, 500, 1200])) if trade else ZERO
             if not trade:
                 last = prev.last
@@ -178,6 +188,19 @@ class SyntheticFeed(MarketDataProvider):
                 self._record_print(q)
             out.append(q)
         return out
+
+    def _due_moves(self, now: float) -> dict:
+        """Price moves from releases since the last processed time. Cheap when nothing is due."""
+        if self.research is None or not getattr(self.research, "applies_moves", False) or now <= self._moves_through:
+            return {}
+        if self._next_move is None:
+            self._next_move = self.research.next_release_after(self._moves_through)
+        if now < self._next_move:
+            return {}
+        moves = self.research.due_moves(self._moves_through, now)
+        self._moves_through = now
+        self._next_move = self.research.next_release_after(now)
+        return moves
 
     # ---- corporate actions -------------------------------------------------
     def _business(self, d: date) -> date:
@@ -219,6 +242,7 @@ class SyntheticFeed(MarketDataProvider):
                 "daily": self.store.daily,
                 "minutes": {s: list(b) for s, b in self.store.minutes.items()},
                 "days": {s: d.isoformat() for s, d in self._day.items()},
+                "sim_born": self.sim_born, "moves_through": self._moves_through,
                 "quotes": {s: {k: (str(v) if isinstance(v, Decimal) else v) for k, v in q.__dict__.items()}
                            for s, q in self.quotes.items()}}
 
@@ -240,5 +264,8 @@ class SyntheticFeed(MarketDataProvider):
                 if s in self.info:
                     self.info[s]["dividend"] = div
             self._ex_drop = {s: Decimal(v) for s, v in data.get("ex_drop", {}).items()}
+            if "moves_through" in data:  # older saves lack these; their releases so far are history
+                self.sim_born, self._moves_through = float(data["sim_born"]), float(data["moves_through"])
+                self._next_move = None
         except (KeyError, ValueError, TypeError):
             return

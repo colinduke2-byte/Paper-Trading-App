@@ -222,8 +222,9 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
 - **Options**: the option chain (section 8).
 - **Company**: facts about the company (market cap, earnings per share, dividend, 52-week range,
   volatility). For the fictional companies these figures are generated.
-- **Research**: news, earnings dates, dividends and splits, fundamentals. Needs a real data provider
-  (section 13); with simulated prices it says "Research data is unavailable".
+- **Research**: news, earnings dates, dividends and splits, fundamentals, financial statements, and
+  market-wide news with earnings and economic calendars. With simulated prices all of it is simulated for
+  the fictional companies and labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 
 **Centre bottom: your account.** Seven tabs:
 
@@ -761,8 +762,9 @@ simulated feed it covers the ten fictional companies. It has not been checked wi
 
 **Research.** With a real provider: **News**, **Earnings** dates (needs a Finnhub key), **Dividends and
 splits**, and **Fundamentals** (also Finnhub), each with a source line, an updated time and a "stale"
-note if a refresh failed. Without a provider it says "Research data is unavailable" and why. Links in
-news open in a new tab.
+note if a refresh failed. Without a provider the same sections hold simulated research (statements,
+earnings reports that gap the price and move option volatility, news, an economic calendar), every block
+labelled "Source: Simulated"; see `docs/SIMULATED_RESEARCH.md`. Links in news open in a new tab.
 
 ---
 
@@ -1022,7 +1024,7 @@ These are the messages you can actually meet, and what to do.
 | `Margin call: account value … is below … maintenance requirement. Only closing orders are accepted until this is resolved.` | Section 7. Close positions or Reset. |
 | `Prices unavailable for X: margin checks are paused until they return.` | A symbol you hold has no price. Margin checks are paused. |
 | `Could not load chart data: …`, `Could not load the option chain: …`, `Could not load fills: …` | A request to the server failed; the text after the colon is the cause. Reload; check the server window. |
-| `Research data is unavailable. …` | No data provider. See section 13. |
+| `Research data is unavailable. …` | The feed has no research at all (for example a replay of non-simulated symbols). See section 13. |
 | `Account value –` and dashes everywhere | Not connected to the server yet, or signed out. |
 | "Internal Server Error" when creating an account | You typed a starting amount with a comma or letters. Use plain digits. |
 

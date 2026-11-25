@@ -83,13 +83,10 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
         reason, live_cause = sel
     mode = environ.get("PAPERDESK_SESSIONS", "always")
     feed = SyntheticFeed(seed=synthetic_seed, now=now, always_open=mode == "always")
-    feed.fallback_reason = reason
+    feed.fallback_reason = reason  # the feed carries its own simulated research (app.marketdata.simresearch)
     # Alpaca was configured but could not be used: the app runs on simulated data and the simulated accounts
     # (the live-data accounts in <data>/alpaca are not loaded). The UI shows a persistent notice saying so.
     feed.live_unavailable = live_cause
-    from .research import ResearchHub
-    feed.research = ResearchHub(simulated_reason="The synthetic feed uses fictional companies, so there is no "
-                                                 "real news, calendar or fundamental data for them.")
     return Selection(feed, mode, data_dir, [], reason)
 
 

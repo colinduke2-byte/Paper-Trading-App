@@ -212,14 +212,17 @@ def test_research_routes_live():
     assert c.get("/api/research/sources").json()["earnings"] == "Finnhub"
 
 
-def test_research_routes_on_the_synthetic_feed_say_unavailable():
+def test_research_routes_on_the_synthetic_feed_are_simulated():
+    # Replaces the earlier "say unavailable" test: the synthetic feed now has simulated research
+    # (app.marketdata.simresearch), labelled as such. Live-hub behaviour is covered above.
     ex = Exchange(SyntheticFeed(seed=3, now=NOW))
     c = TestClient(create_app(ex, run_loop=False))
     for path in ("news", "fundamentals", "corporate-actions"):
         r = c.get(f"/api/research/{path}/NVLX").json()
-        assert r["available"] is False and "fictional" in r["reason"]
+        assert r["available"] is True and r["source"] == "Simulated" and r["simulated"] is True
     cal = c.get("/api/research/calendar/NVLX").json()
-    assert cal["earnings"]["available"] is False
+    assert cal["earnings"]["available"] is True and cal["earnings"]["items"]
+    assert c.get("/api/research/sources").json()["reason"] is None
     st = c.get("/api/status").json()
     assert st["realtime"] is False and st["data_source"] == "simulated"
 

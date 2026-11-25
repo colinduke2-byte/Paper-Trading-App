@@ -71,23 +71,31 @@ def strikes(spot: float, width: float = 0.25) -> list:
     return out
 
 
-def surface_vol(base_vol: float, S: float, K: float, T: float) -> float:
-    """Base volatility with a skew (puts richer) and a smile that flattens with time."""
+def surface_vol(base_vol: float, S: float, K: float, T: float, event_var: float = 0.0) -> float:
+    """Base volatility with a skew (puts richer) and a smile that flattens with time.
+
+    event_var is extra total variance (log return squared) from scheduled events before expiry, such
+    as an earnings report: it is spread over the time left, so implied volatility rises as the event
+    nears and falls back once it has passed (the provider stops reporting it).
+    """
     m = math.log(K / S)
     term = 1 + 0.15 * math.exp(-T * 8)
     v = base_vol * term * (1 - 0.35 * m + 0.6 * m * m / max(math.sqrt(T * 4), 0.35))
-    return min(max(v, 0.05), 3.0)
+    v = min(max(v, 0.05), 3.0)
+    if event_var > 0 and T > 0:
+        v = math.sqrt(v * v + event_var / max(T, 1.0 / 365))
+    return min(v, 3.0)
 
 
 def _stable(symbol: str, salt: str, n: int) -> int:
     return int(hashlib.sha1(f"{symbol}:{salt}".encode()).hexdigest()[:8], 16) % n
 
 
-def option_snapshot(c: Contract, S: float, base_vol: float, now: float) -> dict:
-    """Model price, quote and greeks for one contract."""
+def option_snapshot(c: Contract, S: float, base_vol: float, now: float, event_var: float = 0.0) -> dict:
+    """Model price, quote and greeks for one contract (event_var: see surface_vol)."""
     T = max(c.expiry_ts - now, 0.0) / YEAR_SECONDS
     K = float(c.strike)
-    iv = surface_vol(base_vol, S, K, max(T, 1e-6))
+    iv = surface_vol(base_vol, S, K, max(T, 1e-6), event_var)
     fair = pricing.price(S, K, T, RISK_FREE, iv, c.kind)
     g = pricing.greeks(S, K, T, RISK_FREE, iv, c.kind)
     half = max(0.01, 0.012 * fair) + 0.005
@@ -105,18 +113,18 @@ def option_snapshot(c: Contract, S: float, base_vol: float, now: float) -> dict:
             "dte": max((c.expiry - cal.ny_date(now)).days, 0), **g}
 
 
-def option_quote(c: Contract, S: float, base_vol: float, now: float) -> Quote:
-    s = option_snapshot(c, S, base_vol, now)
+def option_quote(c: Contract, S: float, base_vol: float, now: float, event_var: float = 0.0) -> Quote:
+    s = option_snapshot(c, S, base_vol, now, event_var)
     return Quote(symbol=c.symbol, bid=s["bid"], ask=s["ask"], bid_size=s["bid_size"], ask_size=s["ask_size"],
                  last=max(s["mid"], CENT), ts=now)
 
 
-def chain(underlying: str, expiry: date, S: float, base_vol: float, now: float) -> list:
+def chain(underlying: str, expiry: date, S: float, base_vol: float, now: float, event_var: float = 0.0) -> list:
     rows = []
     for k in strikes(S):
         row = {"strike": k}
         for kind, key in (("C", "call"), ("P", "put")):
             c = Contract(build(underlying, expiry, kind, k), underlying, expiry, kind, k)
-            row[key] = option_snapshot(c, S, base_vol, now)
+            row[key] = option_snapshot(c, S, base_vol, now, event_var)
         rows.append(row)
     return rows
