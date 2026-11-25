@@ -395,12 +395,15 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         daily = ex.feed.bars(symbol, "1d", 252)
         eps, div = info.get("eps", 0), info.get("dividend", 0)
         vols = [b["volume"] for b in daily[-30:]]
+        # A live quote has no high or low until the provider's daily bar arrives; use the bars alone then.
+        highs = [b["high"] for b in daily] + ([float(q.high)] if q.high is not None else [])
+        lows = [b["low"] for b in daily] + ([float(q.low)] if q.low is not None else [])
         return {"symbol": symbol, "name": info["name"], "sector": info["sector"], "type": info.get("type", "stock"),
                 "market_cap": last * info.get("shares_outstanding", 0), "shares_outstanding": info.get("shares_outstanding"),
                 "eps": eps, "pe": last / eps if eps and eps > 0 else None, "dividend": div,
                 "dividend_yield_pct": div / last * 100 if last else None,
-                "high_52w": max([b["high"] for b in daily] + [float(q.high)]),
-                "low_52w": min([b["low"] for b in daily] + [float(q.low)]),
+                "high_52w": max(highs) if highs else None,
+                "low_52w": min(lows) if lows else None,
                 "avg_volume_30d": sum(vols) / len(vols) if vols else None,
                 "historical_volatility": info.get("vol"), "simulated": ex.feed.simulated}
 
