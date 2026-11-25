@@ -18,6 +18,7 @@ Nothing here is investment advice.
 | [docs/KNOWN_LIMITS.md](docs/KNOWN_LIMITS.md) | What is simulated, approximate, untested or not built |
 | [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) | Alpaca and Finnhub: facts, setup, how the adapter works |
 | [docs/REPLAY.md](docs/REPLAY.md) | Historical replay and the session file format |
+| [docs/CONCURRENCY.md](docs/CONCURRENCY.md) | For developers: which thread does what, the exchange lock, and the rules for new routes and background threads |
 | [docs/PLAN.md](docs/PLAN.md) | The original plan (not a description of what exists) |
 
 The app also has a **Help** button with the essentials, for use offline.

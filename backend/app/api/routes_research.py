@@ -24,7 +24,9 @@ def register(app, ctx):
         # so it follows ctx.ex if the exchange is replaced.
         if hasattr(feed, "extra_interest") and getattr(feed, "_ctx_hooked", None) is not ctx:
             feed.extra_interest = lambda: [s for sub in list(ctx.clients.values()) for s in sub.get("symbols") or []]
-            feed.interest_source = lambda: wanted_symbols(ctx.live)  # live symbols only, also during a replay
+            # Live symbols only, also during a replay. The feed's poller thread calls this, so it goes
+            # through the exchange lock (ctx.live_interest) instead of walking exchange state itself.
+            feed.interest_source = getattr(ctx, "live_interest", None) or (lambda: wanted_symbols(ctx.live))
             feed._ctx_hooked = ctx
         h = getattr(feed, "research", None)
         if h is None:
