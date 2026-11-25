@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useState } from "react";
+import { Dialog } from "./Dialog";
 import { signed, tone, usd } from "./util";
 import "./mobile.css";
 
@@ -99,13 +100,6 @@ export function MobileShell(p: {
   const keyboard = useKeyboardOpen();
   const s = p.summary;
 
-  useEffect(() => {
-    if (!menu) return;
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(false); };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [menu]);
-
   const stat = (label: string, value: ReactNode, cls = "") => <div><span>{label}</span><b className={cls}>{value}</b></div>;
 
   return (
@@ -196,8 +190,7 @@ export function MobileShell(p: {
       </nav>
 
       {menu && (
-        <div className="m-sheet-bg" onClick={() => setMenu(false)}>
-          <div className="m-sheet" role="dialog" aria-modal="true" aria-label="Menu" onClick={(e) => e.stopPropagation()}>
+        <Dialog onClose={() => setMenu(false)} bgClassName="m-sheet-bg" className="m-sheet" label="Menu">
             <div className="m-sheet-head">
               <h3>Account</h3>
               <button className="ghost" onClick={() => setMenu(false)}>Close</button>
@@ -217,8 +210,7 @@ export function MobileShell(p: {
                 : <button key={a.label} className="ghost" title={a.title} onClick={() => { setMenu(false); a.onClick?.(); }}>{a.label}</button>)}
             </div>
             <p className="muted m-sheet-status">{p.connected ? "Live connection" : "Reconnecting…"} · {p.session}</p>
-          </div>
-        </div>
+        </Dialog>
       )}
     </div>
   );

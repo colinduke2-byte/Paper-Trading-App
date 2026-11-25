@@ -13,6 +13,7 @@ from fastapi import Query
 from ..core import calendar as cal
 from ..marketdata.config import wanted_symbols
 from ..marketdata.research import ResearchHub, envelope
+from ..core.errors import NotFound
 
 MAX_CALENDAR_DAYS = 400
 
@@ -59,7 +60,7 @@ def register(app, ctx):
     def symbol_of(symbol: str) -> str:
         symbol = symbol.upper().strip()
         if not ctx.ex.is_stock(symbol):
-            raise KeyError(f"unknown symbol {symbol}")
+            raise NotFound(f"unknown symbol {symbol}")
         return symbol
 
     def parse_day(v: Optional[str], name: str) -> Optional[date]:

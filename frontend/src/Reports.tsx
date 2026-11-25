@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ColorType, LineSeries, createChart } from "lightweight-charts";
 import { usePoll } from "./Market";
-import { api, dateTime, money, qty, signed, tone, usd } from "./util";
+import { api, dateTime, money, qty, signed, store, tone, usd } from "./util";
 import "./reports.css";
 
 const VIEWS = ["Overview", "Gains", "Statements", "Journal", "Export"] as const;
@@ -28,13 +28,14 @@ function duration(sec: any) {
 
 export function Reports({ accountId, refreshKey, notify, orders }: { accountId: string; refreshKey: number; notify: (m: string, bad?: boolean) => void; orders: any[] }) {
   const [view, setView] = useState<View>("Overview");
+  const [status] = usePoll<any>("/status", 15000);  // the same source as the top banner
   return (
     <div className="reports">
       <div className="toolbar reports-nav">
         <div className="seg" role="group" aria-label="Report">
           {VIEWS.map((v) => <button key={v} className={v === view ? "on" : ""} aria-pressed={v === view} onClick={() => setView(v)}>{v}</button>)}
         </div>
-        <span className="muted rep-label">All figures use simulated prices.</span>
+        {status?.price_note && <span className="muted rep-label">{status.price_note}</span>}
       </div>
       {view === "Overview" && <Overview accountId={accountId} refreshKey={refreshKey} />}
       {view === "Gains" && <Gains accountId={accountId} refreshKey={refreshKey} notify={notify} />}
@@ -47,8 +48,10 @@ export function Reports({ accountId, refreshKey, notify, orders }: { accountId: 
 
 // ---- overview ----------------------------------------------------------------------------------
 function Overview({ accountId, refreshKey }: { accountId: string; refreshKey: number }) {
-  const [bench, setBench] = useState("");
-  const [benchInput, setBenchInput] = useState("");
+  // The chosen benchmark is remembered in this browser; empty means the feed's default (MKTX or SPY).
+  const [bench, setBenchState] = useState(() => store("pd:benchmark") || "");
+  const [benchInput, setBenchInput] = useState(bench);
+  const setBench = (v: string) => { setBenchState(v); store("pd:benchmark", v); };
   const [rf, setRf] = useState("");
   const qs = new URLSearchParams();
   if (bench) qs.set("benchmark", bench);
@@ -57,7 +60,7 @@ function Overview({ accountId, refreshKey }: { accountId: string; refreshKey: nu
   const controls = (
       <div className="toolbar">
         <label className="inline">Benchmark
-          <input value={benchInput} placeholder="MKTX" aria-label="Benchmark symbol" style={{ width: 90 }} autoCapitalize="characters"
+          <input value={benchInput} placeholder={data?.benchmark_default || "None"} aria-label="Benchmark symbol" style={{ width: 90 }} autoCapitalize="characters"
             onChange={(e) => setBenchInput(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && setBench(benchInput.trim())}
             onBlur={() => setBench(benchInput.trim())} />
         </label>

@@ -67,7 +67,9 @@ def test_trading_flow():
     assert c.get("/api/accounts/NOPE").status_code == 404
     assert len(c.get(f"/api/accounts/{aid}/fills").json()) == 1
     assert len(c.get(f"/api/accounts/{aid}/ledger").json()) == 2
-    assert c.get(f"/api/accounts/{aid}/performance").json()["closed_trades"] == 0
+    # Trade statistics come from /analytics only (the old /performance and /closed routes were removed).
+    assert c.get(f"/api/accounts/{aid}/analytics").json()["trades"]["overall"]["trades"] == 0
+    assert c.get(f"/api/accounts/{aid}/performance").status_code == 404
     new = c.post("/api/accounts", json={"name": "Second", "type": "cash", "starting_cash": 5000}).json()
     assert new["cash"] == 5000 and c.post(f"/api/accounts/{new['id']}/reset", json={}).json()["cash"] == 5000
     assert c.post("/api/accounts", json={"type": "gold"}).status_code == 400

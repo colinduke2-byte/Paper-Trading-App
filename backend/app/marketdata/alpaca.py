@@ -450,7 +450,11 @@ class WebsocketsConnection(Connection):
 
     def __init__(self, url: str):
         from websockets.sync.client import connect
-        self._ws = connect(url, open_timeout=15, close_timeout=3, max_size=2 ** 24)
+        # Entered as a context manager: websockets 17.1+ deprecates using connect()'s return value directly
+        # (it warns once the handshake is done); older versions return the connection, whose __enter__ is
+        # itself, so this works with every supported version.
+        self._cm = connect(url, open_timeout=15, close_timeout=3, max_size=2 ** 24)
+        self._ws = self._cm.__enter__()
 
     def send(self, text: str) -> None:
         self._ws.send(text)
@@ -464,7 +468,7 @@ class WebsocketsConnection(Connection):
 
     def close(self) -> None:
         try:
-            self._ws.close()
+            self._cm.__exit__(None, None, None)
         except Exception:
             pass
 
@@ -993,28 +997,70 @@ class AlpacaFeed(MarketDataProvider):
 # ---------------------------------------------------------------------------------------------
 # Manual check: python -m app.marketdata.alpaca --check
 # ---------------------------------------------------------------------------------------------
-def _check(seconds: float = 8.0) -> int:
+def _check(seconds: float = 8.0, environ=None, out=None, **feed_kw) -> int:
+    """One line per check (PASS or FAIL with the reason), then a summary. Exit code 0 only if all pass.
+
+    The adapter's own log messages are captured and folded into the FAIL line they explain, so nothing
+    else is printed. feed_kw (transport, connector) lets tests run it against saved responses."""
+    import logging
     import os
-    from .config import load_dotenv, project_root
-    load_dotenv(project_root() / ".env")
-    key, secret = os.environ.get("APCA_API_KEY_ID", ""), os.environ.get("APCA_API_SECRET_KEY", "")
+    import warnings
+    from ..core import envfile
+    env = os.environ if environ is None else environ
+    envfile.load_into(envfile.env_file_path(env), env)
+    say = out or (lambda line: print(line, flush=True))
+    key, secret = env.get("APCA_API_KEY_ID", ""), env.get("APCA_API_SECRET_KEY", "")
     if not key or not secret:
-        print("FAIL keys: APCA_API_KEY_ID and APCA_API_SECRET_KEY are not set (environment or .env)")
+        say("FAIL keys: APCA_API_KEY_ID and APCA_API_SECRET_KEY are not set (environment or .env)")
+        say("SUMMARY: 0 of 1 checks passed")
         return 1
-    feed_name = os.environ.get("PAPERDESK_ALPACA_FEED", "iex")
-    feed = AlpacaFeed(key, secret, feed=feed_name, options_feed=os.environ.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative"),
-                      trading_url=os.environ.get("APCA_API_BASE_URL", PAPER_TRADING_URL))
+
+    class Collect(logging.Handler):
+        def __init__(self):
+            super().__init__(logging.WARNING)
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    collect = Collect()
+    loggers = [logging.getLogger(n) for n in ("paperdesk", "websockets")]
+    saved = [(lg, lg.handlers[:], lg.propagate, lg.level) for lg in loggers]
+    for lg in loggers:
+        lg.handlers, lg.propagate = [collect], False
+        lg.setLevel(logging.WARNING)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # library warnings are not check results
+            return _run_checks(seconds, env, key, secret, say, collect, feed_kw)
+    finally:
+        for lg, handlers, propagate, level in saved:
+            lg.handlers, lg.propagate = handlers, propagate
+            lg.setLevel(level)
+
+
+def _run_checks(seconds, env, key, secret, say, collect, feed_kw) -> int:
+    try:
+        feed = AlpacaFeed(key, secret, feed=env.get("PAPERDESK_ALPACA_FEED", "iex").strip().lower(),
+                          options_feed=env.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative").strip().lower(),
+                          trading_url=env.get("APCA_API_BASE_URL", PAPER_TRADING_URL).strip().rstrip("/"), **feed_kw)
+    except ValueError as e:
+        say(f"FAIL settings: {e}")
+        say("SUMMARY: 0 of 1 checks passed")
+        return 1
     results = []
 
     def item(name, fn):
+        collect.messages.clear()
         try:
             detail = fn()
             results.append(True)
-            print(f"PASS {name}: {detail}")
+            say(f"PASS {name}: {detail}")
         except Exception as e:
             results.append(False)
-            msg = e.message if isinstance(e, ProviderError) else repr(e)
-            print(f"FAIL {name}: {msg}")
+            msg = e.message if isinstance(e, ProviderError) else str(e) or type(e).__name__
+            why = "; ".join(dict.fromkeys(m for m in collect.messages if m not in msg))
+            say(f"FAIL {name}: {msg}" + (f" ({why})" if why else ""))
 
     def one_quote():
         feed.apply_snapshots(feed.rest.snapshots(["SPY"], feed.data_feed))
@@ -1057,6 +1103,8 @@ def _check(seconds: float = 8.0) -> int:
     item("bars", bar_set)
     item("option chain", chain)
     item("stream", stream)
+    say(f"SUMMARY: {sum(results)} of {len(results)} checks passed" + ("" if all(results) else
+        "; see the FAIL lines above and docs/DATA_PROVIDERS.md"))
     return 0 if all(results) else 1
 
 

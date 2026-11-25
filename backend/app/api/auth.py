@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
+from ..core import envfile
+
 log = logging.getLogger("paperdesk.access")
 if not log.handlers:
     _h = logging.StreamHandler()
@@ -75,24 +77,8 @@ class ConfigError(RuntimeError):
 # ---- configuration ---------------------------------------------------------------------------
 
 def read_env_file(path: str) -> dict:
-    """Parse KEY=VALUE lines like docker compose does for the simple cases: '#' comments, optional
-    'export ', single or double quotes (taken literally), and ' #' inline comments on unquoted values."""
-    out = {}
-    with open(path, encoding="utf-8-sig") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            if line.startswith("export "):
-                line = line[7:].lstrip()
-            key, value = line.split("=", 1)
-            key, value = key.strip(), value.strip()
-            if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
-                value = value[1:-1]
-            else:
-                value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
-            out[key] = value
-    return out
+    """Parse a .env file (see app.core.envfile, the one parser every setting uses)."""
+    return envfile.read_env_file(path)
 
 
 def _flag(env: dict, key: str, default: bool) -> bool:
@@ -696,8 +682,9 @@ def lan_addresses() -> list:
 
 
 def preflight(environ: Optional[dict] = None, out=None, err=None) -> int:
-    """Validate the access settings and choose the bind address. Prints the address on stdout (only that,
-    so the scripts can capture it) and everything for people on stderr. Returns the exit code."""
+    """Validate the access settings and choose the bind address and port. Prints "<host> <port>" on stdout
+    (only that, so the scripts can capture it; both are validated, so they are safe to pass through a shell
+    or batch parser) and everything for people on stderr. Returns the exit code."""
     env = os.environ if environ is None else environ
     out, err = out or sys.stdout, err or sys.stderr
     try:
@@ -705,6 +692,11 @@ def preflight(environ: Optional[dict] = None, out=None, err=None) -> int:
     except ConfigError as e:
         print(str(e), file=err)
         return 1
+    # HOST and PORT come from the same settings file as everything else (environment variables win).
+    env = dict(env)
+    path = env.get("PAPERDESK_ENV_FILE")
+    if path:
+        envfile.load_into(path, env)
     host = (env.get("HOST") or "").strip()
     port = (env.get("PORT") or "8000").strip()
     if not (port.isdigit() and 1 <= int(port) <= 65535):
@@ -723,7 +715,7 @@ def preflight(environ: Optional[dict] = None, out=None, err=None) -> int:
         if cfg.auth:
             print("A passcode is set: browsers must sign in (this computer skips it unless "
                   "PAPERDESK_LOOPBACK_BYPASS=0).", file=err)
-        print(host, file=out)
+        print(f"{host} {port}", file=out)
         return 0
     host = host or "0.0.0.0"
     addrs = lan_addresses() if host in ("0.0.0.0", "::") else [host]
@@ -742,7 +734,7 @@ def preflight(environ: Optional[dict] = None, out=None, err=None) -> int:
     print("This is plain HTTP: anyone on the same network could watch the traffic. Do not use LAN mode on "
           "public or shared Wi-Fi, and do not reuse this passcode anywhere else.", file=err)
     print("", file=err)
-    print(host, file=out)
+    print(f"{host} {port}", file=out)
     return 0
 
 

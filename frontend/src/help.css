@@ -16,3 +16,6 @@
 .help-sec > summary::-webkit-details-marker { display: none; }
 .help-sec > summary::after { content: ""; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); margin: -4px 4px 0 10px; flex: none; }
 .help-sec[open] > summary::after { transform: rotate(-135deg); margin-top: 4px; }
+
+/* A full-size link target (40 px), as on every phone control. */
+.help-link { display: inline-flex; align-items: center; min-height: 40px; padding: 0 4px; }

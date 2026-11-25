@@ -58,7 +58,8 @@ The first start creates two accounts (a 100,000 margin account and a 25,000 cash
 | `PAPERDESK_BIND` | `127.0.0.1` | Docker only: where compose publishes the port. `0.0.0.0` is refused without LAN mode |
 | `PAPERDESK_FEED`, `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `FINNHUB_API_KEY`, ... | unset | Real market data: see [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) |
 
-`.env.example` lists every setting.
+`.env.example` lists every setting. Each can go in the environment or in `.env` next to `run.sh` (read first, at
+start-up, by the server and by `run.sh`/`run.bat`; a variable already set in the environment wins).
 
 ### Use it from your phone (LAN mode)
 
@@ -166,9 +167,14 @@ accounts and HTTPS.
 
 ```bash
 cd backend
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -c constraints.txt -e ".[dev]"
 .venv/bin/pytest
 ```
+
+`backend/constraints.txt` pins the exact versions the tests passed with; run.sh, run.bat, the Docker image
+and CI install with it, while `pyproject.toml` keeps the version ranges. To move to newer versions, follow
+the steps at the top of `tools/backend_constraints.py`. `THIRD_PARTY_NOTICES.md` lists every dependency with
+its licence; regenerate it with `python tools/third_party_notices.py` after a dependency change.
 
 ```bash
 cd frontend
@@ -177,7 +183,11 @@ npm run dev
 ```
 
 `npm run dev` serves the UI on port 5173 and proxies to the backend on port 8000.
-`npm run build` writes `frontend/dist`, which the backend serves.
+`npm run build` writes `frontend/dist`, which the backend serves, with `dist/build.json` naming a hash of
+the sources it was built from. If `frontend/src` is newer than the bundle, the server logs a warning and the UI
+shows a notice. On `main`, the "Rebuild bundled UI" workflow rebuilds and commits `frontend/dist` after every
+push, and CI fails if the committed bundle does not match the sources; pull requests get the built bundle as
+an artifact instead.
 
 ## Tests and CI
 

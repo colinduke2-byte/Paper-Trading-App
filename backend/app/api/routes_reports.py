@@ -8,11 +8,14 @@ from fastapi.responses import HTMLResponse, Response
 from ..analytics import export, journal
 from ..analytics.common import equity_points, external_flows, iso, month_bounds, months_between, parse_month
 from ..analytics.returns import price_at, report as returns_report
-from ..analytics.statement import monthly_statement, statement_html
+from ..analytics.statement import monthly_statement, positions_at, statement_html
+from ..lifecycle.actions import CorporateAction
 from ..analytics.trades import closed_lots, exposure, gains_report, trade_stats
 from ..core.money import model_to_price, parse as parse_num
 from ..ledger.account import LOT_METHODS
 from ..options.symbology import parse as parse_option
+from ..core.errors import NotFound
+from ..marketdata.labels import default_benchmark, price_source
 from .locking import unlocked
 
 # Price history can come from the data provider over the network, which must not happen while the
@@ -20,7 +23,6 @@ from .locking import unlocked
 # account in one piece under `with ctx.locked():`.
 PRICE_HISTORY = "fetches price history from the feed before reading the account under ctx.locked()"
 
-DEFAULT_BENCHMARK = "MKTX"
 CSV_KINDS = ("fills", "orders", "ledger", "positions", "gains", "journal")
 LOT_METHOD_LABELS = {"fifo": "First in, first out", "lifo": "Last in, first out", "highest_cost": "Highest cost first"}
 
@@ -37,7 +39,7 @@ def price_history(ex, symbol: str) -> list:
            if b["time"] + 86399 < first_minute]
     out += [(b["time"] + 59, model_to_price(b["close"])) for b in minutes]
     q = ex.feed.quote(symbol)
-    if q is not None:
+    if q is not None and q.last > 0:
         now = ex.now()
         out = [p for p in out if p[0] < now] + [(now, q.last)]
     return out
@@ -62,17 +64,19 @@ def register(app, ctx):
         rf = parse_num(risk_free)
         if not Decimal("-1") < rf < Decimal("1"):
             raise ValueError("risk_free is an annual rate written as a fraction, for example 0.04")
-        bench = (benchmark or "").upper().strip() or (DEFAULT_BENCHMARK if e.is_stock(DEFAULT_BENCHMARK) else "")
+        default = default_benchmark(e.feed, e.is_stock)
+        bench = (benchmark or "").upper().strip() or default
         if bench and not e.is_stock(bench):
-            raise KeyError(f"unknown benchmark symbol {bench}")
+            raise NotFound(f"unknown benchmark symbol {bench}")
         hist = price_history(e, bench) if bench else None  # may ask the provider: before the lock is taken
         with ctx.locked("analytics"):
-            return _analytics(e, aid, bench, hist, rf)
+            return _analytics(e, aid, bench, default, hist, rf)
 
-    def _analytics(e, aid: str, bench: str, hist, rf):
+    def _analytics(e, aid: str, bench: str, default: str, hist, rf):
         a = e.account(aid)
         summ = e.summary(aid)
-        series = equity_points(a, e.now(), summ["equity"])
+        # With a position that has no price yet, the live equity is not known: leave it off the curve.
+        series = equity_points(a, e.now(), None if summ["prices_unavailable"] else summ["equity"])
         r = returns_report(series, external_flows(a), hist, rf)
         index = r.pop("index")
         b = r["benchmark"]
@@ -84,7 +88,7 @@ def register(app, ctx):
             b["curve"] = [[t, float(start_value * v)] for t, v in b_index]
         lots = closed_lots(a)
         return plain({
-            "account_id": aid, "simulated": True, "returns": r, "benchmark": b,
+            "account_id": aid, **price_source(e.feed), "benchmark_default": default, "returns": r, "benchmark": b,
             "account_curve": curve(series), "index_curve": curve(index),
             "trades": trade_stats(lots),
             "exposure": exposure(e.positions(aid), {s: i.get("sector", "Other") for s, i in e.feed.symbols().items()},
@@ -127,17 +131,19 @@ def register(app, ctx):
             a = e.account(aid)
             now = e.now()
             current = end > now
-            symbols = list(dict.fromkeys(f.symbol for f in a.fills if f.ts < end))
+            splits = {k: CorporateAction.from_plain(r) for k, r in e.lifecycle.split_records.items()}
+            symbols = list(positions_at(a, end, splits))
         # A past month is valued at prices from the feed's history, which may come from the provider:
         # they are fetched here, with the lock released.
         past = {} if current else {sym: price_at(price_history(e, sym), end - 1) for sym in symbols
                                    if parse_option(sym) is None and e.is_stock(sym)}
         with ctx.locked("statement"):
             a = e.account(aid)
-            marks = {sym: e.mark(sym) for sym in symbols} if current else past
+            marks = {sym: e.price(sym) for sym in symbols} if current else past
             marks = {s: p for s, p in marks.items() if p is not None}
-            live = e.summary(aid)["equity"] if current else None
-            return monthly_statement(a, year, mon, now, live, marks)
+            summ = e.summary(aid) if current else None
+            live = summ["equity"] if current and not summ["prices_unavailable"] else None
+            return monthly_statement(a, year, mon, now, live, marks, splits, source=price_source(e.feed))
 
     @app.get("/api/accounts/{aid}/statements")
     def statements(aid: str):
@@ -162,7 +168,7 @@ def register(app, ctx):
         a = e.account(aid)
         kind = kind.removesuffix(".csv")
         if kind not in CSV_KINDS:
-            raise KeyError(f"no export named {kind}; choose one of {', '.join(CSV_KINDS)}")
+            raise NotFound(f"no export named {kind}; choose one of {', '.join(CSV_KINDS)}")
         if kind == "fills":
             body = export.fills_csv(a)
         elif kind == "orders":
@@ -185,10 +191,10 @@ def register(app, ctx):
         if target_type == "order":
             o = e.engine.orders.get(target_id)
             if o is None or o.account_id != a.id:
-                raise KeyError(f"no order {target_id} in this account")
+                raise NotFound(f"no order {target_id} in this account")
         elif target_type == "trade":
             if target_id not in {c["id"] for c in closed_lots(a)}:
-                raise KeyError(f"no closed trade {target_id} in this account")
+                raise NotFound(f"no closed trade {target_id} in this account")
 
     @app.get("/api/accounts/{aid}/journal")
     def list_journal(aid: str, target_type: Optional[str] = None, target_id: Optional[str] = None,
