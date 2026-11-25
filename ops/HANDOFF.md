@@ -325,3 +325,4 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
 - PR 28 review: SEND BACK, seven blocking items (comment on PR 28). Worker
   session_01Byytwbmbp2zVBAAd9s3p93 fixes them on stream/cashfix. Cash invariant still open on main.
 - PR 19 review: session_01ByytwYu2DnD9MJeK4CGJKQ. PR 22 waiting for green checks to merge.
+- PRs 21 and 27 CLOSED by the owner as superseded (by PR 28 and by main).
