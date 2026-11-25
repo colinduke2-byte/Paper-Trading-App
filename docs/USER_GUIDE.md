@@ -551,7 +551,10 @@ Open a symbol and choose the **Options** tab.
   open interest (OI), volume, implied volatility (IV), delta, bid and ask. Strikes run about 25% above
   and below the stock price.
 - **Click an ask price to buy** that contract, or **a bid price to sell** it. The ticket opens with a
-  one-contract limit order at that price (change it as you like), then Review and Place as usual. One
+  one-contract limit order a little through that price: 2% (at least 5 cents) above the ask for a buy,
+  below the bid for a sell. The ticket says so under the limit. The order still fills at the market
+  price; the margin only keeps it from resting unfilled when the price moves between your click and
+  Place. Change the limit to wait for your own price, then Review and Place as usual. One
   contract covers **100 shares**, so a price of 5.00 costs $500. The fee is $0.65 per contract.
 - On the ticket, option actions are called **Buy to open**, **Sell to open** (writing the option),
   **Buy to close** and **Sell to close**.
