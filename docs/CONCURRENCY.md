@@ -25,8 +25,8 @@ there is no lock order between exchange objects to get wrong.
 
 | Context | Thread | What it does with exchange state | How it is made safe |
 |---|---|---|---|
-| Tick loop (`server.py: loop`, `turn`) | asyncio task that hands each turn to the `paperdesk-tick` thread | `ex.tick()` or `replay.advance()`, `ex.snapshot()`, builds one message per WebSocket client | `turn()` holds `ctx.lock` (priority waiter). Returns the snapshot text and the messages |
-| Saving (`ex.write_snapshot`) | `paperdesk-save` thread | none: writes text produced under the lock | Runs without `ctx.lock`. `Exchange._io_lock` serialises writers; snapshots are numbered, so an older one never replaces a newer file |
+| Tick loop (`server.py: loop`, `turn`) | asyncio task that hands each turn to the `paperdesk-tick` thread | `ex.tick()` or `replay.advance()`, `ex.save_plan()`, builds one message per WebSocket client | `turn()` holds `ctx.lock` (priority waiter). Returns the snapshot text and the messages |
+| Saving (`ex.write_plan`) | `paperdesk-save` thread | none: writes text produced under the lock | Runs without `ctx.lock`. `Exchange._io_lock` serialises writers; snapshots are numbered, so an older one never replaces a newer file |
 | Broadcast (`server.py: broadcast`) | event loop | none: sends the messages `turn()` built | No lock held while awaiting `send_json` |
 | WebSocket endpoint `/ws` | event loop | none: edits its own entry in `ctx.clients` | `ctx.clients` is only replaced item by item; readers copy it with `list(...)` |
 | Plain `def` routes under `/api` (orders, accounts, settings, journal, watchlists, alerts and notifications, reports, lifecycle, replay pause/resume/speed, status) | Starlette worker threads, up to 40 at once | read and change everything | Wrapped centrally by `app/api/locking.py`: the whole handler runs under `ctx.lock`, and its result is copied before the lock is released |
@@ -71,6 +71,11 @@ there is no lock order between exchange objects to get wrong.
   `Exchange._atomic`: if anything raises half way (the second leg of a multi-leg fill, a lifecycle
   hook, an invalid field of a replace), the account's ledger, lots, fills, lifecycle state, its orders,
   the event queue and the fill counter are put back. Order ids used by a failed request are not reused.
+- **Notifications.** The notifier listens on `ex.events` (an `EventStream`); every append happens under
+  the lock, so notifications are written under it too, and a rolled-back order change takes its
+  notifications back.
+- **Saving in two steps.** `plan = ex.save_plan()` serialises under the lock and does no I/O;
+  `ex.write_plan(plan)` does only I/O and is called after the lock is released.
 - **State files.** `state.json` is serialised to text under the lock and written with an atomic
   replace, so every file on disk is a consistent state that loads. `load()` parses the whole file
   before it changes anything.

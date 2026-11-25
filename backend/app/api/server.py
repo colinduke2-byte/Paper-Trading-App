@@ -128,13 +128,13 @@ class AppContext:
         with self.locked("replay start"):
             if self.replay is not None:
                 raise RuntimeError("a replay is already running; exit it first")
-            files = self.live.snapshot(force=True)
+            files = self.live.save_plan(force=True)
             self.live.drain_events()
             controller.guard = self.lock
             self.replay = controller
             self.ex = controller.ex
             self._publish()
-        self.live.write_snapshot(files)  # disk I/O after the lock is released
+        self.live.write_plan(files)  # disk I/O after the lock is released
 
     def exit_replay(self) -> None:
         """Return to the live exchange exactly as it was when the replay started."""
@@ -144,10 +144,10 @@ class AppContext:
             controller, self.replay = self.replay, None
             self.ex = self.live
             controller.closed = controller.paused = True  # a step or seek still running stops at its next slice
-            files = controller.ex.snapshot(force=True)
+            files = controller.ex.save_plan(force=True)
             self._publish()
         try:
-            controller.ex.write_snapshot(files)
+            controller.ex.write_plan(files)
         except OSError:
             pass
 
@@ -211,7 +211,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             else:
                 ex.tick()
             idle = work["saving"] is None or work["saving"].done()
-            files = ex.snapshot() if idle else []  # still dirty next turn when the last write is not done
+            files = ex.save_plan() if idle else []  # still dirty next turn when the last write is not done
             out = messages(ex)
         finally:
             ctx.lock.release()
@@ -225,7 +225,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     def write(ex: Exchange, files: list) -> None:
         try:
-            ex.write_snapshot(files)
+            ex.write_plan(files)
         except Exception as e:  # the exchange stays dirty, so the next turn saves again
             print(f"save error: {e!r}")
 
@@ -255,11 +255,11 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             print("shutdown: the exchange lock is still held, so the last changes were not saved")
             return
         try:
-            todo = [(ex, ex.snapshot(force=True)) for ex in dict.fromkeys((ctx.ex, ctx.live))]
+            todo = [(ex, ex.save_plan(force=True)) for ex in dict.fromkeys((ctx.ex, ctx.live))]
         finally:
             ctx.lock.release()
         for ex, files in todo:
-            ex.write_snapshot(files)
+            ex.write_plan(files)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):

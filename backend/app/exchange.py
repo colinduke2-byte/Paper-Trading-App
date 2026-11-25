@@ -1246,11 +1246,11 @@ class Exchange:
                 pass
             raise
 
-    def snapshot(self, force: bool = False) -> list:
+    def save_plan(self, force: bool = False) -> list:
         """What save() would write now, already serialised: [(file name, JSON text, sequence number)].
 
         Call it while holding the exchange lock (it reads all state and resets `dirty`), then hand the
-        result to write_snapshot() after releasing the lock, so no disk I/O happens under it.
+        result to write_plan() after releasing the lock, so no disk I/O happens under it.
         """
         if not self.data_dir:
             return []
@@ -1273,8 +1273,8 @@ class Exchange:
         self._snapshot_seq += 1
         return [(name, text, self._snapshot_seq) for name, text in files]
 
-    def write_snapshot(self, files: list) -> None:
-        """Write the result of snapshot() to disk. Needs no exchange lock; an older snapshot never
+    def write_plan(self, files: list) -> None:
+        """Write the result of save_plan() to disk. Needs no exchange lock; an older snapshot never
         replaces a newer one, whichever thread gets here first."""
         if not files:
             return
@@ -1290,7 +1290,7 @@ class Exchange:
             raise
 
     def save(self, force: bool = False) -> None:
-        self.write_snapshot(self.snapshot(force))
+        self.write_plan(self.save_plan(force))
 
     def _peek_sequences(self) -> dict:
         """Read the next id of each counter without using it up."""
