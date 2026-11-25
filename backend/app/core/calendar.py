@@ -110,3 +110,26 @@ def previous_trading_day(d: date) -> date:
     while not is_trading_day(d):
         d -= timedelta(days=1)
     return d
+
+
+# ---- the trading day -------------------------------------------------------------------------
+# One definition for everything that happens "once a day": day P&L, the lifecycle's business days,
+# the synthetic feed's daily bars and previous close. Session mode "us" follows the New York date
+# (so the day changes at midnight in New York, whatever the daylight-saving offset); "always" (the
+# simulated market never closes) uses the UTC date. Day orders follow the sessions in "us" mode and
+# the UTC day in "always" mode, which is the same boundary.
+EPOCH = date(1970, 1, 1)
+
+
+def utc_date(ts: float) -> date:
+    return EPOCH + timedelta(days=int(ts // 86400))
+
+
+def trading_day(ts: float, mode: str) -> date:
+    """The trading day that timestamp ts belongs to in session mode `mode` ("us" or "always")."""
+    return ny_date(ts) if mode == "us" else utc_date(ts)
+
+
+def trading_day_start(d: date, mode: str) -> float:
+    """Epoch time at which trading day d begins (New York or UTC midnight)."""
+    return datetime.combine(d, time(0), tzinfo=NY if mode == "us" else timezone.utc).timestamp()

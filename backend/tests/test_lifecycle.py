@@ -367,7 +367,8 @@ def test_pattern_day_trader_blocks_opening_orders_after_three_day_trades_under_2
            "Closing orders are still allowed. New opening orders are allowed again on 2026-11-30.")
     with pytest.raises(OrderRejected) as err:
         ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
-    assert str(err.value) == msg
+    assert str(err.value).startswith(msg)
+    assert '"Pattern day trader rule (margin accounts)"' in str(err.value) and "Account rules" in str(err.value)
     with pytest.raises(OrderRejected, match="Pattern day trader rule"):  # a short sale opens too
         ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 60})
     assert not ex.preview(a, {"symbol": "ABC", "side": "buy", "qty": 10})["ok"]

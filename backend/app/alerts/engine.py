@@ -18,6 +18,7 @@ import heapq
 from decimal import Decimal
 from typing import Optional
 
+from ..core.errors import NotFound
 from ..core.money import ZERO, D, cents
 from ..marketdata.feed import TIMEFRAMES
 from ..options import chain as optchain
@@ -119,7 +120,7 @@ class Alerting:
     def get(self, alert_id: str, account_id: Optional[str] = None) -> dict:
         al = self.alerts.get(alert_id)
         if al is None or (account_id is not None and al.get("account_id") not in (None, account_id)):
-            raise KeyError(f"no such alert {alert_id}")
+            raise NotFound(f"no such alert {alert_id}")
         return al
 
     def update(self, alert_id: str, changes: dict) -> dict:

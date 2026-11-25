@@ -6,7 +6,7 @@ produces is real market data; every company is invented.
 import math
 import random
 from collections import deque
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from ..core import calendar as cal
@@ -47,6 +47,7 @@ UNIVERSE = [
 
 TRADING_SECONDS_PER_YEAR = 252 * 6.5 * 3600
 ALWAYS_OPEN_SECONDS_PER_YEAR = 252 * 24 * 3600
+HISTORY_MINUTES = 1500  # one-minute bars generated at start-up: 25 hours, or 300 five-minute bars
 # Quarterly dividend months, by position in UNIVERSE modulo 3.
 DIVIDEND_MONTHS = ((1, 4, 7, 10), (2, 5, 8, 11), (3, 6, 9, 12))
 SPLIT_CANDIDATES = [u[0] for u in sorted(UNIVERSE, key=lambda u: -u[3])[:6]]  # the highest-priced listings
@@ -77,7 +78,7 @@ class SyntheticFeed(MarketDataProvider):
 
     # ---- history -------------------------------------------------------
     def _generate_history(self, now: float, days: int) -> None:
-        today = cal.ny_date(now)
+        today = self._trading_day(now)
         dates = []
         d = today - timedelta(days=1)
         while len(dates) < days:
@@ -86,6 +87,8 @@ class SyntheticFeed(MarketDataProvider):
             d -= timedelta(days=1)
         dates.reverse()
         market = [self.rng.gauss(0.0003, 1) for _ in dates]
+        minutes = self._history_minutes(now)
+        day_start = cal.trading_day_start(today, self._mode)
         for sym, _, _, start, vol, *_ in UNIVERSE:
             rng = random.Random(f"{sym}-history")
             daily_sigma = vol / math.sqrt(252)
@@ -105,28 +108,67 @@ class SyntheticFeed(MarketDataProvider):
             price = start
             self.store.daily[sym] = rows
             prev_close = cents(Decimal(repr(round(price, 2))))
-            # Intraday minutes for today so charts are not empty at start-up.
-            midnight = int(now // 86400) * 86400
+            # Intraday minutes for a rolling window that ends now, so charts and indicators have data whatever
+            # the time of day the server starts (a start just after midnight used to leave them almost empty).
+            # Minutes before today's trading day are scaled to end exactly at the previous close; today's
+            # minutes start from the opening gap and give the day's open, high, low and volume.
             minute_sigma = vol * math.sqrt(60 / self.year_seconds)
+            bars = self.store.minutes.setdefault(sym, deque(maxlen=6000))
+            earlier = [t for t in minutes if t < day_start]
+            if earlier:
+                back = random.Random(f"{sym}-intraday-{earlier[-1]}")
+                q, walk = 1.0, []
+                for t in earlier:
+                    o = q
+                    q = q * math.exp(minute_sigma * back.gauss(0, 1))
+                    walk.append((t, o, q, int(back.uniform(200, 4000))))
+                k = price / q  # the last of these minutes closes at the previous close
+                for t, o, c, size in walk:
+                    o, c = o * k, c * k
+                    bars.append([t, round(o, 2), round(max(o, c) * 1.0003, 2), round(min(o, c) * 0.9997, 2), round(c, 2), size])
             p = price * math.exp(daily_sigma * 0.3 * rng.gauss(0, 1))
             day_open = p
             hi, lo, vol_sum = p, p, 0
-            for t in range(midnight, int(now // 60) * 60, 60):
+            for t in minutes[len(earlier):]:
                 o = p
                 p = p * math.exp(minute_sigma * rng.gauss(0, 1))
                 size = int(rng.uniform(200, 4000))
-                self.store.minutes.setdefault(sym, deque(maxlen=6000)).append(
-                    [t, round(o, 2), round(max(o, p) * 1.0003, 2), round(min(o, p) * 0.9997, 2), round(p, 2), size])
+                bars.append([t, round(o, 2), round(max(o, p) * 1.0003, 2), round(min(o, p) * 0.9997, 2), round(p, 2), size])
                 hi, lo, vol_sum = max(hi, p), min(lo, p), vol_sum + size
             last = cents(Decimal(repr(round(p, 2))))
             self.quotes[sym] = self._make_quote(sym, last, now, prev_close, cents(Decimal(repr(round(day_open, 2)))),
                                                 cents(Decimal(repr(round(hi, 2)))), cents(Decimal(repr(round(lo, 2)))),
                                                 Decimal(vol_sum), trade=False)
-            self._day[sym] = self._utc_date(now)
+            self._day[sym] = self._trading_day(now)
 
-    @staticmethod
-    def _utc_date(ts: float) -> date:
-        return date(1970, 1, 1) + timedelta(seconds=int(ts // 86400) * 86400)
+    def _history_minutes(self, now: float, count: int = HISTORY_MINUTES) -> list:
+        """Start times of the last `count` one-minute bars before now, oldest first. In "always" mode that is
+        simply the last `count` minutes (25 hours). In "us" mode only minutes when the market was in session
+        (pre-market to after-hours, 4:00 to 20:00 New York) count, going back over earlier trading days as
+        needed; all of today's session so far is always included."""
+        end = int(now // 60) * 60
+        if self.always_open:
+            return list(range(end - count * 60, end, 60))
+        out, d = [], cal.ny_date(now)
+        for _ in range(30):
+            if len(out) >= count:
+                break
+            if cal.is_trading_day(d):
+                first = int(datetime.combine(d, cal.PRE_OPEN, tzinfo=cal.NY).timestamp())
+                last = min(int(datetime.combine(d, cal.POST_CLOSE, tzinfo=cal.NY).timestamp()), end)
+                out[:0] = range(first, last, 60)
+            d -= timedelta(days=1)
+        today_start = cal.trading_day_start(cal.ny_date(now), "us")
+        keep = max(count, sum(t >= today_start for t in out))
+        return out[-keep:]
+
+    @property
+    def _mode(self) -> str:
+        return "always" if self.always_open else "us"
+
+    def _trading_day(self, ts: float) -> date:
+        """The day the daily bar and previous close belong to (core.calendar.trading_day)."""
+        return cal.trading_day(ts, self._mode)
 
     def _make_quote(self, sym, last, now, prev_close, open_, high, low, volume, trade, last_size=ZERO) -> Quote:
         half = max(CENT, cents(last * Decimal("0.00015") * self.rng.randint(1, 3)))
@@ -148,7 +190,7 @@ class SyntheticFeed(MarketDataProvider):
         if not self.always_open and cal.session(now) == "closed":
             return []
         out = []
-        today = self._utc_date(now)
+        today = self._trading_day(now)
         market = self.rng.gauss(0, 1)
         moves = self._due_moves(now)  # earnings and economic releases: log return per symbol
         for sym, info in self.info.items():

@@ -16,9 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from ..core import calendar as cal
 from ..exchange import Exchange, OrderRejected
 from ..marketdata.feed import TIMEFRAMES
+from ..marketdata.labels import price_source
 from ..marketdata.synthetic import SyntheticFeed
 from ..options import chain as optchain
 from ..options.symbology import describe, parse as parse_option
+from ..core.errors import NotFound
 
 
 def plain(obj: Any) -> Any:
@@ -54,7 +56,9 @@ def order_row(o) -> dict:
 
 
 def default_exchange() -> Exchange:
+    from ..core import envfile
     from ..marketdata.config import attach, select_feed
+    envfile.load_settings()  # the .env file first, so every setting below honours it
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
     # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
     sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
@@ -128,8 +132,10 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         rp = ctx.replay
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
-                "paper": True, **plain(ex.feed.status_info()),
-                "mode": ctx.mode, "replay": rp.status() if rp is not None else None}
+                "paper": True, **plain(ex.feed.status_info()), "price_note": price_source(ex.feed)["price_note"],
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None,
+                # Alpaca was configured but failed at start-up, so the live exchange runs on simulated data
+                "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None)}
 
     async def broadcast(ex: Exchange) -> None:
         events = ex.drain_events()
@@ -185,13 +191,24 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     async def _rejected(_, exc):
         return JSONResponse({"detail": str(exc), "rejected": True}, status_code=422)
 
-    @app.exception_handler(KeyError)
+    @app.exception_handler(NotFound)
     async def _missing(_, exc):
-        return JSONResponse({"detail": str(exc).strip("'\"")}, status_code=404)
+        # only deliberate "no such thing" lookups: a stray KeyError is a bug, not a 404
+        return JSONResponse({"detail": str(exc)}, status_code=404)
 
     @app.exception_handler(ValueError)
     async def _bad(_, exc):
         return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.exception_handler(Exception)
+    async def _bug(request, exc):
+        # Bad input is answered above with a 4xx; anything that reaches here is a bug. Answer in JSON
+        # (the UI shows "detail") and keep the traceback in the server log, not in the response.
+        import logging
+        logging.getLogger("paperdesk.api").error("unhandled error on %s %s", request.method, request.url.path,
+                                                 exc_info=exc)
+        return JSONResponse({"detail": f"PaperDesk hit an internal error ({type(exc).__name__}). This is a bug; "
+                                       "the server log has the details."}, status_code=500)
 
     # ---- market ----------------------------------------------------------
     @app.get("/api/status")
@@ -221,7 +238,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     def _stock(symbol: str) -> str:
         symbol = symbol.upper()
         if not ctx.ex.is_stock(symbol):
-            raise KeyError(f"unknown symbol {symbol}")
+            raise NotFound(f"unknown symbol {symbol}")
         return symbol
 
     @app.get("/api/bars/{symbol}")
@@ -247,7 +264,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         symbol = _stock(symbol)
         info, q = ex.feed.symbols()[symbol], ex.feed.quote(symbol)
         if q is None:
-            raise KeyError(f"no quote has arrived for {symbol} yet")
+            raise NotFound(f"no quote has arrived for {symbol} yet")
         last = float(q.last)
         daily = ex.feed.bars(symbol, "1d", 252)
         eps, div = info.get("eps", 0), info.get("dividend", 0)
@@ -326,13 +343,13 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         except ValueError:
             raise ValueError("expiry must be YYYY-MM-DD")
         if exp not in (ex.feed.option_expirations(symbol) or optchain.expirations(cal.ny_date(ex.now()))):
-            raise KeyError("expiry is not listed")
+            raise NotFound("expiry is not listed")
         provided = ex.feed.option_chain(symbol, exp, ex.now())
         if provided is not None:
             return plain(provided)
         q = ex.feed.quote(symbol)
         if q is None:
-            raise KeyError(f"no quote has arrived for {symbol} yet")
+            raise NotFound(f"no quote has arrived for {symbol} yet")
         return {"underlying": symbol, "expiry": expiry, "spot": float(q.last), "simulated": True,
                 "source": "model", "source_label": "model prices, not market data",
                 "rows": plain(optchain.chain(symbol, exp, float(q.last), ex.feed.base_vol(symbol), ex.now(),
@@ -348,17 +365,17 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     def create_account(body: dict = Body(...)):
         ex = ctx.ex
         from ..core.money import parse as parse_num
-        acct = ex.create_account(str(body.get("name", "")), body.get("type", "margin"),
-                                 parse_num(body.get("starting_cash", 100000)))
+        acct = ex.create_account(str(body.get("name") or ""), body.get("type", "margin"),
+                                 parse_num(body.get("starting_cash", 100000), "starting cash"))
         return plain(ex.summary(acct.id))
 
     @app.post("/api/accounts/{aid}/reset")
     def reset_account(aid: str, body: dict = Body(default={})):
         ex = ctx.ex
         from ..core.money import parse as parse_num
-        cash = parse_num(body["starting_cash"]) if body.get("starting_cash") else None
-        if cash is not None and cash <= 0:
-            raise ValueError("starting cash must be positive")
+        ex.account(aid)
+        raw = body.get("starting_cash")
+        cash = parse_num(raw, "starting cash") if raw not in (None, "") else None
         ex.reset_account(aid, cash)
         return plain(ex.summary(aid))
 
@@ -487,8 +504,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 if isinstance(msg, dict):
                     if isinstance(msg.get("symbols"), list):
                         clients[ws]["symbols"] = [str(s).upper() for s in msg["symbols"][:300]]
-                    if "account" in msg:
-                        clients[ws]["account"] = msg["account"]
+                    if "account" in msg:  # an id string; anything else would break the broadcast for everyone
+                        clients[ws]["account"] = msg["account"] if isinstance(msg["account"], str) else None
         except (WebSocketDisconnect, Exception):
             clients.pop(ws, None)
 
@@ -517,4 +534,6 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
 
 def app_factory() -> FastAPI:
+    from ..core import envfile
+    envfile.load_settings()  # before anything reads a setting (data folder, seed, feed, access, UI folder)
     return create_app()

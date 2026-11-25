@@ -251,7 +251,7 @@ test("option chain: buy one call", async ({ page, open }) => {
   await expect(t.getByLabel("Contracts")).toHaveValue("1");
   await expect(t.getByText(/Call/).first()).toBeVisible();
   await placeFromTicket(page);
-  await expect(page.getByText(/(Filled|Order placed): buy 1 MKTX/)).toBeVisible();
+  await expect(page.getByText(/Filled: buy 1 MKTX/)).toBeVisible();
   await go(page, "Account");
   await bottomTab(page, /^Positions/).tap();
   await expect(page.locator(".bottom tbody tr").filter({ hasText: /Call/ })).toBeVisible();

@@ -69,7 +69,7 @@ test("a rejected order shows the real reason", async ({ page, request, open }) =
   const small = await createAccount(request, "cash", "1000");
   await open(small);
   await review(page, "100000");
-  await expect(page.getByRole("alert")).toContainText("This order would be rejected: insufficient cash.");
+  await expect(page.getByRole("alert")).toContainText("This order would be rejected: insufficient cash");
   await expect(page.getByRole("button", { name: "Place paper order" })).toHaveCount(0);
 });
 
@@ -80,9 +80,12 @@ test("option chain: buy one call", async ({ page, open }) => {
   await page.getByTitle("Buy at the ask").first().click();
   const t = ticket(page);
   await expect(t.getByLabel("Contracts")).toHaveValue("1");
+  // The ticket is seeded with a limit a little above the clicked ask and says so, so the order fills even
+  // though the model price moves every second.
+  await expect(t.locator(".ticket-note")).toContainText(/Limit set \d+\.\d\d above the ask/);
   await t.getByRole("button", { name: /^Review/ }).click();
   await place(page);
-  await expect(page.getByText(/(Filled|Order placed): buy 1 MKTX/)).toBeVisible();
+  await expect(page.getByText(/Filled: buy 1 MKTX/)).toBeVisible();
   await bottomTab(page, /^Positions/).click();
   await expect(page.locator(".bottom tbody tr").filter({ hasText: /Call/ })).toBeVisible();
 });
