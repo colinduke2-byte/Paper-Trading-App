@@ -8,7 +8,8 @@ from fastapi.responses import HTMLResponse, Response
 from ..analytics import export, journal
 from ..analytics.common import equity_points, external_flows, iso, month_bounds, months_between, parse_month
 from ..analytics.returns import price_at, report as returns_report
-from ..analytics.statement import monthly_statement, statement_html
+from ..analytics.statement import monthly_statement, positions_at, statement_html
+from ..lifecycle.actions import CorporateAction
 from ..analytics.trades import closed_lots, exposure, gains_report, trade_stats
 from ..core.money import model_to_price, parse as parse_num
 from ..ledger.account import LOT_METHODS
@@ -32,7 +33,7 @@ def price_history(ex, symbol: str) -> list:
            if b["time"] + 86399 < first_minute]
     out += [(b["time"] + 59, model_to_price(b["close"])) for b in minutes]
     q = ex.feed.quote(symbol)
-    if q is not None:
+    if q is not None and q.last > 0:
         now = ex.now()
         out = [p for p in out if p[0] < now] + [(now, q.last)]
     return out
@@ -64,7 +65,8 @@ def register(app, ctx):
         if bench and not e.is_stock(bench):
             raise NotFound(f"unknown benchmark symbol {bench}")
         summ = e.summary(aid)
-        series = equity_points(a, e.now(), summ["equity"])
+        # With a position that has no price yet, the live equity is not known: leave it off the curve.
+        series = equity_points(a, e.now(), None if summ["prices_unavailable"] else summ["equity"])
         hist = price_history(e, bench) if bench else None
         r = returns_report(series, external_flows(a), hist, rf)
         index = r.pop("index")
@@ -118,18 +120,17 @@ def register(app, ctx):
         start, end = month_bounds(year, mon)
         now = e.now()
         current = end > now
+        splits = {k: CorporateAction.from_plain(r) for k, r in e.lifecycle.split_records.items()}
         marks = {}
-        for f in a.fills:
-            sym = f.symbol
-            if sym in marks or f.ts >= end:
-                continue
+        for sym in positions_at(a, end, splits):
             if current:
-                marks[sym] = e.mark(sym)
+                marks[sym] = e.price(sym)
             elif parse_option(sym) is None and e.is_stock(sym):
                 marks[sym] = price_at(price_history(e, sym), end - 1)
         marks = {s: p for s, p in marks.items() if p is not None}
-        live = e.summary(aid)["equity"] if current else None
-        return monthly_statement(a, year, mon, now, live, marks, source=price_source(e.feed))
+        summ = e.summary(aid) if current else None
+        live = summ["equity"] if current and not summ["prices_unavailable"] else None
+        return monthly_statement(a, year, mon, now, live, marks, splits, source=price_source(e.feed))
 
     @app.get("/api/accounts/{aid}/statements")
     def statements(aid: str):

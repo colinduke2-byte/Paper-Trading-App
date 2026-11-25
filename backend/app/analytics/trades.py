@@ -144,8 +144,11 @@ def exposure(rows: list, sectors: dict, equity: Decimal) -> dict:
     """
     def pct(v):
         return ratio(v / equity) if equity else None
-    by_symbol, by_sector = [], {}
+    by_symbol, by_sector, unpriced = [], {}, []
     for r in rows:
+        if r.get("market_value") is None:  # no price yet: left out rather than counted at zero
+            unpriced.append(r["symbol"])
+            continue
         mv = D(r["market_value"])
         c = parse_option(r["symbol"])
         under = c.underlying if c else r["symbol"]
@@ -162,7 +165,7 @@ def exposure(rows: list, sectors: dict, equity: Decimal) -> dict:
     long = sum((x["market_value"] for x in by_symbol if x["market_value"] > 0), ZERO)
     short = sum((x["market_value"] for x in by_symbol if x["market_value"] < 0), ZERO)
     by_symbol.sort(key=lambda x: -abs(x["market_value"]))
-    return {"by_symbol": by_symbol, "by_sector": sectors_out,
+    return {"by_symbol": by_symbol, "by_sector": sectors_out, "unpriced": unpriced,
             "totals": {"long": long, "short": short, "net": long + short, "gross": long - short,
                        "equity": equity, "gross_leverage": pct(long - short), "net_leverage": pct(long + short)},
             "note": "Options count at market value under their underlying's sector; exposure is not delta-adjusted."}

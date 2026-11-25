@@ -32,8 +32,11 @@ SPEC = {
                         "Accrued daily on short stock market value (actual/360), posted monthly.", ("0", "200")),
     "margin_call_liquidation": ("bool", True, "Liquidate on unmet margin calls",
                                 "Sell positions with market orders when a margin call is not met in time.", None),
-    "margin_call_grace_hours": ("number", "48", "Margin call grace period (hours)",
-                                "Time to meet a margin call before positions are liquidated.", ("0", "720")),
+    "margin_call_grace_hours": ("number", "13", "Margin call grace period (hours of open market)",
+                                "Time to meet a margin call before positions are liquidated. Only time while the "
+                                "market is open and PaperDesk is running counts: 13 hours is two regular trading "
+                                "days in US session mode. Time while the app is closed or a replay runs does not "
+                                "count.", ("0", "720")),
 }
 
 

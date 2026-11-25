@@ -166,9 +166,14 @@ accounts and HTTPS.
 
 ```bash
 cd backend
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -c constraints.txt -e ".[dev]"
 .venv/bin/pytest
 ```
+
+`backend/constraints.txt` pins the exact versions the tests passed with; run.sh, run.bat, the Docker image
+and CI install with it, while `pyproject.toml` keeps the version ranges. To move to newer versions, follow
+the steps at the top of `tools/backend_constraints.py`. `THIRD_PARTY_NOTICES.md` lists every dependency with
+its licence; regenerate it with `python tools/third_party_notices.py` after a dependency change.
 
 ```bash
 cd frontend
@@ -177,7 +182,11 @@ npm run dev
 ```
 
 `npm run dev` serves the UI on port 5173 and proxies to the backend on port 8000.
-`npm run build` writes `frontend/dist`, which the backend serves.
+`npm run build` writes `frontend/dist`, which the backend serves, with `dist/build.json` naming a hash of
+the sources it was built from. If `frontend/src` is newer than the bundle, the server logs a warning and the UI
+shows a notice. On `main`, the "Rebuild bundled UI" workflow rebuilds and commits `frontend/dist` after every
+push, and CI fails if the committed bundle does not match the sources; pull requests get the built bundle as
+an artifact instead.
 
 ## Tests and CI
 
