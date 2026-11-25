@@ -369,17 +369,23 @@ def test_alerts_never_ask_the_data_provider_while_holding_the_lock():
     ex = Exchange(feed, clock, session_mode="us")
     aid = ex.create_account("Margin", "margin").id
     snaps = json.loads(raw("alpaca/stock_snapshots.json"), parse_float=D)
+    for snap in snaps.values():  # the saved quotes, as if they had just arrived
+        snap["latestQuote"]["t"] = snap["latestTrade"]["t"] = iso(t0 - 1)
+        snap["dailyBar"]["t"], snap["prevDailyBar"]["t"] = "2024-04-22T04:00:00Z", "2024-04-19T04:00:00Z"
     feed.apply_snapshots(snaps)
     ex.tick()
     app = create_app(ex, run_loop=False)
     ctx = app.state.ctx
     c = TestClient(app, raise_server_exceptions=False)
     assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "AAPL", "side": "buy", "qty": 1}).status_code == 200
+    assert ex.accounts[aid].position("AAPL") == 1  # held, so the calendar alert has something to look up
 
     def tick(to=None):  # what the server's turn does: the whole tick under the lock; AAPL's quote changes
         if to is not None:
             wall.t = to
             clock.set(to)
+        for snap in snaps.values():
+            snap["latestQuote"]["t"] = snap["latestTrade"]["t"] = iso(wall.t - 1)
         feed.apply_snapshots(snaps)
         with ctx.lock.hold(1, urgent=True, label="tick"):
             ex.tick()

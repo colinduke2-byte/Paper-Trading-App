@@ -551,6 +551,8 @@ class Alerting:
         except Exception as e:  # a provider error must not stop the tick
             al["last_value"] = f"calendar unavailable: {e}"
             return False
+        if str(al.get("last_value") or "").startswith("calendar unavailable"):
+            al["last_value"] = None  # it is available again
         due = []  # (date, symbol, id, kind, text)
         for act in acts:
             if act.symbol not in held or act.kind not in p["events"]:

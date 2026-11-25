@@ -457,7 +457,7 @@ def test_calendar_alert_is_tried_again_when_the_feed_cannot_list_actions_yet():
     state["pending"] = False
     for _ in range(6):
         move(ex, feed, clock, "ABC", "100")
-    assert al["fire_count"] == 1 and not ex.alerting._cal_waiting
+    assert al["fire_count"] == 1 and not ex.alerting._cal_waiting and al["last_value"] is None
     [n] = [n for n in notes(ex, a, "alert") if n["alert_id"] == al["id"]]
     assert n["title"] == "Upcoming dividend: ABC"
 
