@@ -21,6 +21,7 @@ from ..marketdata.synthetic import SyntheticFeed
 from ..options import chain as optchain
 from ..options.symbology import describe, parse as parse_option
 from ..core.errors import NotFound
+from . import ui_build
 
 
 def plain(obj: Any) -> Any:
@@ -125,6 +126,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     clients: dict[WebSocket, dict] = {}
     ctx = AppContext(ex or default_exchange(), clients)
     del ex  # every route looks the active exchange up through ctx.ex
+    dist = os.environ.get("PAPERDESK_UI", os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "dist"))
+    ui_stale = os.path.isdir(dist) and ui_build.check(dist)  # silent without the sources (ZIP, Docker)
 
     def status() -> dict:
         ex = ctx.ex
@@ -133,7 +136,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         return {"time": now, "session": ex.session(now), "session_mode": ex.session_mode,
                 "feed": ex.feed.name, "simulated_data": ex.feed.simulated, "delay_seconds": ex.feed.delay_seconds,
                 "paper": True, **plain(ex.feed.status_info()), "price_note": price_source(ex.feed)["price_note"],
-                "mode": ctx.mode, "replay": rp.status() if rp is not None else None,
+                "mode": ctx.mode, "replay": rp.status() if rp is not None else None, "ui_stale": ui_stale,
                 # Alpaca was configured but failed at start-up, so the live exchange runs on simulated data
                 "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None)}
 
@@ -263,7 +266,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         ex = ctx.ex
         symbol = _stock(symbol)
         info, q = ex.feed.symbols()[symbol], ex.feed.quote(symbol)
-        if q is None:
+        if q is None or q.last <= 0:
             raise NotFound(f"no quote has arrived for {symbol} yet")
         last = float(q.last)
         daily = ex.feed.bars(symbol, "1d", 252)
@@ -300,7 +303,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         out = []
         for s, info in ex.feed.symbols().items():
             r = quote_row(ex, s)
-            if not r:
+            if not r or r["last"] <= 0:  # no trade price yet
                 continue
             eps, div = info.get("eps", 0), info.get("dividend", 0)
             pe = r["last"] / eps if eps and eps > 0 else None
@@ -348,7 +351,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         if provided is not None:
             return plain(provided)
         q = ex.feed.quote(symbol)
-        if q is None:
+        if q is None or q.last <= 0:
             raise NotFound(f"no quote has arrived for {symbol} yet")
         return {"underlying": symbol, "expiry": expiry, "spot": float(q.last), "simulated": True,
                 "source": "model", "source_label": "model prices, not market data",
@@ -412,19 +415,6 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         txns = ex.account(aid).ledger.transactions[-limit:]
         return [{"id": t.id, "ts": t.ts, "kind": t.kind, "memo": t.memo,
                  "postings": [[a, float(v)] for a, v in t.postings]} for t in txns][::-1]
-
-    @app.get("/api/accounts/{aid}/closed")
-    def closed(aid: str):
-        ex = ctx.ex
-        return [dict(c, description=describe(c["symbol"]), qty=float(c["qty"]), open_price=float(c["open_price"]),
-                     close_price=float(c["close_price"]), pnl=float(c["pnl"])) for c in ex.account(aid).closed][::-1]
-
-    @app.get("/api/accounts/{aid}/performance")
-    def performance(aid: str):
-        ex = ctx.ex
-        perf = ex.performance(aid)
-        perf["equity_curve"] = [[t, float(e)] for t, e in perf["equity_curve"]]
-        return plain(perf)
 
     @app.post("/api/accounts/{aid}/orders/preview")
     def preview(aid: str, body: dict = Body(...)):
@@ -520,7 +510,6 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         importlib.import_module(f"app.api.{mod}").register(app, ctx)
 
     # ---- static UI -----------------------------------------------------------------
-    dist = os.environ.get("PAPERDESK_UI", os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "dist"))
     if os.path.isdir(dist):
         app.mount("/assets", StaticFiles(directory=os.path.join(dist, "assets")), name="assets")
 

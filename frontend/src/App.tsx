@@ -11,7 +11,7 @@ import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { HelpDialog } from "./Help";
-import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
+import { api, dateTime, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
 import { useSignOutAction } from "./Login";
 import { bellLabel, deliver, NotificationBell, NotificationPanel, useNotifications } from "./Notifications";
 import { ALERT_AT_PRICE, AlertBuilder, AlertSeed } from "./AlertsTab";
@@ -34,7 +34,7 @@ export default function App() {
   const [seed, setSeed] = useState<TicketSeed>({ symbol });
   const [refreshKey, setRefreshKey] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [dialog, setDialog] = useState<null | "new" | "reset">(null);
+  const [dialog, setDialog] = useState<null | "new" | "reset" | "delete">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -196,6 +196,7 @@ export default function App() {
       : { label: "Notifications", element: <NotificationBell unread={notes.unread} onClick={() => setNotesOpen(true)} /> }] : []),
     { label: "New account", onClick: () => setDialog("new") },
     { label: "Reset", onClick: () => setDialog("reset") },
+    ...(accounts.length > 1 && accountId ? [{ label: "Delete account", title: "Delete this paper account and its history", onClick: () => setDialog("delete") }] : []),
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
     { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
@@ -214,9 +215,14 @@ export default function App() {
     </select>
   );
   const feedNotice = <FeedNotice status={status} />;
-  const marginNotice = summary?.margin_call && (
-    <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
-  );
+  const unpriced: string[] = summary?.prices_unavailable ?? [];
+  const marginNotice = (summary?.margin_call || status?.ui_stale || unpriced.length > 0) ? (
+    <>
+      {summary?.margin_call && <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.{summary.liquidation_at ? ` Positions are closed after the grace period, counting only time while the market is open and PaperDesk is running (at about ${dateTime(summary.liquidation_at)} if it keeps running).` : ""}</div>}
+      {unpriced.length > 0 && <div className="notice wide" role="status">Waiting for prices for {unpriced.join(", ")}: until they arrive the account value leaves those positions out, margin checks are paused and orders that add risk are not accepted.</div>}
+      {status?.ui_stale && <div className="notice wide" role="status">This page was built from older sources than the ones in frontend/src. Run "npm run build" in the frontend folder and reload to see the current version.</div>}
+    </>
+  ) : null;
   const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
   const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
   const mainTabs = (
@@ -267,7 +273,7 @@ export default function App() {
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}
       {dialog && (
-        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
+        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} next={accounts.find((a) => a.id !== accountId)} onClose={() => setDialog(null)}
           onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />
       )}
     </>
@@ -327,7 +333,8 @@ export default function App() {
   );
 }
 
-function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "reset"; account: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+function AccountDialog({ mode, account, next, onClose, onDone }: { mode: "new" | "reset" | "delete"; account: any; next?: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+  if (mode === "delete") return <DeleteAccountDialog account={account} next={next} onClose={onClose} onDone={onDone} />;
   const [name, setName] = useState("");
   const [type, setType] = useState("margin");
   const [cash, setCash] = useState(mode === "reset" && account ? String(account.starting_cash) : "100000");
@@ -346,7 +353,7 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
   return (
     <Dialog onClose={onClose} labelledBy="account-dialog-title" destructive={mode === "reset"}>
         <h3 id="account-dialog-title">{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
-        {mode === "reset" && <p className="muted">This erases the account's positions, orders and history and starts again with the cash below. It cannot be undone.</p>}
+        {mode === "reset" && <p className="muted">This erases the account's positions, orders, history and trade journal and starts again with the cash below. The account's rule settings and tax-lot method are kept. It cannot be undone.</p>}
         {mode === "new" && (
           <>
             <label>Name<input value={name} placeholder="Paper account" onChange={(e) => setName(e.target.value)} autoFocus /></label>
@@ -363,6 +370,32 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
         <div className="row">
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" onClick={submit}>{mode === "new" ? "Create account" : "Erase and reset"}</button>
+        </div>
+    </Dialog>
+  );
+}
+
+function DeleteAccountDialog({ account, next, onClose, onDone }: { account: any; next?: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+  const [typed, setTyped] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const name = account?.name ?? "";
+  const confirm = async () => {
+    setBusy(true); setError("");
+    try {
+      await api(`/accounts/${account.id}`, { method: "DELETE" });
+      onDone(next?.id ?? "", `Account "${name}" deleted`);
+    } catch (e: any) { setError(e.message); setBusy(false); }
+  };
+  return (
+    <Dialog onClose={onClose} labelledBy="delete-title" destructive>
+        <h3 id="delete-title">Delete "{name}"</h3>
+        <p className="muted">This permanently deletes the paper account with its positions, open orders, fills, statements and trade journal. It cannot be undone. Type the account name to confirm.</p>
+        <label>Account name<input value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus aria-label="Type the account name to confirm" /></label>
+        {error && <div className="notice bad" role="alert">{error}</div>}
+        <div className="row">
+          <button className="ghost" onClick={onClose}>Cancel</button>
+          <button className="primary danger" disabled={busy || typed.trim() !== name.trim()} onClick={confirm}>Delete account</button>
         </div>
     </Dialog>
   );

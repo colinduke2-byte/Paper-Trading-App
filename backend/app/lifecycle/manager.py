@@ -36,8 +36,12 @@ Conventions (documented choices):
   orders, and bracket children that only close, are never blocked.
 - A margin call starts when equity falls below the maintenance requirement. It is
   cleared only when equity is back above maintenance by 2%, or has stayed at or above
-  maintenance for 5 minutes; brief recoveries keep the original start time. If it is
-  still open after the grace period, open orders are canceled and positions are closed
+  maintenance for 5 minutes; brief recoveries keep the original start time. The grace
+  period counts only time while the account's market is open (the regular session in
+  "us" mode; always in "always" mode) and the simulator is running: a gap of more than
+  RUNNING_GAP seconds between two ticks (the app was closed, or the live exchange was
+  paused for a replay) does not count, and the first tick after one says how much grace
+  is left. If it is still open after the grace period, open orders are canceled and positions are closed
   with market orders, largest maintenance requirement first, during the regular session
   only, never leaving a short option uncovered that was covered before.
 - No margin check runs while any held symbol (or the underlying of a held option) has
@@ -73,6 +77,7 @@ ACCRUAL_PLACES = Decimal("0.0000000001")
 FOUR = Decimal("0.0001")
 CLEAR_BUFFER = Decimal("0.02")  # a call clears at once when equity is 2% above maintenance
 CLEAR_SECONDS = 300  # ... or after equity has stayed at or above maintenance this long
+RUNNING_GAP = 120  # seconds; a longer gap between ticks means the simulator was not running
 LOG_LIMIT = 200
 # "closed at expiry" (orders branch): a cash account's option closed for intrinsic value at expiry settles like a sale.
 SETTLING_KINDS = ("trade", "exercise", "assignment", "split_settlement", "closed at expiry")
@@ -148,13 +153,16 @@ class LifecycleManager:
         self._event(account, kind, message)
 
     def _missing_prices(self, pos: dict, marks: dict) -> list:
-        return sorted(s for s, v in marks.items() if v <= 0)
+        """Symbols that cannot be valued: a stock (or option underlying) without a positive price, or an
+        option without any quote. A quoted option may be worth 0.00 (far out of the money)."""
+        return sorted(s for s, v in marks.items()
+                      if (v <= 0 and parse(s) is None) or (parse(s) is not None and self.ex.quote(s) is None))
 
     def _state(self, account):
         """Positions, marks, equity (with dividends receivable or payable) and maintenance requirement."""
         pos = account.positions()
         marks = self.ex._marks(pos)
-        eq = margin.equity(account.cash, pos, marks) + self.pending_dividends(account)
+        eq = margin.equity(account.cash, pos, marks) + self.pending_dividends(account) - self.accrued_charges(account)
         maint = margin.requirement(pos, marks, maintenance=True)
         return pos, marks, eq, maint
 
@@ -214,24 +222,49 @@ class LifecycleManager:
         if s["margin_interest"]:
             debit = max(-a.cash, ZERO)
             if debit:
-                a.life.accrued_interest += (debit * cfg.number(s, "margin_interest_rate") / 100 / DAY_COUNT
-                                            ).quantize(ACCRUAL_PLACES)
+                rate = cfg.number(s, "margin_interest_rate")
+                amount = (debit * rate / 100 / DAY_COUNT).quantize(ACCRUAL_PLACES)
+                a.life.accrued_interest += amount
+                self._note_rate(a, "interest", rate, amount)
         if s["borrow_fee"]:
             shorts = {sym: q for sym, q in a.positions().items() if q < 0 and not parse(sym)}
             # A symbol with no price accrues nothing that day (it cannot be valued).
             mv = sum((-q * self.ex.mark(sym) for sym, q in shorts.items()), ZERO)
             if mv > 0:
-                a.life.accrued_borrow += (mv * cfg.number(s, "borrow_fee_rate") / 100 / DAY_COUNT
-                                          ).quantize(ACCRUAL_PLACES)
+                rate = cfg.number(s, "borrow_fee_rate")
+                amount = (mv * rate / 100 / DAY_COUNT).quantize(ACCRUAL_PLACES)
+                a.life.accrued_borrow += amount
+                self._note_rate(a, "borrow", rate, amount)
+
+    @staticmethod
+    def _note_rate(a, kind: str, rate: Decimal, amount: Decimal) -> None:
+        """Remember the rate each day was charged at, for the posting memo (rates can change mid-month)."""
+        key = f"{rate.normalize():f}"
+        rates = a.life.accrual_rates.setdefault(kind, {})
+        amt, days = rates.get(key, ["0", 0])
+        rates[key] = [str(D(amt) + amount), days + 1]
+
+    @staticmethod
+    def accrued_charges(a) -> Decimal:
+        """Margin interest and borrow fees accrued but not yet posted, rounded to the cent (owed, so they
+        reduce account value until they are posted at the start of the next month)."""
+        return max(cents(a.life.accrued_interest), ZERO) + max(cents(a.life.accrued_borrow), ZERO)
 
     def _post_accruals(self, a, ts: float, last_day: date) -> None:
         month = last_day.strftime("%B %Y")
         for attr, acct, label, key in (("accrued_interest", INTEREST_EXPENSE, "Margin interest", "margin_interest_rate"),
                                        ("accrued_borrow", BORROW_EXPENSE, "Short borrow fee", "borrow_fee_rate")):
             amount = cents(getattr(a.life, attr))
+            kind = attr.replace("accrued_", "")
+            used = a.life.accrual_rates.pop(kind, None) or {}
             if amount > 0:
-                rate = cfg.number(a.settings, key).normalize()
-                a.ledger.post(ts, attr.replace("accrued_", ""), f"{label} for {month} ({rate:f}% a year, actual/360)",
+                if used:
+                    parts = [f"{r}% a year for {d} day{'s' if d != 1 else ''}"
+                             for r, (_, d) in sorted(used.items(), key=lambda x: D(x[0]))]
+                    rates = ", ".join(parts)
+                else:  # accrued before the rates were recorded
+                    rates = f"{cfg.number(a.settings, key).normalize():f}% a year"
+                a.ledger.post(ts, kind, f"{label} for {month}: {_fmt(amount)} ({rates}; actual/360)",
                               [(acct, amount), (CASH, -amount)])
                 setattr(a.life, attr, getattr(a.life, attr) - amount)
                 self._event(a, label.lower(), f"{label} of {_fmt(amount)} charged for {month}")
@@ -461,8 +494,12 @@ class LifecycleManager:
             out["option_buying_power"] = max(out["option_buying_power"] - unsettled, ZERO)
         pending = self.pending_dividends(a)
         out["pending_dividends"] = pending
-        if pending:  # the price has dropped by the dividend; the cash follows on the pay date
-            out["equity"] = out["equity"] + pending
+        # Account value counts dividends receivable or payable (the price has dropped by the dividend; the
+        # cash follows on the pay date) and interest and borrow fees accrued but not yet posted (owed).
+        charges = self.accrued_charges(a)
+        out["accrued_charges"] = charges
+        if pending or charges:
+            out["equity"] = out["equity"] + pending - charges
             out["excess_liquidity"] = cents(out["equity"] - out["maintenance_requirement"])
             out["total_pnl"] = cents(out["equity"] - a.starting_cash)
             out["day_pnl"] = cents(out["equity"] - a.day_start_equity)
@@ -480,8 +517,9 @@ class LifecycleManager:
         out["accrued_borrow_fee"] = max(cents(a.life.accrued_borrow), ZERO) + ZERO
         since = a.life.margin_call_since
         out["margin_call_since"] = since
-        out["liquidation_at"] = (since + float(cfg.number(s, "margin_call_grace_hours")) * 3600
-                                 if since is not None and s["margin_call_liquidation"] else None)
+        out["liquidation_at"] = self.liquidation_at(a, self.ex.now())
+        out["grace_hours_left"] = (max(self._grace_seconds(a) - a.life.margin_call_counted, 0.0) / 3600
+                                   if since is not None and s["margin_call_liquidation"] else None)
 
     # ---- margin calls ----------------------------------------------------------------------
     def after_step(self, now: float) -> None:
@@ -490,6 +528,8 @@ class LifecycleManager:
                 continue
             pos, marks, eq, maint = self._state(a)
             life = a.life
+            if life.margin_call_since is not None:
+                self._count_grace(a, now)
             missing = self._missing_prices(pos, marks)
             if missing:  # cannot value the account: no call is started, cleared or enforced
                 if life.prices_missing != missing:
@@ -501,14 +541,16 @@ class LifecycleManager:
                 life.margin_call_ok_since = None
                 if life.margin_call_since is None:
                     life.margin_call_since, life.margin_call_deficit = now, maint - eq
+                    life.margin_call_counted, life.margin_call_last = 0.0, now
                     grace = cfg.number(a.settings, "margin_call_grace_hours").normalize()
-                    tail = (f" Positions will be liquidated if it is not met within {grace:f} hours."
+                    tail = (f" Positions will be liquidated if it is not met within {grace:f} hours of open "
+                            f"market time while PaperDesk is running."
                             if a.settings["margin_call_liquidation"] else "")
                     self._log(a, now, "margin_call",
                               f"Margin call: equity {_fmt(eq)} is below the {_fmt(maint)} maintenance requirement "
                               f"(deficit {_fmt(maint - eq)}).{tail}")
                 elif (a.settings["margin_call_liquidation"] and self.ex.session(now) == "regular"
-                      and now >= life.margin_call_since + float(cfg.number(a.settings, "margin_call_grace_hours")) * 3600):
+                      and life.margin_call_counted >= self._grace_seconds(a)):
                     self.liquidate(a, now)
             elif life.margin_call_since is not None:
                 if not pos or eq >= maint * (1 + CLEAR_BUFFER):
@@ -518,7 +560,55 @@ class LifecycleManager:
                 elif now - life.margin_call_ok_since >= CLEAR_SECONDS:
                     self._clear_call(a, now, eq, maint)
 
+    @staticmethod
+    def _grace_seconds(a) -> float:
+        return float(cfg.number(a.settings, "margin_call_grace_hours")) * 3600
+
+    def _count_grace(self, a, now: float) -> None:
+        """Add the time since the last tick to the grace period used, if the market was open and the
+        simulator was running; after a gap, say how much grace is left instead."""
+        life = a.life
+        last = life.margin_call_last if life.margin_call_last is not None else life.margin_call_since
+        gap = now - last
+        if gap > RUNNING_GAP:
+            left = max(self._grace_seconds(a) - life.margin_call_counted, 0.0)
+            span = lambda s: (f"{s / 3600:.1f} hours" if s >= 3600
+                              else f"{round(s / 60)} minute{'' if round(s / 60) == 1 else 's'}")
+            if a.settings["margin_call_liquidation"]:
+                self._log(a, now, "margin_call",
+                          f"Margin call still open after a pause of {span(gap)}, which does not count toward "
+                          f"the grace period. Open market time left before positions are liquidated: "
+                          f"{span(left)}.")
+        elif gap > 0 and self.ex.session(now) == "regular":
+            life.margin_call_counted += gap
+        life.margin_call_last = max(now, last)
+
+    def liquidation_at(self, a, now: float) -> Optional[float]:
+        """When the grace period runs out if the simulator keeps running: the remaining grace counted in
+        open market time from now (regular sessions in "us" mode)."""
+        life = a.life
+        if life.margin_call_since is None or not a.settings["margin_call_liquidation"]:
+            return None
+        left = max(self._grace_seconds(a) - life.margin_call_counted, 0.0)
+        if self.ex.session_mode == "always":
+            return now + left
+        from datetime import datetime
+        from ..core import calendar as cal
+        t, day = now, cal.ny_date(now)
+        for _ in range(400):
+            if cal.is_trading_day(day):
+                open_ts = datetime.combine(day, cal.OPEN, tzinfo=cal.NY).timestamp()
+                close_ts = cal.close_ts(day)
+                start = max(t, open_ts)
+                if start < close_ts:
+                    if close_ts - start >= left:
+                        return start + left
+                    left -= close_ts - start
+            day += timedelta(days=1)
+        return None
+
     def _clear_call(self, a, now, eq, maint) -> None:
+        a.life.margin_call_counted, a.life.margin_call_last = 0.0, None
         a.life.margin_call_since, a.life.margin_call_deficit = None, ZERO
         a.life.margin_call_ok_since, a.life.liquidation_paused = None, False
         self._log(a, now, "margin_call", f"Margin call met: equity {_fmt(eq)}, maintenance requirement {_fmt(maint)}.")

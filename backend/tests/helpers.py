@@ -8,7 +8,7 @@ from app.marketdata.feed import SimFeed
 
 D = Decimal
 _ids = count(1)
-T0 = 1795500000.0  # 2026-11-23 11:20 UTC
+T0 = 1795500000.0  # 2026-11-24 06:00 UTC (01:00 in New York, a Tuesday)
 
 
 def q(bid, ask, last=None, bid_size=1000, ask_size=1000, last_size=100, trade=True, symbol="ABC"):

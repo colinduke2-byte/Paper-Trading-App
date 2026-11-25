@@ -328,6 +328,9 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
           <span className="muted ct-hint">{tool === "select" ? "Tap a drawing to select it, drag to move it." : POINTS_HINT[tool]}</span>
         </div>
       )}
+      <div className="ct-credit">
+        <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Charting by TradingView</a>
+      </div>
       {error && <div className="notice bad">Could not load chart data: {error}</div>}
       {compareError && <div className="notice bad">{compareError}</div>}
       <div className="ct-stage" data-chart-type={settings.type} data-log={settings.log ? "1" : "0"} data-loaded={loadTick > 0 ? "1" : "0"}
