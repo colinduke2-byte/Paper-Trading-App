@@ -177,6 +177,110 @@ def test_price_crossing_its_moving_average_fires_on_the_bar_close():
     assert n["text"].startswith("ABC closes above its 5-bar SMA (1-minute bars, crossing): now ")
 
 
+class LateHistoryFeed(SimFeed):
+    """A feed that, like a live one, has no history in memory until its loader has fetched it.
+    `deliver()` is the loader: it copies the bars asked for, as a provider request made now would."""
+
+    def __init__(self):
+        super().__init__()
+        self.loads, self.wanted, self.ready, self.asked_directly = 0, set(), {}, 0
+
+    def bars(self, symbol, tf, limit=500):
+        self.asked_directly += 1  # the alert engine must never do this
+        return super().bars(symbol, tf, limit)
+
+    def history_mark(self):
+        return self.loads
+
+    def bars_ready(self, symbol, tf, limit=500, after=None):
+        hit = self.ready.get((symbol, tf))
+        if hit and (after is None or hit[0] > after):
+            return hit[1][-limit:]
+        self.wanted.add((symbol, tf))
+        return None
+
+    def deliver(self):
+        for key in sorted(self.wanted):
+            self.loads += 1
+            self.ready[key] = (self.loads, SimFeed.bars(self, *key, 5000))
+        self.wanted = set()
+
+
+def late_setup():
+    clock, feed = SimClock(T0), LateHistoryFeed()
+    ex = Exchange(feed, clock)
+    feed.set_quote("ABC", D("99.99"), D("100"), D("100"))
+    ex.tick()
+    return ex, feed, clock, ex.create_account("Margin", "margin").id
+
+
+def test_an_indicator_alert_waits_for_history_and_is_evaluated_once_it_arrives():
+    ex, feed, clock, a = late_setup()
+    bars_minute(ex, feed, clock, [100] * 6)
+    al = ex.alerting.create({"kind": "indicator", "symbol": "ABC", "indicator": "sma", "period": 5, "tf": "1m",
+                             "op": "crosses_above"})
+    s = ex.alerting._series[("ABC", "1m", "sma", 5)]
+    assert not s.seeded and al["last_value"] == "waiting for price history"
+    bars_minute(ex, feed, clock, [99])  # no history yet: nothing is evaluated, nothing is fetched
+    assert not s.seeded and al["last_value"] == "waiting for price history" and ex.alerting.evaluations == 0
+    feed.deliver()
+    move(ex, feed, clock, "ABC", "99")  # seeded from memory on the next tick
+    assert s.seeded and s.calc.value == pytest.approx(100)
+    bars_minute(ex, feed, clock, [99])  # the first 99 bar closed, but nothing read since then is in memory
+    assert s.waiting and s.close == pytest.approx(100)
+    move(ex, feed, clock, "ABC", "99")
+    assert s.waiting and s.close == pytest.approx(100)
+    feed.deliver()
+    move(ex, feed, clock, "ABC", "99")  # read on the tick after the load
+    assert not s.waiting and s.close == pytest.approx(99) and al["status"] == "active"
+    for price in (102, 102):  # the second 99 bar closes, then the first 102 bar: above the average
+        assert al["status"] == "active"
+        bars_minute(ex, feed, clock, [price])
+        feed.deliver()
+        move(ex, feed, clock, "ABC", price)
+    assert al["status"] == "triggered" and al["fire_count"] == 1
+    assert feed.asked_directly == 0
+
+
+def test_average_volume_alert_waits_for_history():
+    ex, feed, clock, a = late_setup()
+    day = T0 // 86400 * 86400
+    feed.store.daily["ABC"] = [[day - 86400 * i, 100, 100, 100, 100, 1000.0] for i in range(30, 0, -1)]
+    avg = ex.alerting.create({"kind": "volume", "symbol": "ABC", "value": "2", "mode": "average"})
+    for _ in range(25):
+        move(ex, feed, clock, "ABC", "100")  # 2600 shares: over twice the average, but the average is unknown
+    assert avg["status"] == "active" and avg["last_value"] == "no volume history yet"
+    feed.deliver()
+    move(ex, feed, clock, "ABC", "100")
+    assert avg["status"] == "triggered" and feed.asked_directly == 0
+
+
+@settings(max_examples=40, deadline=None)
+@given(st.lists(st.tuples(st.integers(90, 110), st.booleans()), min_size=1, max_size=40))
+def test_late_history_loses_no_bar_and_counts_none_twice(steps):
+    """Whenever the loads arrive, once the history is in memory the series holds exactly what a feed with
+    its bars in memory gives: every closed bar pushed once, in order (a long gap is rebuilt from history)."""
+    late, lfeed, lclock, _ = late_setup()
+    ex, feed, clock, _ = setup()
+    req = {"kind": "indicator", "symbol": "ABC", "indicator": "sma", "period": 3, "tf": "1m", "op": "crosses_above",
+           "repeat": True}
+    late.alerting.create(req)
+    ex.alerting.create(req)
+    for price, loaded in steps:
+        bars_minute(ex, feed, clock, [price])
+        bars_minute(late, lfeed, lclock, [price])
+        if loaded:
+            lfeed.deliver()
+    for _ in range(2):  # at most a seed and one catch-up remain
+        move(late, lfeed, lclock, "ABC", steps[-1][0])
+        lfeed.deliver()
+    move(late, lfeed, lclock, "ABC", steps[-1][0])
+    got, want = late.alerting._series[("ABC", "1m", "sma", 3)], ex.alerting._series[("ABC", "1m", "sma", 3)]
+    assert got.seeded and not got.waiting and got.last_time == want.last_time
+    assert got.calc.value == (pytest.approx(want.calc.value) if want.calc.value is not None else None)
+    assert lfeed.asked_directly == 0
+
+
 def test_rsi_level_and_macd_cross():
     ex, feed, clock, a = setup()
     rsi = ex.alerting.create({"kind": "indicator", "symbol": "ABC", "indicator": "rsi", "period": 5, "tf": "1m",
@@ -321,6 +425,41 @@ def test_calendar_alert_for_held_symbols():
     [n] = [n for n in notes(ex, a, "alert") if n["alert_id"] == al["id"]]
     assert n["title"] == "Upcoming dividend: ABC" and "the ex-date is in 2 days (2026-11-28)" in n["text"]
     assert al["fire_count"] == 1 and al["status"] == "active"
+
+
+def test_calendar_alert_is_tried_again_when_the_feed_cannot_list_actions_yet():
+    """A live feed loads corporate actions in the background and refuses until it has them. The alert
+    must not wait for the next day."""
+    ex, feed, clock, a = setup()
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
+    feed.schedule(dividend("ABC", EX + timedelta(days=1), EX + timedelta(days=5), "0.40"))
+    al = ex.alerting.create({"kind": "calendar", "account_id": a, "days_before": 2, "repeat": True})
+    real, state = feed.corporate_actions, {"pending": True, "asked": 0}
+
+    def actions(start, end):
+        if end - start != timedelta(days=2):  # the lifecycle's own questions
+            return real(start, end)
+        state["asked"] += 1
+        if state["pending"]:
+            raise RuntimeError("corporate actions are still loading")
+        return real(start, end)
+    feed.corporate_actions = actions
+    clock.advance(86400)  # 2026-11-24
+    ex.tick()
+    assert al["last_value"] == "calendar unavailable: corporate actions are still loading" and al["fire_count"] == 0
+    asked = state["asked"]
+    for _ in range(4):
+        move(ex, feed, clock, "ABC", "100")
+    assert asked == 1 and state["asked"] == 1  # not asked again on every tick
+    for _ in range(4):
+        move(ex, feed, clock, "ABC", "100")
+    assert state["asked"] == 2 and al["fire_count"] == 0  # but again a few seconds later
+    state["pending"] = False
+    for _ in range(6):
+        move(ex, feed, clock, "ABC", "100")
+    assert al["fire_count"] == 1 and not ex.alerting._cal_waiting
+    [n] = [n for n in notes(ex, a, "alert") if n["alert_id"] == al["id"]]
+    assert n["title"] == "Upcoming dividend: ABC"
 
 
 # ---- persistence and migration ------------------------------------------------------------------------

@@ -144,6 +144,8 @@ UNLOCKED_READS = {
     "/api/accounts/{aid}/statements/{month}/html",  # fetch price history, then read the account under ctx.locked()
     "/api/replay/sessions",  # reads session files
     "/api/auth/state", "/api/research/sources", "/api/research/news/{symbol}", "/api/research/calendar/{symbol}",
+    "/api/research/news", "/api/research/economic-calendar", "/api/research/earnings-calendar",
+    "/api/research/statements/{symbol}",  # simulated research: exempt by path like the other research routes
     "/api/research/corporate-actions/{symbol}", "/api/research/fundamentals/{symbol}",
     "/api/chartstate", "/api/chartstate/drawings/{sym}",  # chart settings: their own file and lock, no exchange state
 }
@@ -329,6 +331,105 @@ def test_no_route_asks_the_data_provider_while_holding_the_lock():
         assert "AAPL" in ctx.live_interest() and "MSFT" not in ctx.live_interest()
         assert time.monotonic() - t0 < 3
     assert "MSFT" in ctx.live_interest()
+
+
+def test_alerts_never_ask_the_data_provider_while_holding_the_lock():
+    """Indicator and volume alerts need price history. With a live feed that is a provider request, so the
+    alert engine may only read what the feed already has in memory: creating an alert and evaluating it in
+    the tick make no request at all. The feed's history loader fetches outside the lock, and the alert is
+    seeded and evaluated on a later tick."""
+    from datetime import datetime, timezone
+    from app.marketdata.alpaca import AlpacaFeed
+    from test_alpaca import FakeTransport, Wall, raw, routes, ts
+
+    under_lock, closes = [], {}
+
+    class Watching(FakeTransport):
+        def get(self, url, headers, timeout):
+            if held():
+                under_lock.append(url.split("?")[0])
+            return super().get(url, headers, timeout)
+
+    def iso(t):
+        return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def bars(req):  # closed bars up to the feed's wall clock: flat at 100 unless `closes` says otherwise
+        step = 86400 if req["params"]["timeframe"] in ("1Day", "1Week") else 60
+        last = wall.t // step * step - step
+        rows = [{"t": iso(last - step * i), "o": 100, "h": 100, "l": 100, "c": closes.get(last - step * i, 100),
+                 "v": 1000} for i in range(int(req["params"]["limit"]))]
+        return 200, json.dumps({"bars": {"AAPL": rows}, "next_page_token": None})
+
+    t0 = ts("2024-04-22T15:00:05Z")
+    wall = Wall(t0)
+    tr = Watching(routes(**{"/v2/stocks/bars": bars}))
+    feed = AlpacaFeed("k", "s", transport=tr, sleep=lambda s: None, wall_clock=wall)
+    feed.load_assets()
+    clock = SimClock(t0)
+    ex = Exchange(feed, clock, session_mode="us")
+    aid = ex.create_account("Margin", "margin").id
+    snaps = json.loads(raw("alpaca/stock_snapshots.json"), parse_float=D)
+    feed.apply_snapshots(snaps)
+    ex.tick()
+    app = create_app(ex, run_loop=False)
+    ctx = app.state.ctx
+    c = TestClient(app, raise_server_exceptions=False)
+    assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "AAPL", "side": "buy", "qty": 1}).status_code == 200
+
+    def tick(to=None):  # what the server's turn does: the whole tick under the lock; AAPL's quote changes
+        if to is not None:
+            wall.t = to
+            clock.set(to)
+        feed.apply_snapshots(snaps)
+        with ctx.lock.hold(1, urgent=True, label="tick"):
+            ex.tick()
+
+    def alert(i):
+        return ex.alerting.get(ids[i])
+
+    n = len(tr.requests)
+    ids = []
+    for body in ({"kind": "indicator", "symbol": "AAPL", "indicator": "sma", "period": 5, "tf": "1m", "op": "crosses_above"},
+                 {"kind": "indicator", "symbol": "AAPL", "indicator": "rsi", "period": 14, "tf": "1d", "op": "above", "value": 70},
+                 {"kind": "volume", "symbol": "AAPL", "value": "2", "mode": "average"},
+                 {"kind": "calendar", "account_id": aid, "days_before": 5, "repeat": True}):
+        r = c.post("/api/alert-rules", json=body)
+        assert r.status_code == 200, r.text
+        ids.append(r.json()["id"])
+    assert c.patch(f"/api/alert-rules/{ids[1]}", json={"value": 75}).status_code == 200
+    evaluated = ex.alerting.evaluations
+    tick()
+    tick()
+    assert ex.alerting.evaluations > evaluated  # the volume and calendar alerts were looked at
+    assert len(tr.requests) == n, "creating or evaluating an alert asked the provider"
+    assert alert(0)["last_value"] == alert(1)["last_value"] == "waiting for price history"
+    assert alert(2)["last_value"] == "no volume history yet"
+    assert c.get("/api/alert-rules").json()[0]["last_value"] == "waiting for price history"
+
+    # The history thread's work, done here by hand: outside the lock.
+    assert feed.load_wanted_bars() == 2 and len(tr.requests) > n  # 1m and 1d history for AAPL
+    assert feed.load_wanted_bars() == 0
+    n = len(tr.requests)
+    tick()  # seeds both series and the average volume from memory
+    assert alert(2)["last_value"] != "no volume history yet"
+    assert all(s.seeded for s in ex.alerting._series.values())
+    # A minute bar closes below its average, the next one above it: each is read after its own load.
+    minute = t0 // 60 * 60
+    closes[minute] = 99
+    tick(minute + 65)
+    tick()
+    assert len(tr.requests) == n and feed.load_wanted_bars() == 1
+    tick()
+    assert alert(0)["status"] == "active" and alert(0)["last_value"] not in (None, "waiting for price history")
+    closes[minute + 60] = 105
+    tick(minute + 125)
+    assert alert(0)["status"] == "active"  # the closed bar has not been loaded yet: not evaluated
+    assert feed.load_wanted_bars() == 1
+    n = len(tr.requests)
+    tick()
+    assert alert(0)["status"] == "triggered" and alert(0)["fire_count"] == 1
+    assert len(tr.requests) == n
+    assert under_lock == []
 
 
 # ---- the tick ---------------------------------------------------------------------------------------------

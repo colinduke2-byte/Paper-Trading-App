@@ -596,6 +596,13 @@ class AlpacaFeed(MarketDataProvider):
         self._polled_count = 0
         self._stop = threading.Event()
         self._poller: Optional[threading.Thread] = None
+        # History asked for through bars_ready() (by alerts, under the exchange lock) and loaded by the
+        # alpaca-history thread. All three are guarded by self._lock.
+        self._bar_wanted: dict = {}  # (symbol, tf) -> number of bars
+        self._bar_retry: dict = {}  # (symbol, tf) -> wall time before which a failed load is not repeated
+        self._bar_loads = 0  # history requests begun so far; a cache entry carries the count at its start
+        self._history_wake = threading.Event()
+        self._history: Optional[threading.Thread] = None
 
     # ---- lifecycle ---------------------------------------------------------------------------
     def start(self) -> None:
@@ -603,9 +610,13 @@ class AlpacaFeed(MarketDataProvider):
         if self._poller is None:
             self._poller = threading.Thread(target=self._poll_forever, name="alpaca-poller", daemon=True)
             self._poller.start()
+        if self._history is None:
+            self._history = threading.Thread(target=self._history_forever, name="alpaca-history", daemon=True)
+            self._history.start()
 
     def close(self) -> None:
         self._stop.set()
+        self._history_wake.set()
         self.stream.stop()
 
     # ---- symbol list -------------------------------------------------------------------------
@@ -791,20 +802,86 @@ class AlpacaFeed(MarketDataProvider):
 
     # ---- history ---------------------------------------------------------------------------------
     def bars(self, symbol: str, tf: str, limit: int = 500) -> list:
+        """Bars from the cache or the provider. May wait for the network: never call it while holding
+        the exchange lock (use bars_ready there)."""
         if tf not in TIMEFRAMES:
             raise ValueError(f"unknown timeframe {tf}")
-        now = self.wall_clock()
-        key = (symbol, tf)
-        hit = self._bar_cache.get(key)
-        if hit and hit[1] >= limit and now - hit[0] < TF_TTL[tf]:
+        hit = self._bar_cache.get((symbol, tf))
+        if hit and hit[1] >= limit and self.wall_clock() - hit[0] < TF_TTL[tf]:
             return hit[2][-limit:]
+        self._load_bars(symbol, tf, limit)
+        hit = self._bar_cache.get((symbol, tf))
+        return hit[2][-limit:] if hit else []
+
+    def _load_bars(self, symbol: str, tf: str, limit: int) -> bool:
+        """One provider request for history, stored in the cache. False when the provider failed."""
+        key = (symbol, tf)
+        with self._lock:
+            self._bar_loads += 1
+            seq = self._bar_loads
+        now = self.wall_clock()
         try:
             rows = self._fetch_bars(symbol, tf, limit, now)
         except ProviderError as e:
             log.warning("Alpaca bars %s %s: %s", symbol, tf, e.message)
-            return hit[2][-limit:] if hit else []
-        self._bar_cache[key] = (now, limit, rows)
-        return rows[-limit:]
+            return False
+        with self._lock:
+            hit = self._bar_cache.get(key)
+            if hit is None or hit[3] < seq:  # two loads can finish out of order: the later request wins
+                self._bar_cache[key] = (now, limit, rows, seq)
+        return True
+
+    def history_mark(self) -> int:
+        with self._lock:
+            return self._bar_loads
+
+    def bars_ready(self, symbol: str, tf: str, limit: int = 500, after=None) -> Optional[list]:
+        """Cached bars, or None after noting that the history thread should load them. Never asks the provider.
+        Without `after` the cache must be as fresh as bars() requires; with it, read after that mark."""
+        if tf not in TIMEFRAMES:
+            raise ValueError(f"unknown timeframe {tf}")
+        key = (symbol, tf)
+        with self._lock:
+            hit = self._bar_cache.get(key)
+            if hit and hit[1] >= limit and (hit[3] > after if after is not None
+                                            else self.wall_clock() - hit[0] < TF_TTL[tf]):
+                return hit[2][-limit:]
+            # keep a cache that charts use (up to 500 bars) as long as it was, so they need no second request
+            n = max(limit, min(hit[1], 500) if hit else 0, self._bar_wanted.get(key, 0))
+            self._bar_wanted[key] = n
+        self._history_wake.set()
+        return None
+
+    def load_wanted_bars(self) -> int:
+        """Load the history bars_ready() was asked for. Called by the history thread and by tests, never
+        under the exchange lock. A failed load is tried again after 10 seconds. Returns the loads made."""
+        now = self.wall_clock()
+        with self._lock:
+            wanted = [(k, n) for k, n in self._bar_wanted.items() if self._bar_retry.get(k, 0.0) <= now]
+        done = 0
+        for key, n in wanted:
+            ok = self._load_bars(key[0], key[1], n)
+            done += 1
+            with self._lock:
+                if not ok:
+                    self._bar_retry[key] = now + 10.0
+                else:
+                    self._bar_retry.pop(key, None)
+                    if self._bar_wanted.get(key) == n:  # a larger request made meanwhile stays
+                        del self._bar_wanted[key]
+        return done
+
+    def _history_forever(self) -> None:
+        while not self._stop.is_set():
+            self._history_wake.wait(1.0)
+            self._history_wake.clear()
+            if self._stop.is_set():
+                break
+            try:
+                self.load_wanted_bars()
+            except Exception as e:  # never let the thread die
+                log.warning("Alpaca history failed: %r", e)
+                self._stop.wait(1.0)
 
     def _fetch_bars(self, symbol: str, tf: str, limit: int, now: float) -> list:
         daily = tf in ("1d", "1w")

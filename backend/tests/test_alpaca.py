@@ -2,6 +2,8 @@
 (see tests/fixtures/SOURCES.txt) served by a fake transport or a scripted websocket."""
 import copy
 import json
+import threading
+import time
 import urllib.parse
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -407,6 +409,64 @@ def test_bars_cache_and_request_shape():
     for tf, name in (("5m", "5Min"), ("15m", "15Min"), ("1h", "1Hour"), ("1w", "1Week")):
         feed.bars("AAPL", tf, 10)
         assert tr.requests[-1]["params"]["timeframe"] == name
+
+
+def test_bars_ready_answers_from_memory_and_the_history_loader_fetches():
+    """bars_ready is what code under the exchange lock uses: it never makes a request."""
+    feed, tr, wall = make_feed(t="2022-01-03T15:00:00Z")
+    assert feed.bars_ready("AAPL", "1m", 65) is None and tr.requests == []
+    assert feed.bars_ready("AAPL", "1m", 4) is None  # the larger request stays
+    assert feed.load_wanted_bars() == 1 and tr.requests[-1]["params"]["limit"] == "65"
+    rows = feed.bars_ready("AAPL", "1m", 65)
+    assert rows and rows[0]["close"] == 178.21 and feed.bars_ready("AAPL", "1m", 4) == rows[-4:]
+    assert feed.load_wanted_bars() == 0 and len(tr.requests) == 1
+    # a mark: only history read after it counts, however fresh the cache is
+    mark = feed.history_mark()
+    assert feed.bars_ready("AAPL", "1m", 4, mark) is None and len(tr.requests) == 1
+    assert feed.load_wanted_bars() == 1
+    assert tr.requests[-1]["params"]["limit"] == "65"  # the cache keeps its length for the chart
+    assert feed.bars_ready("AAPL", "1m", 4, mark) == rows[-4:]
+    assert feed.bars_ready("AAPL", "1m", 4, feed.history_mark()) is None
+    feed.bars("AAPL", "1m", 100)  # a chart request made later satisfies the mark too
+    assert feed.bars_ready("AAPL", "1m", 4, mark) is not None
+    # without a mark the cache goes stale as it does for bars()
+    feed.load_wanted_bars()
+    wall.t += 31
+    n = len(tr.requests)
+    assert feed.bars_ready("AAPL", "1m", 4) is None and len(tr.requests) == n
+    with pytest.raises(ValueError):
+        feed.bars_ready("AAPL", "7m", 10)
+
+
+def test_a_failed_history_load_is_tried_again_after_a_pause():
+    down = [True]
+    feed, tr, wall = make_feed(routes=routes(**{"/v2/stocks/bars": lambda req: (500, "down") if down[0]
+                                                 else (200, raw("alpaca/stock_bars.json"))}),
+                               t="2022-01-03T15:00:00Z")
+    assert feed.bars_ready("AAPL", "1m", 10) is None
+    assert feed.load_wanted_bars() == 1 and feed.bars_ready("AAPL", "1m", 10) is None
+    assert feed.load_wanted_bars() == 0  # not hammered
+    down[0] = False
+    assert feed.load_wanted_bars() == 0
+    wall.t += 10
+    assert feed.load_wanted_bars() == 1 and feed.bars_ready("AAPL", "1m", 10)
+    assert feed.load_wanted_bars() == 0
+
+
+def test_the_history_thread_loads_what_was_asked_for():
+    feed, tr, _ = make_feed(t="2022-01-03T15:00:00Z")
+    t = threading.Thread(target=feed._history_forever, daemon=True)
+    t.start()
+    try:
+        assert feed.bars_ready("AAPL", "1d", 31) is None
+        deadline = time.monotonic() + 5
+        while feed.bars_ready("AAPL", "1d", 31) is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert feed.bars_ready("AAPL", "1d", 31)
+    finally:
+        feed.close()
+        t.join(5)
+    assert not t.is_alive()
 
 
 def test_daily_bars_fall_back_to_iex_when_sip_is_refused():

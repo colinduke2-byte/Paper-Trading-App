@@ -38,6 +38,7 @@ there is no lock order between exchange objects to get wrong.
 | Replay start / exit (`ctx.enter_replay`, `ctx.exit_replay`) | worker threads | swap `ctx.ex`, `ctx.replay`; snapshot live or the sandbox | `@unlocked` routes; the swap and snapshot happen in one `ctx.locked()` block, the session file is read before it and state files are written after it |
 | Replay step / seek (`ReplayController._command`) | worker threads | run up to thousands of sandbox ticks | `@unlocked` routes. The controller holds its command lock for the whole command and takes `ctx.lock` in slices of about 20 ms, so ticks, broadcasts and other requests carry on |
 | Live feed: stream thread (`alpaca-stream`) and poller (`alpaca-poller`) | daemon threads | must not touch exchange state. They write quotes into the feed's own map under `AlpacaFeed._lock`; `feed.step()` (called by the tick, under `ctx.lock`) moves them into the exchange | Hand-over through the feed's lock. The poller asks which symbols are wanted through `ctx.live_interest()`, which reads under `ctx.lock` with a 0.5 s limit and otherwise returns the previous list |
+| Alert price history (`alpaca-history`, `AlpacaFeed.load_wanted_bars`) | daemon thread | must not touch exchange state. It fetches the bars that alerts asked for and stores them in the feed's bar cache under `AlpacaFeed._lock` | Alerts are created and evaluated under `ctx.lock`, so they read history only with `feed.bars_ready()`, which answers from memory or returns `None` and notes the request. The alert is not evaluated until a later tick finds the history in memory (see "Alerts and price history") |
 | Provider corporate actions (in progress on another branch) | background fetch | same rule as the feed threads | Fetch in the background into a structure with its own lock; `feed.corporate_actions()` is called by the tick under `ctx.lock`, so it must only return what is already in memory |
 | Start-up and shut-down (`default_exchange`, `lifespan`) | main thread / event loop | load, final save | Load happens before any thread exists. Shut-down stops the tick and save threads, then snapshots under the lock and writes after releasing it |
 
@@ -80,13 +81,34 @@ Not covered:
 
 - A fault *inside a tick* (a bug) is reported and the market goes on, but the part of the tick that
   already ran is kept; the tick is not transactional.
-- Indicator and volume alerts (`app/alerts/engine.py`: `_seed`, `_advance_series`, `_average_volume`)
-  call `feed.bars()` from the tick. With a live feed that can be a provider request made while the tick
-  holds the lock. The feed caches bars, so it happens when an alert first needs history and at bar
-  boundaries. Requests then wait (and answer `503` after 2 seconds) until the provider answers. The fix
-  belongs in the alert engine: ask for history outside the tick and evaluate when it has arrived.
 - Taking the snapshot for `state.json` serialises the whole state under the lock (about 8 ms per
   500 orders with their fills). It is the longest regular hold; an incremental format would shorten it.
+
+## Alerts and price history
+
+Indicator alerts and volume alerts measured against the average need bars. `Alerting.create` runs in a
+locked route and `Alerting.on_tick` runs in the tick, so neither may call `feed.bars()` (with a live
+feed that is a provider request of up to several seconds). They use two feed methods instead:
+
+- `feed.bars_ready(symbol, tf, limit, after=None)` returns bars from memory, or `None` when they are not
+  there. It never makes a request. Feeds that keep their bars in memory (synthetic, replay, `SimFeed`)
+  always answer, so nothing changes for them.
+- `feed.history_mark()` returns a mark for "now". Passed as `after`, only history read after the mark
+  counts. The engine takes a mark when a bar closes, so the closed bar is never read from an older load.
+
+On `None` the alert waits: an indicator alert shows "waiting for price history" and its series is seeded
+on a later tick; a closed bar is pushed on the first tick after its load; an average-volume alert shows
+"no volume history yet". `AlpacaFeed` notes each request and its `alpaca-history` thread loads it
+(`load_wanted_bars`, also called directly by tests), retrying a failed load after 10 seconds. If loads
+lag by four bars or more the series is rebuilt from history, as after a clock jump.
+
+Calendar alerts read `feed.corporate_actions()`, which must also answer from memory. When it raises
+(a live feed that is still loading its actions) the alert shows "calendar unavailable: ..." and is tried
+again every 5 seconds of exchange time instead of waiting for the next day.
+
+`tests/test_concurrency.py::test_alerts_never_ask_the_data_provider_while_holding_the_lock` creates
+indicator, volume and calendar alerts on a live feed and ticks under the lock; it fails on any provider
+request made by the route or the tick.
 
 ## Adding a route
 
@@ -141,7 +163,7 @@ Rules:
 ## Tests
 
 - `tests/test_concurrency.py`: the lock, route coverage, `503` while the lock is stuck, no provider
-  call under the lock, tick priority, atomic order changes, ordered saves, sliced replay commands.
+  call under the lock (routes, alert creation and alert evaluation in the tick), tick priority, atomic order changes, ordered saves, sliced replay commands.
 - `tests/test_concurrency_stress.py`: many threads submit, cancel, replace, reset, change settings,
   step a replay and switch modes while the loop ticks every 5 ms; then the ledger invariants, order
   and fill accounting and every `state.json` written along the way are checked. Seeded and bounded
