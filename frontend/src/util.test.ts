@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeOption, numText } from "./util";
+import { describeOption, marketableLimit, numText } from "./util";
 
 describe("numText", () => {
   it("removes well-formed thousands separators, dollar signs and spaces", () => {
@@ -23,5 +23,20 @@ describe("describeOption", () => {
     expect(describeOption("MKTX261204C00400000")).toBe("MKTX 04 Dec 2026 400 Call");
     expect(describeOption("NVLX270115P00102500")).toBe("NVLX 15 Jan 2027 102.5 Put");
     expect(describeOption("MKTX")).toBe("MKTX");
+  });
+});
+
+describe("marketableLimit", () => {
+  it("goes 2% or at least 5 cents through the quote, to the cent", () => {
+    expect(marketableLimit("buy", 1.2).limit).toBe(1.25);
+    expect(marketableLimit("sell", 1.2).limit).toBe(1.15);
+    expect(marketableLimit("buy", 60).limit).toBe(61.2);
+    expect(marketableLimit("sell", 60).limit).toBe(58.8);
+    expect(marketableLimit("sell", 0.03).limit).toBe(0.01);
+    expect(marketableLimit("buy", 0).limit).toBe(0.05);
+  });
+  it("says what it did", () => {
+    expect(marketableLimit("buy", 1.2).note).toContain("0.05 above the ask (1.20)");
+    expect(marketableLimit("sell", 60).note).toContain("1.20 below the bid (60.00)");
   });
 });

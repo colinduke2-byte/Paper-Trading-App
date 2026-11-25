@@ -95,3 +95,17 @@ export function describeOption(s: string): string {
   const strike = String(Number(m[6]) / 1000);
   return `${m[1]} ${m[4]} ${MONTHS[Number(m[3]) - 1]} 20${m[2]} ${strike} ${m[5] === "C" ? "Call" : "Put"}`;
 }
+
+// A click on an option chain quote means "trade now at about this price". The model price moves every second,
+// so a limit exactly at the clicked ask or bid often rests unfilled. The ticket is seeded with a marketable
+// limit instead: 2% (at least 5 cents) through the quote. It still fills at the market price, and the limit
+// caps how far the price may have moved.
+export function marketableLimit(side: string, quote: number): { limit: number; note: string } {
+  const room = Math.max(0.05, quote * 0.02);
+  const limit = side === "buy" ? Math.ceil((quote + room) * 100 - 1e-6) / 100 : Math.max(0.01, Math.floor((quote - room) * 100 + 1e-6) / 100);
+  const gap = money(Math.abs(limit - quote));
+  const note = side === "buy"
+    ? `Limit set ${gap} above the ask (${money(quote)}) so the order fills if the price moves a little. It fills at the market price, at most the limit. Change the limit to wait for your own price.`
+    : `Limit set ${gap} below the bid (${money(quote)}) so the order fills if the price moves a little. It fills at the market price, at least the limit. Change the limit to wait for your own price.`;
+  return { limit, note };
+}

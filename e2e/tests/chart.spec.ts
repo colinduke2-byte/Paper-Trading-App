@@ -180,18 +180,25 @@ test("drawing tools create, select, move and delete shapes", async ({ page, open
   const drag = async (a: { x: number; y: number }, b: { x: number; y: number }) => {
     await page.mouse.move(a.x, a.y); await page.mouse.down(); await page.mouse.move(b.x, b.y, { steps: 6 }); await page.mouse.up();
   };
+  // Each shape is counted before the next one is started, so no gesture runs while the last is still being added.
+  const count = (n: number) => expect(page.getByRole("button", { name: new RegExp(`^Drawings \\(${n}\\)`) })).toBeVisible();
   await page.getByRole("button", { name: "Trend line" }).click();
   await remeasure(); await drag(at(0.2, 0.3), at(0.4, 0.6));
+  await count(1);
   await page.getByRole("button", { name: "Ray" }).click();
-  // Two taps also draw a two-point shape.
+  // Two taps also draw a two-point shape. The ray runs on from its second point, up and to the right.
   await click(0.3, 0.5);
   await click(0.5, 0.4);
+  await count(2);
   await page.getByRole("button", { name: "Rectangle" }).click();
   await remeasure(); await drag(at(0.55, 0.2), at(0.7, 0.4));
+  await count(3);
   await page.getByRole("button", { name: "Fibonacci retracement" }).click();
   await remeasure(); await drag(at(0.75, 0.8), at(0.9, 0.2));
+  await count(4);
   await page.getByRole("button", { name: "Vertical line" }).click();
   await click(0.15, 0.5);
+  await count(5);
   await page.getByRole("button", { name: "Text note" }).click();
   await click(0.1, 0.8);
   await page.getByLabel("Note text").fill("Support test");
@@ -209,7 +216,10 @@ test("drawing tools create, select, move and delete shapes", async ({ page, open
   await page.getByRole("button", { name: /^Drawings/ }).click();
 
   // Clicking empty space clears the selection; picking from the list selects; Delete removes it.
-  await click(0.98, 0.02);
+  // The bottom right corner is empty whatever the data: the ray only rises to the right (how steeply depends on
+  // which bars its two points snapped to, so it can pass through the top right corner), the Fibonacci levels end
+  // at 80% of the height and every other shape is further left.
+  await click(0.97, 0.95);
   await expect(page.getByRole("button", { name: "Delete selected" })).toBeDisabled();
   await page.getByRole("button", { name: /^Drawings/ }).click();
   await list.getByRole("button", { name: /^Trend line/ }).click();

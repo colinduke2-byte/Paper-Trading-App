@@ -11,7 +11,7 @@ import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { HelpDialog } from "./Help";
-import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption } from "./util";
+import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
 import { useSignOutAction } from "./Login";
 import { bellLabel, deliver, NotificationBell, NotificationPanel, useNotifications } from "./Notifications";
 import { ALERT_AT_PRICE, AlertBuilder, AlertSeed } from "./AlertsTab";
@@ -181,7 +181,8 @@ export default function App() {
   };
   const pickSymbol = (s: string) => { setSymbol(s); setScreen("Chart"); };
   const tradeOption = (s: string, side: string, price: number) => {
-    setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() });
+    const { limit, note } = marketableLimit(side, price);
+    setSeed({ symbol: s, side, type: "limit", limit_price: limit, note, qty: 1, nonce: Date.now() });
     setScreen("Trade");
   };
   const startTrade = (side: string) => { setSeed({ symbol, side, nonce: Date.now() }); setScreen("Trade"); };
