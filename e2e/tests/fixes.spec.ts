@@ -60,7 +60,7 @@ test("starting cash typed with thousands separators is accepted", async ({ page,
 test("a working order can be changed from the Orders tab, and a refusal shows the reason", async ({ page, request, problems }) => {
   const acc = await createAccount(request, "margin", "10000");
   const px = await lastPrice(request, "MKTX");
-  const limit = Math.max(1, Math.floor(px * 0.5));
+  const limit = Math.max(1, Math.floor(px * 0.9));
   const r = await request.post(`/api/accounts/${acc.id}/orders`, { data: { symbol: "MKTX", side: "buy", qty: "2", type: "limit", limit_price: String(limit), tif: "gtc" } });
   expect(r.ok()).toBeTruthy();
   await page.addInitScript((a) => { localStorage.setItem("pd.account", a); localStorage.setItem("pd.symbol", "MKTX"); }, acc.id);
