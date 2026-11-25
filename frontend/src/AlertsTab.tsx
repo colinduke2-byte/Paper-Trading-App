@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Dialog } from "./Dialog";
 import { usePoll } from "./Market";
 import { api, dateTime, isOption, money } from "./util";
 import "./alerts.css";
@@ -95,11 +96,6 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
     const t = setTimeout(() => api(`/quotes?symbols=${encodeURIComponent(sym)}`).then((r) => alive && setLast(r[sym]?.last ?? null)).catch(() => {}), 250);
     return () => { alive = false; clearTimeout(t); };
   }, [sym, quotes[sym]?.last]);
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
   const options = positions.filter((p) => isOption(p.symbol));
   const kind = f.kind;
   const cond = (labels: [string, string] = ["rises to", "falls to"]) => (
@@ -128,8 +124,7 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
   };
   const isCross = kind === "indicator" && f.indicator !== "rsi";
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal alert-builder" role="dialog" aria-modal="true" aria-label={editing ? "Edit alert" : "New alert"} onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} className="modal alert-builder" label={editing ? "Edit alert" : "New alert"}>
         <h3>{editing ? "Edit alert" : "New alert"}</h3>
         <label>Alert type
           <select value={kind} disabled={!!editing} onChange={(e) => setF({ ...f, kind: e.target.value, op: "above", value: e.target.value === kind ? f.value : "", metric: "" })}>
@@ -251,8 +246,7 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" disabled={busy} onClick={save}>{editing ? "Save alert" : "Create alert"}</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
