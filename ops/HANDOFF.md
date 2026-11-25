@@ -356,3 +356,5 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   (session_01ByytwYf74TQnjtG3k5yzNc), like the PR 17 fixer. Backup (PR 19) is merged in its working
   tree with 4 interaction bugs fixed (732 backend tests pass), uncommitted. Owner must allow commits
   in both sessions.
+- 03:17 UTC: still blocked on the owner: Actions billing (no runs since 02:26); commits in the
+  integrator and PR 17 sessions. Cashfix worker told to finish items 10/12 and push (skip PR text).
