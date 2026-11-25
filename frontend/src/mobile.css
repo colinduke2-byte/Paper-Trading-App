@@ -40,6 +40,8 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
 .m-top-row2 .paper-banner { font-size: 11px; padding: 2px 8px; line-height: 1.35; }
 .m-session { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .m-shell > .notice.wide { grid-area: notice; margin: 6px 8px 0; }
+.m-shell > .m-notices { grid-area: notice; display: flex; flex-direction: column; }
+.m-shell > .m-notices > .notice.wide { margin: 6px 8px 0; }
 
 /* Views */
 .m-views { grid-area: views; position: relative; min-height: 0; overflow: hidden; }

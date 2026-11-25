@@ -369,7 +369,8 @@ def test_pattern_day_trader_blocks_opening_orders_after_three_day_trades_under_2
            "Closing orders are still allowed. New opening orders are allowed again on 2026-11-30.")
     with pytest.raises(OrderRejected) as err:
         ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
-    assert str(err.value) == msg
+    assert str(err.value).startswith(msg)
+    assert '"Pattern day trader rule (margin accounts)"' in str(err.value) and "Account rules" in str(err.value)
     with pytest.raises(OrderRejected, match="Pattern day trader rule"):  # a short sale opens too
         ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 60})
     assert not ex.preview(a, {"symbol": "ABC", "side": "buy", "qty": 10})["ok"]
@@ -470,7 +471,7 @@ def test_partial_fills_of_one_closing_order_are_one_day_trade():
 def test_margin_call_grace_then_liquidation():
     ex, feed, clock = make_exchange()
     deep(ex, feed, clock, "100")
-    # A 6-minute grace period (the default is 48 hours), counted tick by tick while the app runs.
+    # A 6-minute grace period (the default is 13 hours), counted tick by tick while the app runs.
     a = acct(ex, margin_call_grace_hours="0.1")
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1900})  # 190,000: cash -90,000
     [resting] = ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 100, "type": "limit", "limit_price": "200", "tif": "gtc"})

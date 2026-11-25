@@ -214,8 +214,8 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
 **Centre top.** The symbol's quote (bid, ask and their sizes, open, previous close, day range, volume,
 52-week range, market cap), then four tabs:
 
-- **Chart**: candlesticks with volume. Timeframes **1M**, **5M**, **15M**, **1H**, **1D**, **1W**. Careful:
-  on the buttons, "1M" means one *minute*, not one month, and "1W" is one *week*. Indicators you can
+- **Chart**: candlesticks with volume. Timeframes **1m**, **5m**, **15m** (minutes), **1h** (hour), **1D** (day)
+  and **1W** (week); keys 1 to 6 pick them. Indicators you can
   switch on: SMA 20, SMA 50, EMA 21, Bollinger bands, VWAP (intraday timeframes only) and RSI 14. The
   chart draws your average cost as a solid blue line and your open orders as dashed lines. Intraday
   times are in your computer's time zone. The last candle updates as prices arrive.
@@ -231,7 +231,7 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
 | Tab | What it shows |
 |---|---|
 | **Positions** | What you hold: quantity, average cost, mark, market value, day and open P&L, and a **Close…** button that fills the ticket to sell or buy back the whole position |
-| **Orders** | Open orders with **Cancel**, and **Cancel all open orders**; tick "Show finished orders" for filled, canceled, rejected and expired ones |
+| **Orders** | Open orders with **Change…** and **Cancel**, and **Cancel all open orders**; tick "Show finished orders" for filled, canceled, rejected and expired ones |
 | **Fills** | Each execution: time, price, fee and kind (trade, exercise, assignment, dividend reinvestment and so on) |
 | **Activity** | The ledger: every cash movement with its realised profit or loss |
 | **Reports** | Statistics, gains, statements, journal, export (section 9) |
@@ -322,7 +322,10 @@ account refuses it: "short selling needs a margin account".
   press Review and Place.
 - **Cancel** (Orders tab) cancels one open order; **Cancel all open orders** cancels everything in this
   account. Cancelling a bracket's entry order before it fills also cancels its exit orders.
-- There is **no "change order" button**. To change an order, cancel it and place a new one.
+- **Change…** (Orders tab) on a working order changes its quantity and its limit or stop price. The
+  server checks the change like a new order and, if it refuses, the dialog says why (for example the
+  buying power the change needs and what is available). The quantity of a one-cancels-other order can be
+  lowered but not raised. On the chart you can also drag an order line to a new price.
 
 ### Coming (other work in progress)
 
@@ -445,7 +448,9 @@ notice appears: "Margin call: account value … is below the … maintenance req
 orders are accepted until this is resolved." The call clears when equity is 2% above maintenance, or
 after it has stayed at or above maintenance for 5 minutes.
 
-If it is still open after the **grace period** (48 hours by default), and the setting "Liquidate on
+If it is still open after the **grace period** (13 hours of open market time by default, which is two
+regular trading days in US session mode; only time while the market is open and PaperDesk is running
+counts), and the setting "Liquidate on
 unmet margin calls" is on, PaperDesk cancels your open orders and sells positions with market orders,
 largest maintenance requirement first, until the call is met. It only does this during the regular
 session, and it will not leave a short option uncovered that was covered before. The Settings dialog
@@ -548,7 +553,10 @@ Open a symbol and choose the **Options** tab.
   open interest (OI), volume, implied volatility (IV), delta, bid and ask. Strikes run about 25% above
   and below the stock price.
 - **Click an ask price to buy** that contract, or **a bid price to sell** it. The ticket opens with a
-  one-contract limit order at that price (change it as you like), then Review and Place as usual. One
+  one-contract limit order a little through that price: 2% (at least 5 cents) above the ask for a buy,
+  below the bid for a sell. The ticket says so under the limit. The order still fills at the market
+  price; the margin only keeps it from resting unfilled when the price moves between your click and
+  Place. Change the limit to wait for your own price, then Review and Place as usual. One
   contract covers **100 shares**, so a price of 5.00 costs $500. The fee is $0.65 per contract.
 - On the ticket, option actions are called **Buy to open**, **Sell to open** (writing the option),
   **Buy to close** and **Sell to close**.
@@ -611,8 +619,8 @@ Open the **Reports** tab in the bottom panel. All figures come from the simulate
 
 ![Overview](img/desktop-reports-overview.png)
 
-Two boxes at the top: **Benchmark** (a symbol to compare against; empty means MKTX, which only exists
-in simulated mode, so type a symbol such as SPY with real data) and **Risk-free rate %** (used only for
+Two boxes at the top: **Benchmark** (a symbol to compare against; empty means the default for the data
+you are using: MKTX with simulated prices, SPY with real data. Your choice is remembered in this browser) and **Risk-free rate %** (used only for
 the Sharpe ratio; default 0). The statistics:
 
 **Returns and risk**
@@ -1054,6 +1062,7 @@ These are the messages you can actually meet, and what to do.
 | `No Alpaca API key is set (APCA_API_KEY_ID and APCA_API_SECRET_KEY), so PaperDesk is showing simulated prices …` | Normal when you have not added keys. |
 | `Alpaca rejected the API key (HTTP 401) …` | The key is wrong, or from a reset paper account. Generate new keys. |
 | `Could not reach Alpaca to load the symbol list (…). Using simulated prices.` | No internet, or the connection is blocked. |
+| Red notice: "Could not connect to Alpaca (…). Showing simulated data and your simulated accounts." | Alpaca was set up but failed at start-up. Your real-data accounts are kept untouched in their own folder; fix the cause and restart PaperDesk. |
 | `connection limit exceeded` | Another program is using your key's live connection. Close it. |
 | Banner: "prices may be stale (feed interrupted)" | The live data stopped. Wait, or restart. |
 

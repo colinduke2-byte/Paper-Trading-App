@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Dialog } from "./Dialog";
 import { api, dateTime, store } from "./util";
 import "./alerts.css";
 
@@ -143,17 +144,11 @@ export function NotificationPanel({ notes, onClose, onSelect, onAlert }: {
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [settings, setSettings] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
   const cats = filter ? filter.split(",") : null;
   const rows = notes.items.filter((n) => (!cats || cats.includes(n.category)) && (!unreadOnly || !n.read));
   const act = (p: Promise<any>) => p.catch((e) => setError(`Could not update notifications: ${e.message}`));
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal notif-panel" role="dialog" aria-modal="true" aria-label="Notifications" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} className="modal notif-panel" label="Notifications">
         <div className="notif-head">
           <h3>Notifications</h3>
           <button className="ghost sm" onClick={() => setSettings((s) => !s)} aria-expanded={settings}>Delivery</button>
@@ -189,8 +184,7 @@ export function NotificationPanel({ notes, onClose, onSelect, onAlert }: {
             ))}
           </ul>
         )}
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

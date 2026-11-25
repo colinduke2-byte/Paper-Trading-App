@@ -391,7 +391,7 @@ def test_margin_call_grace_does_not_run_while_the_app_is_closed():
     feed.set_quote("ABC", "59.99", "60.00", "60.00", bid_size=100000, ask_size=100000)
     ex.tick()
     assert acc.life.margin_call_since is not None
-    for _ in range(10):  # ten minutes of the 48 hours used
+    for _ in range(10):  # ten minutes of the 13 hours used
         clock.advance(60)
         ex.tick()
     ex.save(force=True)
@@ -403,11 +403,11 @@ def test_margin_call_grace_does_not_run_while_the_app_is_closed():
     acc2 = ex2.account(acc.id)
     assert acc2.positions() == {"ABC": D(1900)}
     assert acc2.life.margin_call_counted == 600
-    assert "47.8 hours" in acc2.life.log[-1][2]
+    assert "12.8 hours" in acc2.life.log[-1][2]
     assert any(n["title"] == "Margin call grace period resumed" for n in ex2.alerting.notices.logs[acc.id])
     s = ex2.summary(acc.id)
-    assert s["grace_hours_left"] == (48 * 3600 - 600) / 3600
-    assert s["liquidation_at"] == ex2.now() + 48 * 3600 - 600
+    assert s["grace_hours_left"] == (13 * 3600 - 600) / 3600
+    assert s["liquidation_at"] == ex2.now() + 13 * 3600 - 600
 
 
 # ---- N9 / N10: accrued charges in account value; the interest memo names every rate used ----------------

@@ -1,4 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Dialog } from "./Dialog";
+import { FeedNotice } from "./FeedNotice";
 import { Chart, SHORTCUTS_EVENT } from "./Chart";
 import { Shortcuts } from "./chart/Shortcuts";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
@@ -9,7 +11,7 @@ import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { HelpDialog } from "./Help";
-import { api, dateTime, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
+import { api, dateTime, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
 import { useSignOutAction } from "./Login";
 import { bellLabel, deliver, NotificationBell, NotificationPanel, useNotifications } from "./Notifications";
 import { ALERT_AT_PRICE, AlertBuilder, AlertSeed } from "./AlertsTab";
@@ -179,7 +181,8 @@ export default function App() {
   };
   const pickSymbol = (s: string) => { setSymbol(s); setScreen("Chart"); };
   const tradeOption = (s: string, side: string, price: number) => {
-    setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() });
+    const { limit, note } = marketableLimit(side, price);
+    setSeed({ symbol: s, side, type: "limit", limit_price: limit, note, qty: 1, nonce: Date.now() });
     setScreen("Trade");
   };
   const startTrade = (side: string) => { setSeed({ symbol, side, nonce: Date.now() }); setScreen("Trade"); };
@@ -211,6 +214,7 @@ export default function App() {
       {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
     </select>
   );
+  const feedNotice = <FeedNotice status={status} />;
   const unpriced: string[] = summary?.prices_unavailable ?? [];
   const marginNotice = (summary?.margin_call || status?.ui_stale || unpriced.length > 0) ? (
     <>
@@ -279,7 +283,7 @@ export default function App() {
     return (
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
-        notice={marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        notice={status?.live_unavailable && marginNotice ? <div className="m-notices">{feedNotice}{marginNotice}</div> : status?.live_unavailable ? feedNotice : marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
         ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
         replayBar={status?.replay ? replayBar : null} mode={mode}>
         {overlays}
@@ -307,6 +311,7 @@ export default function App() {
         </div>
       </header>
       {replayBar}
+      {feedNotice}
       {marginNotice}
       <main key={mode}>
         {watchlist}
@@ -328,12 +333,6 @@ export default function App() {
   );
 }
 
-function describeOption(s: string) {
-  const m = s.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
-  if (!m) return s;
-  return `${m[1]} 20${m[2]}-${m[3]}-${m[4]} ${Number(m[6]) / 1000} ${m[5] === "C" ? "Call" : "Put"}`;
-}
-
 function AccountDialog({ mode, account, next, onClose, onDone }: { mode: "new" | "reset" | "delete"; account: any; next?: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
   if (mode === "delete") return <DeleteAccountDialog account={account} next={next} onClose={onClose} onDone={onDone} />;
   const [name, setName] = useState("");
@@ -343,18 +342,17 @@ function AccountDialog({ mode, account, next, onClose, onDone }: { mode: "new" |
   const submit = async () => {
     try {
       if (mode === "new") {
-        const a = await api("/accounts", { method: "POST", body: { name, type, starting_cash: cash } });
+        const a = await api("/accounts", { method: "POST", body: { name, type, starting_cash: numText(cash) } });
         onDone(a.id, `Account "${a.name}" created`);
       } else {
-        await api(`/accounts/${account.id}/reset`, { method: "POST", body: { starting_cash: cash } });
-        onDone(account.id, `Account "${account.name}" reset to ${usd(Number(cash))}`);
+        await api(`/accounts/${account.id}/reset`, { method: "POST", body: { starting_cash: numText(cash) } });
+        onDone(account.id, `Account "${account.name}" reset to ${usd(Number(numText(cash)))}`);
       }
     } catch (e: any) { setError(e.message); }
   };
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <h3>{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
+    <Dialog onClose={onClose} labelledBy="account-dialog-title" destructive={mode === "reset"}>
+        <h3 id="account-dialog-title">{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
         {mode === "reset" && <p className="muted">This erases the account's positions, orders, history and trade journal and starts again with the cash below. The account's rule settings and tax-lot method are kept. It cannot be undone.</p>}
         {mode === "new" && (
           <>
@@ -373,8 +371,7 @@ function AccountDialog({ mode, account, next, onClose, onDone }: { mode: "new" |
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" onClick={submit}>{mode === "new" ? "Create account" : "Erase and reset"}</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -391,8 +388,7 @@ function DeleteAccountDialog({ account, next, onClose, onDone }: { account: any;
     } catch (e: any) { setError(e.message); setBusy(false); }
   };
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} labelledBy="delete-title" destructive>
         <h3 id="delete-title">Delete "{name}"</h3>
         <p className="muted">This permanently deletes the paper account with its positions, open orders, fills, statements and trade journal. It cannot be undone. Type the account name to confirm.</p>
         <label>Account name<input value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus aria-label="Type the account name to confirm" /></label>
@@ -401,7 +397,6 @@ function DeleteAccountDialog({ account, next, onClose, onDone }: { account: any;
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary danger" disabled={busy || typed.trim() !== name.trim()} onClick={confirm}>Delete account</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

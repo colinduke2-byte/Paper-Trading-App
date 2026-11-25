@@ -187,10 +187,13 @@ def test_a_margin_call_liquidation_never_leaves_covered_calls_uncovered():
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1900})
     ex.submit(a, {"symbol": call, "side": "sell", "qty": 19})
     move(ex, feed, clock, "ABC", "60", bid_size=100000, ask_size=100000)
-    clock.advance(48 * 3600)
-    feed.set_quote("ABC", D("59.99"), D("60"), D("60"), bid_size=100000, ask_size=100000)
-    ex.tick()
+    ex.account(a).settings["margin_call_grace_hours"] = "0.1"  # grace counts running time: tick through it
+    for _ in range(6):
+        clock.advance(60)
+        feed.set_quote("ABC", D("59.99"), D("60"), D("60"), bid_size=100000, ask_size=100000)
+        ex.tick()
     acc = ex.account(a)
+    assert acc.position("ABC") < 1900  # it did liquidate
     assert -acc.position(call) * 100 <= acc.position("ABC")
 
 

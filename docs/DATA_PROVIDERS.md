@@ -112,7 +112,7 @@ shows "connection limit exceeded" and falls back to polling.
 
 ### Where keys live
 
-- `.env` in the project root is read at start-up by PaperDesk itself (in `default_exchange`), so
+- `.env` in the project root is read first at start-up by PaperDesk itself (`app/core/envfile.py`), for every setting, so
   it works with `run.sh`, `run.bat`, Docker or a plain `uvicorn` command. Variables already set
   in the environment take priority over the file. Paths with spaces and Windows backslashes are
   fine. The file is read as UTF-8 and a byte order mark is ignored.

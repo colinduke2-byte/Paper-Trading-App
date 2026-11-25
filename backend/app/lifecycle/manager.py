@@ -468,7 +468,9 @@ class LifecycleManager:
             return (f"Pattern day trader rule: this account has made {n} day trades in the last {PDT_WINDOW} "
                     f"business days and its equity ({_fmt(eq)}) is below {_fmt(cfg.number(s, 'pdt_min_equity'))}, "
                     f"so it cannot open new positions that could become a {_ordinal(n + 1)} day trade. "
-                    f"Closing orders are still allowed.{when}")
+                    f"Closing orders are still allowed.{when} The rule and its minimum equity are the "
+                    f"\"{cfg.SPEC['pattern_day_trader'][2]}\" and \"{cfg.SPEC['pdt_min_equity'][2]}\" "
+                    "settings in Account rules.")
         if a.type == "cash" and worst is not None and s["settlement"] and s["settled_cash_only"]:
             unsettled = a.life.unsettled_total()
             if unsettled > 0 and worst.cash_after - unsettled < worst.requirement:
@@ -477,7 +479,8 @@ class LifecycleManager:
                 first = min(e[0] for e in a.life.unsettled)
                 return (f"Cash accounts can only buy with settled cash: this order and your open orders need "
                         f"{_fmt(needed)}, but settled cash is {_fmt(available)}. {_fmt(unsettled)} from recent sales "
-                        f"is still settling (next settlement {first}).")
+                        f"is still settling (next settlement {first}). This is the \"{cfg.SPEC['settled_cash_only'][2]}\" "
+                        "setting in Account rules.")
         return None
 
     # ---- summary -------------------------------------------------------------------------

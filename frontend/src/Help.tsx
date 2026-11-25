@@ -1,4 +1,5 @@
-import { ReactNode, useEffect, useRef } from "react";
+import { ReactNode } from "react";
+import { Dialog } from "./Dialog";
 import "./help.css";
 
 // In-app help. The app runs offline, so the essentials are here; the full guide is docs/USER_GUIDE.md in the
@@ -106,19 +107,11 @@ const SECTIONS: Section[] = [
 ];
 
 export function HelpDialog({ onClose }: { onClose: () => void }) {
-  const close = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    close.current?.focus();
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} className="modal help-modal" labelledBy="help-title">
         <div className="help-head">
           <h3 id="help-title">Help</h3>
-          <button ref={close} className="ghost" onClick={onClose}>Close help</button>
+          <button className="ghost" autoFocus onClick={onClose}>Close help</button>
         </div>
         <p className="muted help-lead">PaperDesk simulates trading with pretend money. It never sends an order to a broker.</p>
         <div className="help-body">
@@ -129,7 +122,6 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
             </details>
           ))}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
