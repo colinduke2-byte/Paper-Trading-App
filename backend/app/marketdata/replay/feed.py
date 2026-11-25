@@ -47,6 +47,8 @@ class ReplayFeed(MarketDataProvider):
                 open=init.get("open") or last, high=init.get("high") or last, low=init.get("low") or last,
                 prev_close=init.get("prev_close") or last)
         self._events = session.events
+        from ..simresearch import for_replay
+        self.research = for_replay(self)  # simulated research for synthetic sessions, else None
         self._i = 0
         self.last_step: Optional[float] = None
 

@@ -200,11 +200,15 @@ class NotificationCentre:
         "split": ("split", "info", "Stock split applied"),
         "margin interest": ("account", "info", "Margin interest"),
         "short borrow fee": ("account", "info", "Short borrow fee"),
+        "expiration": ("option", "warning", "Option expiry settlement"),
+        "day_start": ("account", "info", "Day P&L"),
     }
 
     def _lifecycle(self, e: dict) -> None:
         kind, text = e.get("kind", ""), e.get("message", "")
         cat, sev, title = self.LIFECYCLE.get(kind, ("account", "info", "Account notice"))
+        if kind == "margin_call" and text.startswith("Margin call still open after a pause"):
+            sev, title = "warning", "Margin call grace period resumed"
         if kind == "margin_call" and text.startswith("Margin call met"):
             sev, title = "success", "Margin call cleared"
         if kind == "dividend" and "charged" in text:

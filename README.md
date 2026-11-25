@@ -122,7 +122,9 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   provider data are model prices.
 - **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute to weekly) with SMA,
   EMA, Bollinger bands, VWAP and RSI, a synthetic depth ladder, time and sales, company facts, screener, and a
-  Research tab (real data needs a provider).
+  Research tab. Without a provider the Research tab is filled with simulated research for the fictional
+  companies: financial statements, earnings reports that gap the price, news, and an economic calendar, all
+  labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 - **Orders in the ticket:** market, limit, stop, stop limit and trailing stop; day, good till canceled,
   immediate or cancel and fill or kill; a bracket (take profit and stop loss); fractional shares; order
   preview; cancel. **In the engine and API, not yet in the ticket:** market and limit on open and on close,

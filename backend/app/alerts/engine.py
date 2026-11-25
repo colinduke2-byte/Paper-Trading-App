@@ -503,23 +503,53 @@ class Alerting:
         except Exception as e:  # a provider error must not stop the tick
             al["last_value"] = f"calendar unavailable: {e}"
             return
-        for act in sorted(acts, key=lambda x: (x.ex_date, x.symbol)):
-            if act.symbol not in held or act.kind not in p["events"] or act.id in p["seen"]:
+        due = []  # (date, symbol, id, kind, text)
+        for act in acts:
+            if act.symbol not in held or act.kind not in p["events"]:
                 continue
-            p["seen"] = (p["seen"] + [act.id])[-200:]
             days = (act.ex_date - today).days
             when = "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days ({act.ex_date.isoformat()})"
             text = f"{act.describe().capitalize()}: the ex-date is {when}. You hold {act.symbol}."
             if act.kind == "dividend" and act.pay_date:
                 text += f" It is paid on {act.pay_date.isoformat()}."
+            due.append((act.ex_date, act.symbol, act.id, act.kind, text))
+        if "earnings" in p["events"]:
+            due += self._earnings_due(held, today, p["days_before"], now)
+        for day, sym, eid, kind, text in sorted(due, key=lambda x: (x[0], x[1])):
+            if eid in p["seen"]:
+                continue
+            p["seen"] = (p["seen"] + [eid])[-200:]
             al["triggered_at"], al["fire_count"] = now, al.get("fire_count", 0) + 1
             self.ex.dirty = True
-            self.notices.add(al["account_id"], "alert", "info", f"Upcoming {act.kind}: {act.symbol}", text,
-                             symbol=act.symbol, alert_id=al["id"])
+            self.notices.add(al["account_id"], "alert", "info", f"Upcoming {kind}: {sym}", text,
+                             symbol=sym, alert_id=al["id"])
             if not al["repeat"]:
                 self._unindex(al)
                 al["status"] = "triggered"
                 return
+
+    def _earnings_due(self, held: set, today, days_before: int, now: float) -> list:
+        """Earnings reports of held symbols from today through days_before days ahead, from a research hub
+        that schedules them (the simulated one); none from feeds without a schedule."""
+        from datetime import timedelta
+        from ..core import calendar as cal
+        hub = getattr(self.ex.feed, "research", None)
+        upcoming = getattr(hub, "upcoming_releases", None)
+        if upcoming is None:
+            return []
+        until = cal.close_ts(today + timedelta(days=days_before)) + 6 * 3600  # covers an after-close report
+        out = []
+        for sym in sorted(held):
+            for ts, k in upcoming(sym, now, until):
+                rec = hub.earnings_record(sym, k, now)
+                day = cal.ny_date(ts)
+                days = (day - today).days
+                when = "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days ({day.isoformat()})"
+                text = (f"{sym} reports {rec['period']} results {rec['hour']} {when}. You hold {sym}. "
+                        f"Analysts expect earnings of {rec['eps_estimate']} a share; the price can gap on the "
+                        f"report, and a stop order then fills at the gap price. Simulated data.")
+                out.append((day, sym, f"{sym}-earnings-{k}", "earnings", text))
+        return out
 
     # ---- system monitors ---------------------------------------------------------------------------
     def _monitor(self, now: float) -> None:

@@ -404,6 +404,7 @@ def test_margin_call_grace_does_not_run_while_the_app_is_closed():
     assert acc2.positions() == {"ABC": D(1900)}
     assert acc2.life.margin_call_counted == 600
     assert "47.8 hours" in acc2.life.log[-1][2]
+    assert any(n["title"] == "Margin call grace period resumed" for n in ex2.alerting.notices.logs[acc.id])
     s = ex2.summary(acc.id)
     assert s["grace_hours_left"] == (48 * 3600 - 600) / 3600
     assert s["liquidation_at"] == ex2.now() + 48 * 3600 - 600
@@ -516,3 +517,18 @@ def test_a_failed_save_stays_dirty_and_is_retried(monkeypatch):
     assert not ex.dirty
     ex2 = Exchange(SimFeed(INFO), SimClock(T0), data_dir=tmp)
     assert ex2.load() and len(ex2.accounts) == 1
+
+
+def test_restart_events_reach_the_notification_centre():
+    tmp, a, exp, put, call = _book()
+    feed = LiveLikeFeed(INFO, fail=True)
+    ex = _restart(tmp, parse(put).expiry_ts + 86400, feed)
+    feed.set_quote("ABC", "84.99", "85.00", "85.00")
+    ex.tick()
+    notes = ex.alerting.notices.logs.get(a, [])
+    assert any(n["title"] == "Option expiry settlement" and "approximate price" in n["text"] for n in notes)
+
+    tmp, a, o = _day_order("always")
+    ex = _start(tmp, MON_10AM + 2 * 86400, "always")
+    notes = ex.alerting.notices.logs.get(a, [])
+    assert any(n["title"] == "Order expired" and "not running" in n["text"] for n in notes)

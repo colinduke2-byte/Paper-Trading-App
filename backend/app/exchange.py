@@ -108,7 +108,9 @@ class Exchange:
         u = self.feed.quote(c.underlying)
         if u is None:
             return None
-        return optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), self.now())
+        now = self.now()
+        return optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), now,
+                                     self.feed.event_variance(c.underlying, c.expiry_ts, now))
 
     def quote_source(self, symbol: str) -> str:
         """Where quote(symbol) comes from: the feed's name, or "model" for a modelled option price."""
@@ -238,7 +240,8 @@ class Exchange:
             if c:
                 row.update(delta=None, theta=None, underlying=c.underlying, expiry=c.expiry.isoformat())
                 if u is not None and u.last > 0:
-                    snap = optchain.option_snapshot(c, float(u.last), self.feed.base_vol(c.underlying), self.now())
+                    snap = optchain.option_snapshot(c, float(u.last), self.feed.base_vol(c.underlying), self.now(),
+                                                    self.feed.event_variance(c.underlying, c.expiry_ts, self.now()))
                     row.update(delta=snap["delta"] * float(qty) * 100, theta=snap["theta"] * float(qty) * 100)
             else:
                 q = self.feed.quote(sym)
