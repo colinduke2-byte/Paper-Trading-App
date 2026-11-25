@@ -22,11 +22,12 @@ import json
 import logging
 import time
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from ..core.assets import crypto_info, is_crypto
+from ..core.assets import crypto_info, floor_to, is_crypto, spec_from_info
 from ..core.money import ZERO
 from .alpaca import (TF_ALPACA, TF_LOOKBACK_DAYS, TF_TTL, AlpacaFeed, StreamClient, StreamProtocol, SymbolState,
                      WebsocketsConnection, parse_bars)
@@ -223,9 +224,19 @@ class AlpacaCryptoFeed(AlpacaFeed):
                 if q is None:
                     continue
                 st.new_trade = False
+                q = self._on_steps(q)
                 self.quotes[sym] = q
                 out.append(q)
         return out
+
+    def _on_steps(self, q):
+        """Sizes floored to the pair's quantity step, so a fill can never leave an unsellable remainder."""
+        info = self.crypto_info.get(q.symbol)
+        if info is None:
+            return q
+        step = spec_from_info(q.symbol, info).qty_increment
+        return replace(q, bid_size=floor_to(q.bid_size, step), ask_size=floor_to(q.ask_size, step),
+                       last_size=floor_to(q.last_size, step))
 
     def quote_age(self, symbol: str) -> Optional[float]:
         if symbol in self._cstate:

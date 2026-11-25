@@ -759,3 +759,32 @@ def test_margin_call_liquidation_sells_crypto_in_its_quantity_steps():
     assert steps[0]["symbol"] == COIN and assets.on_step(sold, D("0.0001"))
     assert sold == D("0.0131")  # just enough for the 520 deficit (and the spread), not a whole coin or the holding
     assert m.position(COIN) == D("0.2") - sold and m.cash < 0 and not ex.summary(m.id)["margin_call"]
+
+
+def test_provider_sizes_are_floored_to_the_step_and_a_whole_holding_can_always_be_sold():
+    feed, _ = crypto_feed()
+    feed.load_assets()
+    feed._on_crypto_stream([{"T": "q", "S": "BTC/USD", "bp": 31741, "bs": 0.123456789, "ap": 31742, "as": 0.98765,
+                             "t": "2022-05-31T11:55:58Z"},
+                            {"T": "t", "S": "BTC/USD", "p": 31742, "s": 0.00009, "t": "2022-05-31T11:55:59Z", "tks": "B"}])
+    [q] = feed.step(0)
+    assert (q.bid_size, q.ask_size, q.last_size) == (D("0.1234"), D("0.9876"), D("0.0000"))
+    # A holding off the step (from an earlier fill or a saved file) can still be sold in full.
+    ex, f2, clock, m, c = make()
+    ex.submit(c.id, {"symbol": COIN, "side": "buy", "qty": "0.0123"})
+    c.lots[COIN][0].qty = D("0.012345678")
+    with pytest.raises(OrderRejected, match="multiple of 0.0001"):
+        ex.submit(c.id, {"symbol": COIN, "side": "sell", "qty": "0.012345"})
+    [o] = ex.submit(c.id, {"symbol": COIN, "side": "sell", "qty": "0.012345678"})
+    assert o.status == "filled" and c.position(COIN) == 0
+
+
+def test_changing_an_order_checks_what_is_left_to_fill():
+    ex, feed, clock, m, c = make()
+    [o] = ex.submit(m.id, {"symbol": COIN, "side": "buy", "qty": "0.01", "type": "limit", "limit_price": "39000.00",
+                           "tif": "gtc"})
+    o.filled_qty = D("0.0095")  # partly filled
+    with pytest.raises(OrderRejected, match="what is left to fill"):
+        ex.replace(m.id, o.id, {"qty": "0.01"})  # 0.0005 left is below the 0.001 minimum
+    ex.replace(m.id, o.id, {"qty": "0.0105"})
+    assert o.qty == D("0.0105")

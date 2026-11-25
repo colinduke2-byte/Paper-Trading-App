@@ -604,9 +604,10 @@ class Exchange:
             qty = assets.floor_to(notional / ref, spec.qty_increment)
         if qty is None or qty <= 0:
             raise OrderRejected("quantity must be positive")
-        if not assets.on_step(qty, spec.qty_increment):
+        whole = side == m.SELL and qty == account.position(symbol)  # selling all of it is always allowed
+        if not whole and not assets.on_step(qty, spec.qty_increment):
             raise OrderRejected(f"the quantity of {symbol} must be a multiple of {spec.qty_increment.normalize():f}")
-        if qty < spec.min_order_size:
+        if qty < spec.min_order_size and not whole:
             extra = f" (that amount buys {qty.normalize():f})" if notional is not None else ""
             raise OrderRejected(f"the minimum order for {symbol} is {spec.min_order_size.normalize():f}{extra}")
         if side == m.SELL:
@@ -997,9 +998,12 @@ class Exchange:
             raise OrderRejected("the quantity of a one-cancels-other order cannot be raised")
         if is_crypto(o.symbol):
             spec = self.crypto_spec(o.symbol)
-            if qty is not None and (not assets.on_step(qty, spec.qty_increment) or qty < spec.min_order_size):
-                raise OrderRejected(f"the quantity of {o.symbol} must be a multiple of {spec.qty_increment.normalize():f} "
-                                    f"and at least {spec.min_order_size.normalize():f}")
+            rest = None if qty is None else qty - o.filled_qty  # what the changed order still has to fill
+            whole = qty is not None and o.side == m.SELL and rest == a.position(o.symbol)
+            if rest is not None and rest > 0 and not whole and (not assets.on_step(rest, spec.qty_increment)
+                                                                or rest < spec.min_order_size):
+                raise OrderRejected(f"what is left to fill of {o.symbol} must be a multiple of "
+                                    f"{spec.qty_increment.normalize():f} and at least {spec.min_order_size.normalize():f}")
             for label, v in (("limit price", limit), ("stop price", stop)):
                 if v is not None and not assets.on_step(v, spec.price_increment):
                     raise OrderRejected(f"the {label} for {o.symbol} must be a multiple of {spec.price_increment.normalize():f}")
