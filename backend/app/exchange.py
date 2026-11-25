@@ -498,6 +498,11 @@ class Exchange:
         but the money from the sells has not arrived. That stops a resting purchase from
         spending the cash that secures a resting short put. (A sale that must fill before
         the order it triggers is the exception: its money is there by then.)
+
+        Also in a cash account, an open order to buy back a short option is never counted on:
+        it may not fill. A short put stays an obligation and keeps its cash; buying back a
+        covered call costs its price but the call is still treated as open. Otherwise a resting
+        buy-back of a short put would make the cash that secures the put look free.
         """
         live = [o for o in self.engine.orders.values() if o.account_id == account.id
                 and (o.status in (m.WORKING, m.PARTIAL) or (o.status == m.HELD and o.role == m.TRIGGERED))]
@@ -509,7 +514,8 @@ class Exchange:
         combo_sets = [[]] + ([combos] if combos else []) + ([[c] for c in combos] if len(combos) > 1 else [])
         base = account.positions()
         result = None
-        for side in (None, m.BUY, m.SELL) + (("both",) if account.type == "cash" else ()):
+        cash_account = account.type == "cash"
+        for side in (None, m.BUY, m.SELL) + (("both",) if cash_account else ()):
             for combo_set in combo_sets:
                 pos, cash, seen, applied = dict(base), account.cash, {}, set()
 
@@ -523,12 +529,21 @@ class Exchange:
                             return
                         seen[(o.oco_group, o.symbol)], qty = qty, qty - prior
                     sign = 1 if o.side == m.BUY else -1
-                    pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * qty
+                    moved = qty
+                    if cash_account and sign > 0 and pos.get(o.symbol, ZERO) < 0 and (oc := parse_option(o.symbol)):
+                        closing = min(qty, -pos[o.symbol])  # the part that buys back a short option
+                        moved = qty - closing
+                        if oc.kind == "P":
+                            qty = moved  # a put buy-back may not happen at all
+                    pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * moved
                     cash -= self._fee(o.symbol, qty)
                     if sign > 0 or side != "both" or o.id in triggering:
                         cash -= sign * cents(qty * self._estimate_price(o) * multiplier(o.symbol))
 
-                for o in singles if side is not None else ():
+                # With both sides filling, sells go first so that a buy of the same option is seen
+                # as buying back the short the sell opened, and is not counted on (see above).
+                for o in (sorted(singles, key=lambda o: o.side != m.SELL) if side == "both" else singles) \
+                        if side is not None else ():
                     if (o.side != side and side != "both") or o.id in applied:
                         continue
                     if o.status == m.HELD:  # it can only fill after its entry has filled completely
