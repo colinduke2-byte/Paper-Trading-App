@@ -935,11 +935,21 @@ def test_step_under_the_lock_never_waits_for_the_command_lock_and_exit_stops_a_r
     ctx = app.state.ctx
     assert c.post("/api/replay/start", json={"session": SESSION.split(".")[0]}).status_code == 200
     rp = ctx.replay
+    tick, ticks = rp._tick, [0]
+
+    def slow_tick():  # 2 ms a simulated second: the 3.5 h seek cannot finish before the exit (about 25 s)
+        ticks[0] += 1
+        time.sleep(0.002)
+        tick()
+    rp._tick = slow_tick
     seeking, out = in_thread(lambda: rp.seek(rp.end))
-    assert wait_for(lambda: rp.now() > rp.start)
+    assert wait_for(lambda: ticks[0] > 0)
     assert c.post("/api/replay/exit").status_code == 200
+    after_exit = ticks[0]
     seeking.join(10)
-    assert not seeking.is_alive() and rp.closed and rp.now() < rp.end and ctx.ex is ex
+    assert not seeking.is_alive() and rp.closed and ctx.ex is ex
+    # Stopped at its next slice: no tick of the detached sandbox once the exit has answered.
+    assert ticks[0] == after_exit and rp.now() < rp.end and out["value"] < rp.end - rp.start
 
 
 def test_a_start_waits_until_an_exit_has_written_the_sandbox(tmp_path, monkeypatch):
@@ -986,3 +996,30 @@ def test_a_replay_starts_even_when_the_live_state_cannot_be_written(tmp_path, mo
     assert r.status_code == 200 and ctx.replay is not None and ex.dirty  # live is saved again later
     ex.write_plan = real
     assert c.post("/api/replay/exit").status_code == 200 and ctx.ex is ex
+
+
+def test_load_waits_out_a_file_briefly_held_by_another_program_on_windows(tmp_path, monkeypatch):
+    """On Windows, opening state.json while the save thread replaces it (or a virus scanner holds it)
+    raises PermissionError. load() must not take that for "no saved state" and start empty."""
+    import builtins
+    import app.exchange as exchange_mod
+    ex = Exchange(SyntheticFeed(seed=3, now=T0), SimClock(T0), data_dir=str(tmp_path))
+    ex.create_account("Kept", "margin", D("1234"))
+    ex.save(force=True)
+    real_open, refused = builtins.open, []
+
+    def held_open(path, *a, **kw):
+        if str(path).endswith("state.json") and len(refused) < 3:
+            refused.append(path)
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **kw)
+    monkeypatch.setattr(exchange_mod.os, "name", "nt")
+    monkeypatch.setattr(builtins, "open", held_open)
+    again = Exchange(SyntheticFeed(seed=3, now=T0), SimClock(T0), data_dir=str(tmp_path))
+    assert again.load() and [a.name for a in again.accounts.values()] == ["Kept"] and len(refused) == 3
+    # Elsewhere a PermissionError is a real permission problem: no waiting, the error is not hidden.
+    monkeypatch.setattr(exchange_mod.os, "name", "posix")
+    refused.clear()
+    with pytest.raises(PermissionError):
+        Exchange._read_text(os.path.join(str(tmp_path), "state.json"))
+    assert len(refused) == 1

@@ -1482,6 +1482,25 @@ class Exchange:
         Exchange._write_text(path, json.dumps(data))
 
     @staticmethod
+    def _read_text(path: str) -> str:
+        """The whole file, opened, read and closed in one step.
+
+        On Windows, opening a file raises PermissionError while it is being replaced (our own save
+        thread) or held open by another program (a virus scanner, a backup tool), so retry briefly
+        there; elsewhere PermissionError is a real permission problem and is raised at once.
+        """
+        attempts = 10 if os.name == "nt" else 1
+        for attempt in range(attempts):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return f.read()
+            except PermissionError:
+                if attempt == attempts - 1:
+                    raise
+                _time.sleep(0.02 * (attempt + 1))
+        raise AssertionError("unreachable")
+
+    @staticmethod
     def _write_text(path: str, text: str) -> None:
         # The temp file is created in the target directory, so the replace never crosses volumes.
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
@@ -1609,13 +1628,11 @@ class Exchange:
         if not self.data_dir:
             return False
         try:
-            with open(self._path("market.json"), encoding="utf-8") as f:
-                self.feed.restore(json.load(f))
+            self.feed.restore(json.loads(self._read_text(self._path("market.json"))))
         except (OSError, ValueError):
             pass
         try:
-            with open(self._path("state.json"), encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(self._read_text(self._path("state.json")))
         except (OSError, ValueError):
             return False
         # Parse everything first: a file that turns out to be unusable changes nothing.

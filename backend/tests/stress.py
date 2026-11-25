@@ -7,7 +7,6 @@ number of requests per worker for a long soak run.
 import json
 import os
 import random
-import shutil
 import sys
 import threading
 from collections import Counter
@@ -104,10 +103,16 @@ def problems(ex: Exchange) -> list:
     return out
 
 
-def load_state(path: str, scratch: str) -> Exchange:
-    """A fresh exchange loaded from one state.json (copied first, so the server can keep replacing it)."""
+def load_state(path: str, scratch: str, text: str = None) -> Exchange:
+    """A fresh exchange loaded from one state.json (copied first, so the server can keep replacing it).
+
+    The file is read the way the app reads it (`Exchange._read_text`: one open-read-close), so on
+    Windows a read that meets the save thread's replace behaves as the app's own load does."""
     os.makedirs(scratch, exist_ok=True)
-    shutil.copyfile(path, os.path.join(scratch, "state.json"))
+    if text is None:
+        text = Exchange._read_text(path)
+    with open(os.path.join(scratch, "state.json"), "w", encoding="utf-8") as f:
+        f.write(text)
     ex = Exchange(SimFeed(), SimClock(T0), data_dir=scratch)
     if not ex.load():
         raise ValueError("state.json could not be loaded")
@@ -117,9 +122,9 @@ def load_state(path: str, scratch: str) -> Exchange:
 def file_problems(path: str, scratch: str) -> list:
     """Problems of the state saved on disk, including ids a restart would hand out twice."""
     try:
-        with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
-        ex = load_state(path, scratch)
+        text = Exchange._read_text(path)  # one read: the parsed file and the loaded one are the same version
+        raw = json.loads(text)
+        ex = load_state(path, scratch, text)
     except FileNotFoundError:
         return []
     except Exception as e:  # noqa: BLE001 - any failure to load is the finding
