@@ -122,7 +122,9 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   provider data are model prices.
 - **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute to weekly) with SMA,
   EMA, Bollinger bands, VWAP and RSI, a synthetic depth ladder, time and sales, company facts, screener, and a
-  Research tab (real data needs a provider).
+  Research tab. Without a provider the Research tab is filled with simulated research for the fictional
+  companies: financial statements, earnings reports that gap the price, news, and an economic calendar, all
+  labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 - **Orders in the ticket:** market, limit, stop, stop limit and trailing stop; day, good till canceled,
   immediate or cancel and fill or kill; a bracket (take profit and stop loss); fractional shares; order
   preview; cancel. **In the engine and API, not yet in the ticket:** market and limit on open and on close,
@@ -139,13 +141,23 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
 - **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO, highest-cost,
   lowest-cost or tax-efficient (largest loss first) matching, realised gains report with holding period and
   informational wash-sale detail, tax-year summary, monthly statements, CSV export, trade journal, performance
-  statistics (Reports tab), price alerts.
+  statistics (Reports tab).
 - **Tax lots:** the Lots tab lists every open lot (open date, cost, value, unrealised gain, holding period and the
   date it turns long-term). Tick lots and press "Sell selected lots" to open the order ticket with them, or choose
   lots in the ticket's "Choose tax lots" section; the API takes `"lots": [{"lot_id": "L3", "qty": 5}]` on a closing
   order. Named lots are reserved while the order works; if another trade closes them first, the order is canceled.
   Wash-sale detail (replacement lot, disallowed loss, adjusted basis and holding period) is informational only and
   not tax advice.
+- **Alerts and notifications:** alerts on price, percent change, volume, indicators (moving-average
+  crosses, RSI, MACD on any bar size), option implied volatility and delta, position and account
+  gain/loss, account value, buying power and margin excess, reminders, and dividend or split dates of
+  symbols you hold; one-shot or re-arming with a cool-down, optional expiry and note (Alerts tab,
+  New alert). A bell lists every alert and system event (fills, canceled and expired orders, margin
+  calls, liquidation, dividends, splits, option exercise and expiry, data feed problems) with read
+  and unread state; it is kept per account and survives restarts. Browser notifications and a sound
+  are optional and asked for with a click. Browsers allow notifications only over HTTPS or on the
+  computer itself, so on a phone in LAN mode (plain HTTP) they stay inside the app. Earnings dates
+  are not available from the data feed, so there is no earnings alert.
 - **Historical replay:** replay a recorded or bundled session in a sandbox account with a simulated clock
   (`docs/REPLAY.md`); live state is never touched.
 - **Help:** an in-app Help panel (top bar, or the menu on a phone).

@@ -11,6 +11,8 @@ import { SettingsDialog } from "./Settings";
 import { HelpDialog } from "./Help";
 import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
 import { useSignOutAction } from "./Login";
+import { bellLabel, deliver, NotificationBell, NotificationPanel, useNotifications } from "./Notifications";
+import { ALERT_AT_PRICE, AlertBuilder, AlertSeed } from "./AlertsTab";
 
 type Toast = { id: number; text: string; bad?: boolean };
 
@@ -39,6 +41,11 @@ export default function App() {
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
   const ws = useRef<WebSocket | null>(null);
   const toastId = useRef(0);
+  const notes = useNotifications(accountId, modeKey(status) || "live", connected); // the bell and its log
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [alertBuilder, setAlertBuilder] = useState<null | { seed?: AlertSeed; editing?: any }>(null);
 
   const notify = useCallback((text: string, bad = false) => {
     const id = ++toastId.current;
@@ -99,8 +106,7 @@ export default function App() {
         if (m.events?.length) {
           setRefreshKey((k) => k + 1);
           for (const e of m.events) {
-            if (e.type === "alert") notify(`Alert: ${e.alert.symbol} ${e.alert.op === "above" ? "rose to" : "fell to"} ${money(e.last)}`);
-            if (e.type === "fill" && e.fill.kind !== "trade") notify(`${e.fill.kind === "reinvestment" ? "Dividend reinvestment" : e.fill.kind === "split_settlement" ? "Split settlement" : `Option ${e.fill.kind}`}: ${e.fill.side} ${e.fill.qty} ${e.fill.symbol} at ${money(e.fill.price)}`);
+            if (e.type === "notification" && notesRef.current.receive(e.notification)) deliver(e.notification, notify);
             if (e.type === "order" && e.order.status === "filled" && e.order.parent_id) notify(`Filled: ${e.order.role?.replace("_", " ") || "order"} on ${e.order.symbol} at ${money(e.order.avg_fill_price)}`);
           }
         }
@@ -140,6 +146,25 @@ export default function App() {
     setRefreshKey((k) => k + 1);
   });
 
+  // "Alert me at this price": anything can call requestPriceAlert(symbol, price) from AlertsTab.tsx.
+  const quotesRef = useRef(quotes);
+  quotesRef.current = quotes;
+  useEffect(() => {
+    const on = (ev: Event) => {
+      const { symbol: s, price } = (ev as CustomEvent).detail || {};
+      if (!s || !(Number(price) > 0)) return;
+      const last = quotesRef.current[s]?.last;
+      setAlertBuilder({ seed: { kind: "price", symbol: s, price: Number(price).toFixed(2), op: last != null && Number(price) < last ? "below" : "above" } });
+    };
+    window.addEventListener(ALERT_AT_PRICE, on);
+    return () => window.removeEventListener(ALERT_AT_PRICE, on);
+  }, []);
+  const editAlert = (id: string) =>
+    api(`/alert-rules?account_id=${encodeURIComponent(accountId)}`).then((list: any[]) => {
+      const a = list.find((x) => x.id === id);
+      if (a) setAlertBuilder({ editing: a }); else notify("That alert has been deleted.", true);
+    }).catch((e) => notify(`Could not load the alert: ${e.message}`, true));
+
   const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000, [modeKey(status)]);
   const ticketPos = positions.find((p) => p.symbol === seed.symbol);
   const stockPos = positions.find((p) => p.symbol === symbol);
@@ -163,6 +188,9 @@ export default function App() {
 
   // Top-bar actions: desktop shows them in the header, the phone layout lists them in its menu.
   const topActions: TopAction[] = [
+    ...(accountId ? [small
+      ? { label: bellLabel(notes.unread), onClick: () => setNotesOpen(true) }
+      : { label: "Notifications", element: <NotificationBell unread={notes.unread} onClick={() => setNotesOpen(true)} /> }] : []),
     { label: "New account", onClick: () => setDialog("new") },
     { label: "Reset", onClick: () => setDialog("reset") },
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
@@ -202,7 +230,7 @@ export default function App() {
         onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
-      {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
+      {view === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
     </div>
   );
   const bottom = accountId && (
@@ -222,6 +250,13 @@ export default function App() {
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
+      {notesOpen && accountId && (
+        <NotificationPanel notes={notes} onClose={() => setNotesOpen(false)} onSelect={pickSymbol} onAlert={editAlert} />
+      )}
+      {alertBuilder && accountId && (
+        <AlertBuilder accountId={accountId} seed={alertBuilder.seed} editing={alertBuilder.editing} quotes={quotes} positions={positions}
+          onClose={() => setAlertBuilder(null)} onSaved={(m) => { setAlertBuilder(null); notify(m); setRefreshKey((k) => k + 1); }} />
+      )}
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {settingsOpen && accountId && (

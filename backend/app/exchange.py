@@ -9,6 +9,7 @@ from decimal import Decimal
 from itertools import count
 from typing import Optional
 
+from .alerts import Alerting
 from .core import calendar as cal
 from .core import models as m
 from .core.clock import Clock
@@ -61,8 +62,8 @@ class Exchange:
         self._session_quotes: dict[str, Quote] = {}  # last quote each symbol had in a regular session
         self.accounts: dict[str, Account] = {}
         self.watchlists: dict[str, list] = {}
-        self.alerts: list[dict] = []
-        self.events: list[dict] = []  # drained by the API layer after each tick
+        self.alerting = Alerting(self)  # alerts and the notification centre (app/alerts)
+        self.events = self.alerting.stream()  # drained by the API layer after each tick; feeds notifications
         self._order_seq = count(1)
         self._acct_seq = count(1)
         self._alert_seq = count(1)
@@ -99,7 +100,9 @@ class Exchange:
         u = self.feed.quote(c.underlying)
         if u is None:
             return None
-        return optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), self.now())
+        now = self.now()
+        return optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), now,
+                                     self.feed.event_variance(c.underlying, c.expiry_ts, now))
 
     def quote_source(self, symbol: str) -> str:
         """Where quote(symbol) comes from: the feed's name, or "model" for a modelled option price."""
@@ -204,7 +207,8 @@ class Exchange:
             c = parse_option(sym)
             if c:
                 u = self.feed.quote(c.underlying)
-                snap = optchain.option_snapshot(c, float(u.last), self.feed.base_vol(c.underlying), self.now())
+                snap = optchain.option_snapshot(c, float(u.last), self.feed.base_vol(c.underlying), self.now(),
+                                                self.feed.event_variance(c.underlying, c.expiry_ts, self.now()))
                 row.update(delta=snap["delta"] * float(qty) * 100, theta=snap["theta"] * float(qty) * 100,
                            underlying=c.underlying, expiry=c.expiry.isoformat())
             else:
@@ -1228,7 +1232,7 @@ class Exchange:
                 self._handle(self.engine.on_quote(self.quote(sym), now, sess))
         self._process_expirations(now)
         self.lifecycle.after_step(now)  # margin calls and liquidation
-        self._check_alerts(quotes, now)
+        self.alerting.on_tick(quotes, now)
         if now - self._last_equity_sample >= 60:
             self._last_equity_sample = now
             for a in self.accounts.values():
@@ -1303,39 +1307,20 @@ class Exchange:
                 self.dirty = True
 
     # ---- alerts and watchlists ----------------------------------------------
+    @property
+    def alerts(self) -> list:
+        """Every alert record (app/alerts/model.py). Price alerts keep the original fields."""
+        return self.alerting.list()
+
     def add_alert(self, symbol: str, op: str, price) -> dict:
-        symbol = symbol.upper().strip()
-        if not self.is_stock(symbol):
-            raise ValueError(f"unknown symbol {symbol}")
-        if op not in ("above", "below"):
-            raise ValueError("alert must be 'above' or 'below'")
-        price = parse_num(price)
-        if price <= 0:
-            raise ValueError("price must be positive")
-        alert = {"id": f"AL{next(self._alert_seq):05d}", "symbol": symbol, "op": op, "price": str(price),
-                 "created_at": self.now(), "triggered_at": None}
-        self.alerts.append(alert)
-        self.dirty = True
-        return alert
+        return self.alerting.create({"kind": "price", "symbol": symbol, "op": op, "price": price})
 
     def remove_alert(self, alert_id: str) -> None:
-        self.alerts = [a for a in self.alerts if a["id"] != alert_id]
-        self.dirty = True
-
-    def _check_alerts(self, quotes: list, now: float) -> None:
-        if not self.alerts:
-            return
-        last = {q.symbol: q.last for q in quotes}
-        for al in self.alerts:
-            if al["triggered_at"] is None and al["symbol"] in last:
-                px, level = last[al["symbol"]], D(al["price"])
-                if (al["op"] == "above" and px >= level) or (al["op"] == "below" and px <= level):
-                    al["triggered_at"] = now
-                    self.events.append({"type": "alert", "alert": dict(al), "last": px})
-                    self.dirty = True
+        self.alerting.delete(alert_id)
 
     def drain_events(self) -> list:
-        out, self.events = self.events, []
+        out = list(self.events)
+        self.events.clear()
         return out
 
     # ---- persistence -----------------------------------------------------------
@@ -1378,7 +1363,8 @@ class Exchange:
                 "version": 1,
                 "accounts": [a.to_plain() for a in self.accounts.values()],
                 "orders": [to_plain(o) for o in self.engine.orders.values()],
-                "watchlists": self.watchlists, "alerts": self.alerts,
+                "watchlists": self.watchlists, "alerts": self.alerting.to_plain(),
+                "notifications": self.alerting.notices.to_plain(),
                 "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})
         now = self.now()
         if force or now - self._last_market_save >= 60:
@@ -1414,7 +1400,8 @@ class Exchange:
         self.accounts = {a["id"]: Account.from_plain(a) for a in data["accounts"]}
         seq = data["seq"]
         self.engine.restore([from_plain(Order, o) for o in data["orders"]], seq["fill"])
-        self.watchlists, self.alerts = data.get("watchlists", {}), data.get("alerts", [])
+        self.watchlists = data.get("watchlists", {})
+        self.alerting.restore(data.get("alerts", []), data.get("notifications"))
         self._order_seq, self._acct_seq = count(seq["order"]), count(seq["account"])
         self._alert_seq, self._expiry_seq = count(seq["alert"]), count(seq["expiry"])
         self.lifecycle.restore(data.get("lifecycle"))

@@ -53,6 +53,7 @@ def _synthetic_run(step_days):
     feed = SyntheticFeed(seed=7, now=start, history_days=30)
     for info in feed.info.values():
         info["vol"] = 0.0  # no random walk, so prices only move by corporate actions
+    feed.research.applies_moves = False  # nor by simulated earnings and economic releases
     ex = Exchange(feed, clock)
     ex.tick()
     a = acct(ex, "cash", "100000")
