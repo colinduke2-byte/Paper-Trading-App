@@ -334,3 +334,5 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   Sent to its author session_01ByytwasdvqLUP3YCB8ntH4.
 - Workers now: threadsafety-final, cashfix, provideractions fixes, backup fixes.
 - Still to schedule: hardening redo (list above) and crossbrowser/uxpolish completion feed into phase 3.
+- 01:41 UTC: PR 19 backup fixed at af09dff (all 8 findings; comment on PR 19): ready for the integrator.
+  Hardening redo started: session_01ByytwaV1tubqxRNvcHv97i on stream/hardening (opens a PR to main).
