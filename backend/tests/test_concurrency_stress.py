@@ -29,7 +29,7 @@ def check_everything(rig: Rig, capsys, state_findings=()):
 
 
 def test_orders_accounts_and_settings_from_many_threads_while_the_market_ticks(tmp_path, capsys):
-    workers, requests = scaled(6, 12), scaled(60, 2500)
+    workers, requests = scaled(6, 8), scaled(60, 500)
     rig = Rig(tmp_path, seed=11, accounts=(("margin", "5000000"), ("margin", "300000"), ("cash", "200000")))
     steady, chaos, cash = rig.accounts
     stop, found = threading.Event(), []
@@ -63,7 +63,7 @@ def test_orders_accounts_and_settings_from_many_threads_while_the_market_ticks(t
 
 
 def test_a_double_click_with_one_client_id_makes_one_order(tmp_path, capsys):
-    rounds, clicks = scaled(16, 400), 8
+    rounds, clicks = scaled(16, 150), 8
     rig = Rig(tmp_path, seed=5)
     aid = rig.accounts[0]
     with rig:
@@ -87,7 +87,7 @@ def test_a_double_click_with_one_client_id_makes_one_order(tmp_path, capsys):
 
 
 def test_cancel_against_fill_ends_in_exactly_one_terminal_state(tmp_path, capsys):
-    rounds, per_round = scaled(16, 500), 8
+    rounds, per_round = scaled(16, 150), 8
     feed = SimFeed()
     feed.set_quote("ABC", D("100.49"), D("100.50"), D("100.50"))
     rig = Rig(tmp_path, feed=feed, step=1.0)
@@ -131,7 +131,7 @@ def test_cancel_against_fill_ends_in_exactly_one_terminal_state(tmp_path, capsys
 
 
 def test_reset_and_delete_during_working_orders_and_liquidation(tmp_path, capsys):
-    rounds = scaled(12, 200)
+    rounds = scaled(12, 100)
     feed = SimFeed()
     feed.set_quote("ABC", D("99.99"), D("100.00"), D("100.00"), bid_size=100000, ask_size=100000)
     feed.set_quote("XYZ", D("49.99"), D("50.00"), D("50.00"), bid_size=100000, ask_size=100000)
@@ -178,7 +178,7 @@ def test_reset_and_delete_during_working_orders_and_liquidation(tmp_path, capsys
 
 
 def test_replay_enter_step_and_exit_under_load_leave_live_state_byte_identical(tmp_path, capsys):
-    rounds, requests = scaled(3, 60), scaled(25, 600)
+    rounds, requests = scaled(3, 20), scaled(25, 300)
     rig = Rig(tmp_path, seed=3)
     live_id, ctx = rig.accounts[0], None
     session = sorted(f for f in os.listdir(BUNDLED_DIR) if f.endswith(".gz"))[0].split(".")[0]

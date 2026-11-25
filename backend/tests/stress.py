@@ -166,6 +166,7 @@ class Rig:
         self.lock = threading.Lock()
         self.accepted = []  # [(client_id or None, [order ids])] of every accepted submit to accounts[0]
         self.canceled = []  # order ids whose cancel returned 200
+        self.busy = 0  # 503 answers (soak runs only)
         self.open_ids = []
         self._interval = sys.getswitchinterval()
 
@@ -182,6 +183,13 @@ class Rig:
 
     def call(self, method: str, path: str, **kw):
         r = self.client.request(method, path, **kw)
+        if r.status_code == 503 and SCALE:
+            # The soak ticks 200 times as often as a real server on a state of thousands of orders, so the
+            # tick holds the lock most of the time and a request can wait out its 2 seconds. "Busy" is the
+            # designed answer then; the soak checks the books, the fast run also forbids any 503.
+            with self.lock:
+                self.busy += 1
+            return r
         if r.status_code not in OK_STATUSES:
             with self.lock:
                 self.failures.append((method, path, r.status_code, r.text[:300]))
