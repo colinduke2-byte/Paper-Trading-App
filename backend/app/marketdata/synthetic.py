@@ -47,6 +47,9 @@ UNIVERSE = [
 
 TRADING_SECONDS_PER_YEAR = 252 * 6.5 * 3600
 ALWAYS_OPEN_SECONDS_PER_YEAR = 252 * 24 * 3600
+# Days of one-minute bars generated before today. Two days give the hourly chart 48 bars, enough for
+# every default indicator (MACD 12 26 9 needs 34), and leave room in the 6000-bar store for today.
+PRIOR_MINUTE_DAYS = 2
 # Quarterly dividend months, by position in UNIVERSE modulo 3.
 DIVIDEND_MONTHS = ((1, 4, 7, 10), (2, 5, 8, 11), (3, 6, 9, 12))
 SPLIT_CANDIDATES = [u[0] for u in sorted(UNIVERSE, key=lambda u: -u[3])[:6]]  # the highest-priced listings
@@ -108,6 +111,7 @@ class SyntheticFeed(MarketDataProvider):
             # Intraday minutes for today so charts are not empty at start-up.
             midnight = int(now // 86400) * 86400
             minute_sigma = vol * math.sqrt(60 / self.year_seconds)
+            self._generate_prior_minutes(sym, midnight, price, minute_sigma)
             p = price * math.exp(daily_sigma * 0.3 * rng.gauss(0, 1))
             day_open = p
             hi, lo, vol_sum = p, p, 0
@@ -123,6 +127,22 @@ class SyntheticFeed(MarketDataProvider):
                                                 cents(Decimal(repr(round(hi, 2)))), cents(Decimal(repr(round(lo, 2)))),
                                                 Decimal(vol_sum), trade=False)
             self._day[sym] = self._utc_date(now)
+
+    def _generate_prior_minutes(self, sym: str, midnight: int, close: float, minute_sigma: float) -> None:
+        """Minute bars for the days before today, so intraday charts and indicators have enough bars
+        whatever the time of day (just after UTC midnight today has almost none).
+
+        The walk runs backwards from the previous close, so it ends exactly there. It draws from its
+        own random stream: the daily history, today's bars and the quotes are the same as without it.
+        """
+        rng = random.Random(f"{sym}-prior-minutes")
+        rows, p = [], close
+        for t in range(midnight - 60, midnight - PRIOR_MINUTE_DAYS * 86400 - 60, -60):
+            c = p
+            p = p * math.exp(minute_sigma * rng.gauss(0, 1))
+            rows.append([t, round(p, 2), round(max(p, c) * 1.0003, 2), round(min(p, c) * 0.9997, 2), round(c, 2),
+                         int(rng.uniform(200, 4000))])
+        self.store.minutes.setdefault(sym, deque(maxlen=6000)).extend(reversed(rows))
 
     @staticmethod
     def _utc_date(ts: float) -> date:
