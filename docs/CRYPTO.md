@@ -35,6 +35,7 @@ filter by it. Symbols with a slash work in URL paths: `/api/bars/SIMCOIN/USD?tf=
 | Prices | Limit and stop prices must be a multiple of the pair's price increment | Alpaca lists `price_increment` per pair |
 | Short selling | Never, in cash and margin accounts: a sell may not exceed the holding minus open sells | Alpaca: "Cryptocurrencies can not be sold short." |
 | Margin | Fully paid. In a margin account crypto has a 100% requirement (initial and maintenance), so it neither adds to nor uses stock buying power, and a crypto purchase is refused if it (with the account's other open purchases) would take cash below zero | Alpaca: "Cryptocurrencies cannot be bought on margin." |
+| Margin calls | A crypto price move alone never causes a margin call (crypto counts the same in equity and in the requirement). In a margin call caused by stocks or options, liquidation may sell crypto, in the pair's quantity steps and only as much as the deficit needs. Liquidation runs only in the regular stock session, so nothing is liquidated at weekends, crypto included | |
 | Settlement | Immediate (no unsettled proceeds, even with T+1 on) | |
 | Pattern day trader rule | Crypto round trips are not counted, and crypto orders are not blocked by the rule | The rule covers securities |
 | Dividends, splits, interest, borrow fees | Do not apply (corporate actions on a crypto symbol are ignored) | |

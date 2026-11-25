@@ -742,3 +742,20 @@ def test_simulated_research_ignores_the_coins():
     assert not any(assets.is_crypto(s) for s in r.stocks())
     assert r.upcoming_releases(COIN, SAT - 400 * 86400, SAT + 400 * 86400) == []
     assert for_replay(feed) is not None  # a replay of synthetic data with coins still gets research
+
+
+def test_margin_call_liquidation_sells_crypto_in_its_quantity_steps():
+    ex, feed, clock, m, c = make(t=MONDAY, cash=D("20000"))
+    ex.submit(m.id, {"symbol": COIN, "side": "buy", "qty": "0.2"})  # 8,000 + 20 fee, fully paid
+    ex.submit(m.id, {"symbol": "ABC", "side": "buy", "qty": "200"})  # 20,000, partly on margin
+    clock.advance(1)
+    feed.set_quote("ABC", D("49.99"), D("50.00"), D("50.00"))
+    set_coin(feed, "40000.00")
+    ex.tick()
+    s = ex.summary(m.id)
+    assert s["margin_call"] and s["maintenance_requirement"] - s["equity"] == D("520.00")
+    steps = ex.lifecycle.liquidate(m, ex.now())
+    sold = steps[0]["qty"]
+    assert steps[0]["symbol"] == COIN and assets.on_step(sold, D("0.0001"))
+    assert sold == D("0.0131")  # just enough for the 520 deficit (and the spread), not a whole coin or the holding
+    assert m.position(COIN) == D("0.2") - sold and m.cash < 0 and not ex.summary(m.id)["margin_call"]

@@ -575,8 +575,10 @@ class LifecycleManager:
                 if marginal > 0:
                     slip = max((marks[sym] - quote.bid) if q > 0 else (quote.ask - marks[sym]), ZERO) * mult
                     per_unit = marginal / abs(q) - slip
-                    want = abs(q) if per_unit <= 0 else (deficit / per_unit).to_integral_value(ROUND_CEILING)
-                    want = min(max(want, Decimal(1)), abs(q))
+                    # Whole shares and contracts; a crypto pair in its own quantity steps.
+                    step = ex.crypto_spec(sym).qty_increment if is_crypto(sym) else Decimal(1)
+                    want = abs(q) if per_unit <= 0 else ((deficit / per_unit) / step).to_integral_value(ROUND_CEILING) * step
+                    want = min(max(want, step), abs(q))
                     qty = self._safe_qty(pos, sym, q, want, before_unc)
                     if qty > 0:
                         req_after = margin.requirement(self._reduced(pos, sym, q, qty), marks, maintenance=True)
