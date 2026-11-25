@@ -19,3 +19,4 @@ run.sh
 run.bat
 Dockerfile
 docker-compose.yml
+!THIRD_PARTY_NOTICES.md

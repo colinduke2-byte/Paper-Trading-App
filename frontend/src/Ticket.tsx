@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { api, isOption, money, ORDER_TYPES, qty as fmtQty, TIFS, usd } from "./util";
+import { api, isOption, money, numText, ORDER_TYPES, qty as fmtQty, TIFS, usd } from "./util";
 
-export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; stop_price?: number; nonce?: number };
+// note: shown under the limit price while it is still the seeded one (why the ticket chose that price).
+export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; stop_price?: number; nonce?: number; note?: string };
 
 export function Ticket({ seed, accountId, quote, description, position, onPlaced }: {
   seed: TicketSeed; accountId: string; quote: any; description: string; position: any; onPlaced: (msg: string) => void;
@@ -38,14 +39,14 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
   const immediateOk = type === "market" || type === "limit";
 
   const body = () => ({
-    symbol: seed.symbol, side, qty, type, tif,
-    limit_price: hasLimit ? limit : null,
-    stop_price: hasStop ? stop : null,
-    trail_amount: type === "trailing_stop" && trailMode === "amount" ? trail : null,
-    trail_percent: type === "trailing_stop" && trailMode === "percent" ? trail : null,
+    symbol: seed.symbol, side, qty: numText(qty), type, tif,
+    limit_price: hasLimit ? numText(limit) : null,
+    stop_price: hasStop ? numText(stop) : null,
+    trail_amount: type === "trailing_stop" && trailMode === "amount" ? numText(trail) : null,
+    trail_percent: type === "trailing_stop" && trailMode === "percent" ? numText(trail) : null,
     extended_hours: ext && type === "limit",
-    take_profit: bracket && canBracket && tp ? tp : null,
-    stop_loss: bracket && canBracket && sl ? sl : null,
+    take_profit: bracket && canBracket && tp ? numText(tp) : null,
+    stop_loss: bracket && canBracket && sl ? numText(sl) : null,
   });
 
   const edit = (fn: () => void) => { fn(); setPreview(null); setError(""); };
@@ -104,6 +105,7 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
       </label>
       {hasStop && <label>Stop price<input inputMode="decimal" value={stop} onChange={(e) => edit(() => setStop(e.target.value))} /></label>}
       {hasLimit && <label>Limit price<input inputMode="decimal" value={limit} onChange={(e) => edit(() => setLimit(e.target.value))} /></label>}
+      {hasLimit && seed.note && seed.limit_price != null && limit === String(seed.limit_price) && <p className="muted ticket-note">{seed.note}</p>}
       {type === "trailing_stop" && (
         <label>Trail by
           <span className="row">

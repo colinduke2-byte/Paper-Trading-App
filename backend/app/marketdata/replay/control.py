@@ -128,7 +128,7 @@ class ReplayController:
     def step(self, seconds=60) -> int:
         try:
             seconds = int(seconds)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError("step must be a whole number of seconds") from None
         if not 1 <= seconds <= 3600:
             raise ValueError("step must be from 1 to 3600 seconds")

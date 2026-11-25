@@ -63,7 +63,8 @@ restore the latest backup, start fresh or quit. Only one server can use a data f
 | `PAPERDESK_BIND` | `127.0.0.1` | Docker only: where compose publishes the port. `0.0.0.0` is refused without LAN mode |
 | `PAPERDESK_FEED`, `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `FINNHUB_API_KEY`, ... | unset | Real market data: see [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) |
 
-`.env.example` lists every setting.
+`.env.example` lists every setting. Each can go in the environment or in `.env` next to `run.sh` (read first, at
+start-up, by the server and by `run.sh`/`run.bat`; a variable already set in the environment wins).
 
 ### Use it from your phone (LAN mode)
 
@@ -128,7 +129,9 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   provider data are model prices.
 - **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute to weekly) with SMA,
   EMA, Bollinger bands, VWAP and RSI, a synthetic depth ladder, time and sales, company facts, screener, and a
-  Research tab (real data needs a provider).
+  Research tab. Without a provider the Research tab is filled with simulated research for the fictional
+  companies: financial statements, earnings reports that gap the price, news, and an economic calendar, all
+  labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 - **Orders in the ticket:** market, limit, stop, stop limit and trailing stop; day, good till canceled,
   immediate or cancel and fill or kill; a bracket (take profit and stop loss); fractional shares; order
   preview; cancel. **In the engine and API, not yet in the ticket:** market and limit on open and on close,
@@ -144,7 +147,17 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   dividends, for the simulated feed. Real-provider actions are shown in Research but not applied.
 - **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO or highest-cost
   matching, realised gains report with holding period and an informational wash-sale flag, monthly statements,
-  CSV export, trade journal, performance statistics (Reports tab), price alerts.
+  CSV export, trade journal, performance statistics (Reports tab).
+- **Alerts and notifications:** alerts on price, percent change, volume, indicators (moving-average
+  crosses, RSI, MACD on any bar size), option implied volatility and delta, position and account
+  gain/loss, account value, buying power and margin excess, reminders, and dividend or split dates of
+  symbols you hold; one-shot or re-arming with a cool-down, optional expiry and note (Alerts tab,
+  New alert). A bell lists every alert and system event (fills, canceled and expired orders, margin
+  calls, liquidation, dividends, splits, option exercise and expiry, data feed problems) with read
+  and unread state; it is kept per account and survives restarts. Browser notifications and a sound
+  are optional and asked for with a click. Browsers allow notifications only over HTTPS or on the
+  computer itself, so on a phone in LAN mode (plain HTTP) they stay inside the app. Earnings dates
+  are not available from the data feed, so there is no earnings alert.
 - **Historical replay:** replay a recorded or bundled session in a sandbox account with a simulated clock
   (`docs/REPLAY.md`); live state is never touched.
 - **Help:** an in-app Help panel (top bar, or the menu on a phone).
@@ -159,9 +172,14 @@ accounts and HTTPS.
 
 ```bash
 cd backend
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -c constraints.txt -e ".[dev]"
 .venv/bin/pytest
 ```
+
+`backend/constraints.txt` pins the exact versions the tests passed with; run.sh, run.bat, the Docker image
+and CI install with it, while `pyproject.toml` keeps the version ranges. To move to newer versions, follow
+the steps at the top of `tools/backend_constraints.py`. `THIRD_PARTY_NOTICES.md` lists every dependency with
+its licence; regenerate it with `python tools/third_party_notices.py` after a dependency change.
 
 ```bash
 cd frontend
@@ -170,7 +188,11 @@ npm run dev
 ```
 
 `npm run dev` serves the UI on port 5173 and proxies to the backend on port 8000.
-`npm run build` writes `frontend/dist`, which the backend serves.
+`npm run build` writes `frontend/dist`, which the backend serves, with `dist/build.json` naming a hash of
+the sources it was built from. If `frontend/src` is newer than the bundle, the server logs a warning and the UI
+shows a notice. On `main`, the "Rebuild bundled UI" workflow rebuilds and commits `frontend/dist` after every
+push, and CI fails if the committed bundle does not match the sources; pull requests get the built bundle as
+an artifact instead.
 
 ## Tests and CI
 

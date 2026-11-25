@@ -53,6 +53,7 @@ def _synthetic_run(step_days):
     feed = SyntheticFeed(seed=7, now=start, history_days=30)
     for info in feed.info.values():
         info["vol"] = 0.0  # no random walk, so prices only move by corporate actions
+    feed.research.applies_moves = False  # nor by simulated earnings and economic releases
     ex = Exchange(feed, clock)
     ex.tick()
     a = acct(ex, "cash", "100000")
@@ -236,7 +237,7 @@ def test_alerts_are_split_adjusted():
 def test_margin_call_flapping_keeps_the_start_time_and_does_not_spam():
     ex, feed, clock = make_exchange()
     deep(ex, feed, clock, "100")
-    a = acct(ex)
+    a = acct(ex, margin_call_grace_hours="0.2")  # 12 minutes
     ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1900})  # call below ~63.16
     deep(ex, feed, clock, "63.10")
     since = ex.summary(a)["margin_call_since"]
@@ -246,8 +247,8 @@ def test_margin_call_flapping_keeps_the_start_time_and_does_not_spam():
     assert ex.summary(a)["margin_call_since"] == since
     assert len(ex.account(a).ledger.transactions) == n_txns
     assert len(logs(ex, a, "margin_call")) == 1
-    clock.set(since + 48 * 3600)
-    deep(ex, feed, clock, "63.10", seconds=0)
+    for _ in range(3):  # 600 s of flapping counted; 120 s more completes the 720 s grace period
+        deep(ex, feed, clock, "63.10", seconds=60)
     assert ex.account(a).position("ABC") < 1900  # the grace period was not restarted
 
 

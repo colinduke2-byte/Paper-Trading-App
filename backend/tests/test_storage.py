@@ -239,7 +239,9 @@ def test_a_save_after_one_trade_writes_little(tmp_path):
     trade(ex, feed, clock, a, n=1)
     assert ex.save()
     b = ex.store.last_bytes
-    assert b["appended"] < 3000 and b["state"] < full / 10, (b, full)
+    # The notification centre (alerts, on main) is rewritten whole; it is bounded and not part of this change.
+    notices = len(json.dumps(ex.document_head()["notifications"]))
+    assert b["appended"] < 3000 and b["state"] < (full - notices) / 10 + notices, (b, full, notices)
     assert doc_of(reload(tmp_path, SimClock(clock.now()))) == doc_of(ex)
 
 

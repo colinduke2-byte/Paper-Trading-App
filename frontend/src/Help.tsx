@@ -1,4 +1,5 @@
-import { ReactNode, useEffect, useRef } from "react";
+import { ReactNode } from "react";
+import { Dialog } from "./Dialog";
 import "./help.css";
 
 // In-app help. The app runs offline, so the essentials are here; the full guide is docs/USER_GUIDE.md in the
@@ -60,7 +61,7 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>A <b>cash account</b> cannot borrow and cannot sell short. A <b>margin account</b> can borrow against its holdings and can sell short (Sell more shares than you own). Buying power on a margin account is about twice its spare equity for stocks.</p>
-        <p>If a margin account's value falls below the maintenance requirement you get a <b>margin call</b>. Unless you fix it within the grace period, PaperDesk sells positions for you (you can turn that off in Settings). The <b>Settings</b> button lists every account rule (settlement, day trading limit, interest, margin calls) with its default.</p>
+        <p>If a margin account's value falls below the maintenance requirement you get a <b>margin call</b>. Unless you fix it within the grace period, PaperDesk sells positions for you (you can turn that off in Settings). The grace period counts only time while the market is open and PaperDesk is running: time while the app is closed or a replay runs does not count, and after such a pause the account log says how much grace is left. Account value includes dividends pending and subtracts margin interest and borrow fees accrued but not yet charged. The <b>Settings</b> button lists every account rule (settlement, day trading limit, interest, margin calls) with its default.</p>
         <p><b>Reset</b> erases an account's history and starts again. It cannot be undone.</p>
       </>
     ),
@@ -81,7 +82,18 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>Phone access is off by default. To turn it on, set a passcode and LAN mode in the <code>.env</code> file, restart PaperDesk, and open the address it prints from a phone on the same Wi-Fi. Home Wi-Fi only: the connection is not encrypted.</p>
-        <p>On a phone, the tabs at the bottom switch between Watchlist, Chart, Trade and Account. The menu at the top right holds the account picker, New account, Reset, Replay, Settings, this help and Sign out.</p>
+        <p>On a phone, the tabs at the bottom switch between Watchlist, Chart, Trade and Account. The menu at the top right holds the account picker, New account, Reset, Delete account, Replay, Settings, this help and Sign out.</p>
+      </>
+    ),
+  },
+  {
+    id: "about",
+    title: "About",
+    body: (
+      <>
+        <p>PaperDesk is a paper trading simulator. It uses open-source software; the file <code>THIRD_PARTY_NOTICES.md</code> in the PaperDesk folder lists every package with its licence.</p>
+        <p>Price charts: TradingView Lightweight Charts, Copyright TradingView, Inc., Apache License 2.0.</p>
+        <p><a className="help-link" href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Charting by TradingView</a></p>
       </>
     ),
   },
@@ -95,19 +107,11 @@ const SECTIONS: Section[] = [
 ];
 
 export function HelpDialog({ onClose }: { onClose: () => void }) {
-  const close = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    close.current?.focus();
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} className="modal help-modal" labelledBy="help-title">
         <div className="help-head">
           <h3 id="help-title">Help</h3>
-          <button ref={close} className="ghost" onClick={onClose}>Close help</button>
+          <button className="ghost" autoFocus onClick={onClose}>Close help</button>
         </div>
         <p className="muted help-lead">PaperDesk simulates trading with pretend money. It never sends an order to a broker.</p>
         <div className="help-body">
@@ -118,7 +122,6 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
             </details>
           ))}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }

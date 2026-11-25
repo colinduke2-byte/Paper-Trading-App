@@ -91,9 +91,10 @@ def test_manual_check_without_keys_prints_fail_and_no_secrets(monkeypatch, capsy
     from app.marketdata import alpaca
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
-    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
+    monkeypatch.setenv("PAPERDESK_ENV_FILE", str(tmp_path / "none"))
     assert alpaca._check() == 1
-    assert capsys.readouterr().out.startswith("FAIL keys:")
+    out = capsys.readouterr().out
+    assert out.startswith("FAIL keys:") and out.splitlines()[-1] == "SUMMARY: 0 of 1 checks passed"
 
 
 # ---- research parsing ------------------------------------------------------------------------------
@@ -211,14 +212,17 @@ def test_research_routes_live():
     assert c.get("/api/research/sources").json()["earnings"] == "Finnhub"
 
 
-def test_research_routes_on_the_synthetic_feed_say_unavailable():
+def test_research_routes_on_the_synthetic_feed_are_simulated():
+    # Replaces the earlier "say unavailable" test: the synthetic feed now has simulated research
+    # (app.marketdata.simresearch), labelled as such. Live-hub behaviour is covered above.
     ex = Exchange(SyntheticFeed(seed=3, now=NOW))
     c = TestClient(create_app(ex, run_loop=False))
     for path in ("news", "fundamentals", "corporate-actions"):
         r = c.get(f"/api/research/{path}/NVLX").json()
-        assert r["available"] is False and "fictional" in r["reason"]
+        assert r["available"] is True and r["source"] == "Simulated" and r["simulated"] is True
     cal = c.get("/api/research/calendar/NVLX").json()
-    assert cal["earnings"]["available"] is False
+    assert cal["earnings"]["available"] is True and cal["earnings"]["items"]
+    assert c.get("/api/research/sources").json()["reason"] is None
     st = c.get("/api/status").json()
     assert st["realtime"] is False and st["data_source"] == "simulated"
 
@@ -228,3 +232,23 @@ def test_live_feed_follows_browser_subscriptions():
     ex.watchlists = {"Main": ["SPY"]}
     c.app.state.ctx.clients[object()] = {"symbols": ["TSLA"], "account": None}
     assert feed.wanted()[:2] == ["SPY", "TSLA"]
+
+
+def test_fundamentals_work_before_the_daily_bar_has_arrived():
+    c, ex, feed, _ = live_client()
+    q = feed.quote("AAPL")
+    assert q.high is None and q.low is None  # the saved snapshot carries no daily bar for AAPL
+    r = c.get("/api/fundamentals/AAPL")
+    assert r.status_code == 200, r.text
+    f = r.json()
+    daily = feed.bars("AAPL", "1d", 252)
+    assert f["symbol"] == "AAPL" and f["simulated"] is False
+    assert f["high_52w"] == (max(b["high"] for b in daily) if daily else None)
+    assert f["low_52w"] == (min(b["low"] for b in daily) if daily else None)
+
+
+def test_fundamentals_report_no_range_when_there_are_no_bars_and_no_daily_high_or_low():
+    c, ex, feed, _ = live_client()
+    feed.bars = lambda symbol, timeframe, limit=None: []
+    f = c.get("/api/fundamentals/AAPL").json()
+    assert f["high_52w"] is None and f["low_52w"] is None and f["avg_volume_30d"] is None
