@@ -326,3 +326,11 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   session_01Byytwbmbp2zVBAAd9s3p93 fixes them on stream/cashfix. Cash invariant still open on main.
 - PR 19 review: session_01ByytwYu2DnD9MJeK4CGJKQ. PR 22 waiting for green checks to merge.
 - PRs 21 and 27 CLOSED by the owner as superseded (by PR 28 and by main).
+- 01:26 UTC: PR 22 (fundamentals with no day range) MERGED.
+- PR 17 review: REJECT until findings 1-3 fixed (late corporate action applied to a position bought
+  after the ex-date; margin calls can be switched off indefinitely; simulated-feed fills change).
+  Fix worker session_01ByytwbfYBDGd6t6MFSgJ37 on stream/provideractions.
+- PR 19 review: approve with fixes (HIGH: reused order id after a crash loads the lost order).
+  Sent to its author session_01ByytwasdvqLUP3YCB8ntH4.
+- Workers now: threadsafety-final, cashfix, provideractions fixes, backup fixes.
+- Still to schedule: hardening redo (list above) and crossbrowser/uxpolish completion feed into phase 3.
