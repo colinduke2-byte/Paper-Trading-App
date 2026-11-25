@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { AlertsTab } from "./AlertsTab";
+import { ChangeOrderButton } from "./ChangeOrder";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
-import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, price, qty, signed, STATUS, TIFS, tone, usd } from "./util";
+import { api, compact, dateTime, isOption, money, numText, ORDER_TYPES, pct, price, qty, signed, STATUS, TIFS, tone, usd } from "./util";
 
 const TABS = ["Positions", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
@@ -105,7 +106,9 @@ function Orders({ accountId, orders, onChanged, notify, onSelect }: any) {
                 <td>{TIFS[o.tif]}</td>
                 <td className="num">{o.avg_fill_price == null ? "–" : price(o.avg_fill_price)}</td>
                 <td title={o.reason || undefined}>{STATUS[o.status] || o.status}{o.reason && o.status !== "filled" ? <span className="muted"> · {o.reason}</span> : null}</td>
-                <td className="num">{active(o) && <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button>}</td>
+                <td className="num row-actions">{active(o) && <>
+                  <ChangeOrderButton accountId={accountId} order={o} onChanged={onChanged} notify={notify} />
+                  <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button></>}</td>
               </tr>
             ))}
           </tbody>
@@ -159,7 +162,7 @@ function Activity({ accountId, refreshKey }: any) {
 
 function Screener({ onSelect }: any) {
   const [f, setF] = useState({ asset_class: "", sector: "", min_price: "", max_price: "", min_change_pct: "", max_pe: "", min_dividend_yield: "" });
-  const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+  const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(k === "sector" || k === "asset_class" ? v : numText(v))}`).join("&");
   const [rows, error] = usePoll<any[]>(`/screener?${qs}`, 5000);
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
   const num = (k: string, label: string) => <input key={k} value={(f as any)[k]} placeholder={label} aria-label={label} inputMode="decimal" onChange={set(k)} style={{ width: 110 }} />;

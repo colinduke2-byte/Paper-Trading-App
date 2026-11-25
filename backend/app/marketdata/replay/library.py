@@ -3,6 +3,7 @@ import os
 from typing import Optional
 
 from .format import SUFFIX, SessionFormatError, read_header, session_id
+from ...core.errors import NotFound
 
 BUNDLED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions")
 
@@ -44,9 +45,9 @@ def list_sessions(dirs: list) -> list:
 
 def find_session(dirs: list, sid: str) -> str:
     if not sid or os.path.basename(sid) != sid or sid.startswith("."):
-        raise KeyError(f"no session named {sid!r}")
+        raise NotFound(f"no session named {sid!r}")
     for d in dirs:
         path = os.path.join(d, sid + SUFFIX)
         if os.path.isfile(path):
             return path
-    raise KeyError(f"no session named {sid!r}")
+    raise NotFound(f"no session named {sid!r}")

@@ -110,14 +110,14 @@ def test_preflight(monkeypatch):
         out, err = io.StringIO(), io.StringIO()
         return auth.preflight(env, out, err), out.getvalue(), err.getvalue()
 
-    assert run({}) == (0, "127.0.0.1\n", "")
+    assert run({}) == (0, "127.0.0.1 8000\n", "")
     code, out, err = run({"HOST": "0.0.0.0"})
     assert code == 1 and out == "" and "without a passcode" in err
     code, out, err = run({"PAPERDESK_LAN": "1"})
     assert code == 1 and out == "" and "needs a passcode" in err
     monkeypatch.setattr(auth, "lan_addresses", lambda: ["192.168.1.20", "10.0.0.5"])
     code, out, err = run({"PAPERDESK_LAN": "1", "PAPERDESK_PASSCODE": PASS, "PORT": "8123"})
-    assert code == 0 and out == "0.0.0.0\n"
+    assert code == 0 and out == "0.0.0.0 8123\n"
     assert "http://192.168.1.20:8123" in err and "http://10.0.0.5:8123" in err
     assert "same Wi-Fi" in err and "Private networks only" in err and "plain HTTP" in err
     assert PASS not in err + out
@@ -514,8 +514,8 @@ def test_preflight_validates_host_and_port():
     for env in ({"HOST": "127.0.0.1 & calc"}, {"HOST": "a\"b"}, {"PORT": "80 & x"}, {"PORT": "0"}, {"PORT": "70000"}):
         code, out, err = run(env)
         assert code == 1 and out == "", env
-    assert run({"HOST": "localhost", "PORT": "8123"})[:2] == (0, "localhost\n")
-    assert run({"HOST": "::1"})[:2] == (0, "::1\n")
+    assert run({"HOST": "localhost", "PORT": "8123"})[:2] == (0, "localhost 8123\n")
+    assert run({"HOST": "::1"})[:2] == (0, "::1 8000\n")
 
 
 def test_sign_ins_survive_replay_and_stay_in_the_live_data_dir(monkeypatch, tmp_path):

@@ -733,3 +733,12 @@ def test_price_gaps_never_make_cash_negative_or_a_short(seq, rate, kind):
         assert acct.cash >= 0 and acct.position(COIN) >= 0, (acct.cash, acct.position(COIN))
     assert all(sum(v for _, v in t.postings) == 0 for t in acct.ledger.transactions)
     assert acct.ledger.recompute() == acct.ledger.balances
+
+
+def test_simulated_research_ignores_the_coins():
+    from app.marketdata.simresearch import for_replay
+    feed = SyntheticFeed(seed=3, now=SAT, history_days=10)
+    r = feed.research
+    assert not any(assets.is_crypto(s) for s in r.stocks())
+    assert r.upcoming_releases(COIN, SAT - 400 * 86400, SAT + 400 * 86400) == []
+    assert for_replay(feed) is not None  # a replay of synthetic data with coins still gets research

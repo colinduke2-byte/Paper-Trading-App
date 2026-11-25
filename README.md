@@ -62,7 +62,8 @@ The first start creates two accounts (a 100,000 margin account and a 25,000 cash
 | `PAPERDESK_BIND` | `127.0.0.1` | Docker only: where compose publishes the port. `0.0.0.0` is refused without LAN mode |
 | `PAPERDESK_FEED`, `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`, `FINNHUB_API_KEY`, ... | unset | Real market data: see [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) |
 
-`.env.example` lists every setting.
+`.env.example` lists every setting. Each can go in the environment or in `.env` next to `run.sh` (read first, at
+start-up, by the server and by `run.sh`/`run.bat`; a variable already set in the environment wins).
 
 ### Use it from your phone (LAN mode)
 
@@ -127,7 +128,9 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   provider data are model prices.
 - **Market views:** watchlist with search, level 1 quotes, candlestick charts (1 minute to weekly) with SMA,
   EMA, Bollinger bands, VWAP and RSI, a synthetic depth ladder, time and sales, company facts, screener, and a
-  Research tab (real data needs a provider).
+  Research tab. Without a provider the Research tab is filled with simulated research for the fictional
+  companies: financial statements, earnings reports that gap the price, news, and an economic calendar, all
+  labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 - **Orders in the ticket:** market, limit, stop, stop limit and trailing stop; day, good till canceled,
   immediate or cancel and fill or kill; a bracket (take profit and stop loss); fractional shares; order
   preview; cancel. **In the engine and API, not yet in the ticket:** market and limit on open and on close,

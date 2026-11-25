@@ -141,6 +141,12 @@ class MarketDataProvider:
         """Provider chain in the shape of options.chain.chain(), or None to use the model."""
         return None
 
+    def event_variance(self, symbol: str, expiry_ts: float, now: float) -> float:
+        """Extra variance (log return squared) the option model adds for scheduled events, such as an
+        earnings report, between now and expiry. The research hub supplies it; default none."""
+        f = getattr(self.research, "event_variance", None)
+        return f(symbol, expiry_ts, now) if f is not None else 0.0
+
     def status_info(self) -> dict:
         """Extra fields for /api/status: data source, real-time or delayed, stream health."""
         if self.simulated:

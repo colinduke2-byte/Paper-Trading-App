@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Dialog } from "./Dialog";
 import { usePoll } from "./Market";
 import { api, dateTime, isOption, money } from "./util";
 import "./alerts.css";
@@ -18,7 +19,7 @@ export type AlertSeed = { kind?: string; symbol?: string; price?: number | strin
 const KINDS: [string, string][] = [
   ["price", "Price"], ["change", "Percent change"], ["volume", "Volume"], ["indicator", "Indicator"],
   ["option", "Option contract"], ["position", "Position gain or loss"], ["account", "Account value and margin"],
-  ["reminder", "Reminder"], ["calendar", "Dividend and split dates"],
+  ["reminder", "Reminder"], ["calendar", "Dividend, split and earnings dates"],
 ];
 const KIND_LABEL = Object.fromEntries(KINDS);
 const ACCOUNT_ONLY = ["position", "account", "calendar"];
@@ -95,11 +96,6 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
     const t = setTimeout(() => api(`/quotes?symbols=${encodeURIComponent(sym)}`).then((r) => alive && setLast(r[sym]?.last ?? null)).catch(() => {}), 250);
     return () => { alive = false; clearTimeout(t); };
   }, [sym, quotes[sym]?.last]);
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
   const options = positions.filter((p) => isOption(p.symbol));
   const kind = f.kind;
   const cond = (labels: [string, string] = ["rises to", "falls to"]) => (
@@ -128,8 +124,7 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
   };
   const isCross = kind === "indicator" && f.indicator !== "rsi";
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal alert-builder" role="dialog" aria-modal="true" aria-label={editing ? "Edit alert" : "New alert"} onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} className="modal alert-builder" label={editing ? "Edit alert" : "New alert"}>
         <h3>{editing ? "Edit alert" : "New alert"}</h3>
         <label>Alert type
           <select value={kind} disabled={!!editing} onChange={(e) => setF({ ...f, kind: e.target.value, op: "above", value: e.target.value === kind ? f.value : "", metric: "" })}>
@@ -226,14 +221,14 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
         {kind === "calendar" && <>
           <fieldset className="notif-types">
             <legend>For symbols this account holds, tell me about</legend>
-            {["dividend", "split"].map((ev) => (
+            {["dividend", "split", "earnings"].map((ev) => (
               <label key={ev} className="check"><input type="checkbox" checked={f.events.includes(ev)}
                 onChange={(e) => setF({ ...f, events: e.target.checked ? [...f.events, ev] : f.events.filter((x: string) => x !== ev) })} />
-                {ev === "dividend" ? "Dividend ex-dates" : "Stock splits"}</label>
+                {ev === "dividend" ? "Dividend ex-dates" : ev === "split" ? "Stock splits" : "Earnings reports"}</label>
             ))}
           </fieldset>
           <label>Days ahead<input value={f.days_before} inputMode="numeric" onChange={set("days_before")} /></label>
-          <p className="hint">Earnings dates are not available from the data feed, so there is no earnings alert.</p>
+          <p className="hint">Earnings reports come from the simulated research of the fictional companies; a live data feed does not supply them here.</p>
         </>}
 
         <label>{kind === "reminder" ? "Message" : "Note (optional)"}<input value={f.message} maxLength={200} onChange={set("message")} /></label>
@@ -251,8 +246,7 @@ export function AlertBuilder({ accountId, seed, editing, quotes, positions, onCl
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" disabled={busy} onClick={save}>{editing ? "Save alert" : "Create alert"}</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

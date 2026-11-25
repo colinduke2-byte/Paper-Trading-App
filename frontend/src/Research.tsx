@@ -1,46 +1,23 @@
+import { useState } from "react";
 import { usePoll } from "./Market";
-import { compact, dateTime, money } from "./util";
+import { compact, money } from "./util";
+import { dayOf, EarningsCalendar, EconomicCalendar, Envelope, KeyRatios, MarketNews, NewsList, SourceLine, Statements } from "./ResearchViews";
 import "./Research.css";
-
-type Envelope = { source: string | null; as_of: number | null; available: boolean; stale: boolean; reason: string | null; items?: any[]; data?: any };
-
-/** Source line shown on every research block: provider, time of the data, and a stale or unavailable state. */
-function SourceLine({ env, error }: { env: Envelope | null; error: string }) {
-  if (error) return <div className="rs-state bad" role="status">Could not load this section: {error}</div>;
-  if (!env) return <div className="rs-state muted">Loading…</div>;
-  if (!env.available) return <div className="rs-state" role="status">Unavailable. {env.reason}</div>;
-  return (
-    <div className={env.stale ? "rs-source rs-stale" : "rs-source"}>
-      Source: {env.source}{env.as_of ? ` · updated ${dateTime(env.as_of)}` : ""}
-      {env.stale && <span className="rs-flag"> · stale: {env.reason}</span>}
-    </div>
-  );
-}
 
 function News({ symbol }: { symbol: string }) {
   const [env, error] = usePoll<Envelope>(`/research/news/${symbol}?limit=20`, 120000);
-  const items = env?.available ? env.items || [] : [];
   return (
     <section className="rs-block" aria-labelledby="rs-news">
       <h3 id="rs-news">News</h3>
       <SourceLine env={env} error={error} />
-      {env?.available && !items.length && <p className="muted rs-pad">No recent articles for {symbol}.</p>}
-      <ul className="rs-news">
-        {items.map((n) => (
-          <li key={n.id ?? n.url}>
-            <a href={n.url} target="_blank" rel="noopener noreferrer">{n.headline}</a>
-            <div className="muted rs-meta">{n.source}{n.created_at ? ` · ${dateTime(n.created_at)}` : ""}</div>
-            {n.summary && <p className="rs-summary">{stripTags(n.summary)}</p>}
-          </li>
-        ))}
-      </ul>
+      {env?.available && <NewsList items={env.items || []} empty={`No recent articles for ${symbol}.`} />}
     </section>
   );
 }
 
 function Calendar({ symbol }: { symbol: string }) {
-  const [cal, error] = usePoll<any>(`/research/calendar/${symbol}`, 600000);
-  const today = new Date().toISOString().slice(0, 10);
+  const [cal, error] = usePoll<any>(`/research/calendar/${symbol}`, 300000);
+  const today = dayOf(cal?.earnings?.as_of);  // the exchange's date, so a replay compares against simulated time
   return (
     <section className="rs-block" aria-labelledby="rs-cal">
       <h3 id="rs-cal">Earnings</h3>
@@ -52,11 +29,13 @@ function Calendar({ symbol }: { symbol: string }) {
               <li key={`${e.date}-${e.quarter}`} className={e.date >= today ? "rs-upcoming" : ""}>
                 <b>{e.date}</b>{e.hour ? <span className="muted"> {e.hour}</span> : null}
                 <span>Q{e.quarter} {e.year}</span>
-                <span className="muted">EPS est. {money(e.eps_estimate)}{e.eps_actual != null ? ` · actual ${money(e.eps_actual)}` : ""}</span>
+                <span className="muted">EPS est. {money(e.eps_estimate)}{e.eps_actual != null ? ` · actual ${money(e.eps_actual)}` : ""}
+                  {e.result ? ` · ${e.result}` : ""}{e.price_reaction_pct != null ? ` · gap ${e.price_reaction_pct > 0 ? "+" : ""}${e.price_reaction_pct}%` : ""}
+                  {e.eps_actual == null && e.expected_move_pct != null ? ` · implied move ±${e.expected_move_pct}%` : ""}</span>
               </li>
             ))}
           </ul>
-        ) : <p className="muted rs-pad">No earnings dates in the free window (one month back, four months ahead).</p>
+        ) : <p className="muted rs-pad">{cal.earnings.reason || "No earnings dates in the free window (one month back, four months ahead)."}</p>
       )}
       <h3>Dividends and splits</h3>
       <SourceLine env={cal?.dividends ?? null} error={error} />
@@ -78,7 +57,7 @@ function Calendar({ symbol }: { symbol: string }) {
 }
 
 function Fundamentals({ symbol }: { symbol: string }) {
-  const [env, error] = usePoll<Envelope>(`/research/fundamentals/${symbol}`, 0);
+  const [env, error] = usePoll<Envelope>(`/research/fundamentals/${symbol}`, 60000);
   const f = env?.available ? env.data : null;
   const row = (k: string, v: string) => <div key={k}><span>{k}</span><b>{v}</b></div>;
   return (
@@ -90,33 +69,54 @@ function Fundamentals({ symbol }: { symbol: string }) {
           {row("Name", f.name || "–")}
           {row("Industry", f.industry || "–")}
           {row("Market cap", compact(f.market_cap))}
-          {row("P/E (trailing)", f.pe == null ? "–" : f.pe.toFixed(1))}
-          {row("EPS (trailing)", money(f.eps))}
+          {f.kind !== "fund" && row("P/E (trailing)", f.pe == null ? "–" : f.pe.toFixed(1))}
+          {f.kind !== "fund" && row("EPS (trailing)", money(f.eps))}
           {row("Dividend yield", f.dividend_yield_pct == null ? "–" : f.dividend_yield_pct.toFixed(2) + "%")}
           {row("Beta", f.beta == null ? "–" : f.beta.toFixed(2))}
           {row("52-week range", f.low_52w == null ? "–" : `${money(f.low_52w)} – ${money(f.high_52w)}`)}
         </div>
       )}
+      {f?.simulated && <><h4 className="rs-sub">{f.kind === "fund" ? "Fund details" : "Key ratios"}</h4><KeyRatios f={f} /></>}
     </section>
   );
 }
 
-function stripTags(s: string) {
-  return s.replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"');
-}
+type Tab = "symbol" | "statements" | "market";
 
-export function Research({ symbol }: { symbol: string }) {
+export function Research({ symbol, held = [], onSelect }: { symbol: string; held?: string[]; onSelect?: (s: string) => void }) {
   const [sources] = usePoll<any>("/research/sources", 0);
-  if (sources?.reason) {  // the whole panel is unavailable for one reason (e.g. the synthetic feed): say it once
+  const [tab, setTab] = useState<Tab>("symbol");
+  if (sources?.reason) {  // the whole panel is unavailable for one reason: say it once
     return <div className="research"><div className="notice rs-notice" role="status">Research data is unavailable. {sources.reason}</div></div>;
   }
+  const tabs: [Tab, string][] = [["symbol", symbol], ["statements", "Statements"], ["market", "Market and calendars"]];
   return (
-    <div className="research">
-      <News symbol={symbol} />
-      <div className="rs-side">
-        <Calendar symbol={symbol} />
-        <Fundamentals symbol={symbol} />
+    <div className="research-wrap">
+      <div className="rs-seg rs-tabs" role="tablist" aria-label="Research sections">
+        {tabs.map(([k, label]) => (
+          <button key={k} role="tab" aria-selected={k === tab} className={k === tab ? "on" : ""} onClick={() => setTab(k)}>{label}</button>
+        ))}
+        {sources?.simulated && <span className="tag" title={sources.note}>simulated research</span>}
       </div>
+      {tab === "symbol" && (
+        <div className="research">
+          <News symbol={symbol} />
+          <div className="rs-side">
+            <Calendar symbol={symbol} />
+            <Fundamentals symbol={symbol} />
+          </div>
+        </div>
+      )}
+      {tab === "statements" && <div className="research rs-one"><Statements symbol={symbol} /></div>}
+      {tab === "market" && (
+        <div className="research">
+          <MarketNews />
+          <div className="rs-side">
+            <EarningsCalendar held={held} onSelect={onSelect} />
+            <EconomicCalendar />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

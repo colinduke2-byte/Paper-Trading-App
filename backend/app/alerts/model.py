@@ -19,7 +19,8 @@ Kinds and their params:
   position   account, symbol, metric unrealized_pnl / unrealized_pct, op, value
   account    account, metric equity / buying_power / margin_excess / unrealized_pnl / day_pnl, op, value
   reminder   at (time), message; with repeat it comes back every `cooldown` seconds
-  calendar   account, events dividend/split, days_before: upcoming ex-dates of symbols held
+  calendar   account, events dividend/split/earnings, days_before: upcoming ex-dates (and earnings
+             reports, where the feed's research schedules them) of symbols held
 
 Firing rule: an alert fires when its condition is true and it is armed. A one-shot alert is then
 done (status triggered). A re-arming alert disarms; it arms again once its condition has been seen
@@ -43,7 +44,7 @@ ACCOUNT_METRICS = {"equity": "Account value", "buying_power": "Buying power", "m
                    "unrealized_pnl": "Unrealised gain/loss", "day_pnl": "Day gain/loss"}
 POSITION_METRICS = {"unrealized_pnl": "unrealised gain/loss", "unrealized_pct": "unrealised gain/loss %"}
 OPTION_METRICS = {"iv": "Implied volatility", "delta": "Delta"}
-CALENDAR_EVENTS = ("dividend", "split")
+CALENDAR_EVENTS = ("dividend", "split", "earnings")  # earnings: feeds whose research has a schedule
 DEFAULT_COOLDOWN = 900
 MAX_COOLDOWN = 30 * 86400
 MAX_MESSAGE = 200
@@ -112,7 +113,7 @@ def build(ex, req: dict, now: float) -> dict:
     if kind not in KINDS:
         raise ValueError(f"alert type must be one of: {', '.join(KINDS)}")
     aid = req.get("account_id") or None
-    if aid is not None and aid not in ex.accounts:
+    if aid is not None and (not isinstance(aid, str) or aid not in ex.accounts):
         raise ValueError(f"no such account {aid}")
     if kind in ACCOUNT_KINDS and aid is None:
         raise ValueError("this alert type needs an account")
@@ -155,15 +156,15 @@ def build(ex, req: dict, now: float) -> dict:
     elif kind == "indicator":
         al["symbol"] = _stock(ex, req)
         ind = req.get("indicator")
-        if ind not in INDICATORS:
+        if not isinstance(ind, str) or ind not in INDICATORS:
             raise ValueError(f"indicator must be one of: {', '.join(INDICATORS)}")
         tf = req.get("tf", "1d")
-        if tf not in TIMEFRAMES:
+        if not isinstance(tf, str) or tf not in TIMEFRAMES:
             raise ValueError(f"timeframe must be one of: {', '.join(TIMEFRAMES)}")
         period = req.get("period", 14 if ind == "rsi" else 20)
         try:
             period = int(period)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError("period must be a whole number")
         if ind != "macd" and not 2 <= period <= 200:
             raise ValueError("period must be between 2 and 200 bars")
@@ -188,7 +189,7 @@ def build(ex, req: dict, now: float) -> dict:
             raise ValueError(f"{describe_symbol(symbol)} has already expired")
         al["symbol"], al["op"] = symbol, _op(req, LEVEL_OPS)
         metric = req.get("metric", "iv")
-        if metric not in OPTION_METRICS:
+        if not isinstance(metric, str) or metric not in OPTION_METRICS:
             raise ValueError("option metric must be 'iv' or 'delta'")
         v = _number(req, "value", OPTION_METRICS[metric].lower())
         if metric == "delta" and not -1 <= v <= 1:
@@ -202,7 +203,7 @@ def build(ex, req: dict, now: float) -> dict:
         if not symbol or not (ex.is_stock(symbol) or parse_option(symbol)):
             raise ValueError("choose the position (symbol) to watch")
         metric = req.get("metric", "unrealized_pnl")
-        if metric not in POSITION_METRICS:
+        if not isinstance(metric, str) or metric not in POSITION_METRICS:
             raise ValueError("position metric must be 'unrealized_pnl' or 'unrealized_pct'")
         al["symbol"], al["op"] = symbol, _op(req, LEVEL_OPS)
         al["value"] = str(_number(req, "value", POSITION_METRICS[metric]))
@@ -210,7 +211,7 @@ def build(ex, req: dict, now: float) -> dict:
         p.update(metric=metric, underlying=c.underlying if c else symbol)
     elif kind == "account":
         metric = req.get("metric", "equity")
-        if metric not in ACCOUNT_METRICS:
+        if not isinstance(metric, str) or metric not in ACCOUNT_METRICS:
             raise ValueError(f"account metric must be one of: {', '.join(ACCOUNT_METRICS)}")
         al["op"] = _op(req, LEVEL_OPS)
         al["value"] = str(_number(req, "value", ACCOUNT_METRICS[metric].lower()))
@@ -232,12 +233,12 @@ def build(ex, req: dict, now: float) -> dict:
         p["at"] = at
         al["value"] = "0"
     elif kind == "calendar":
-        events = req.get("events") or list(CALENDAR_EVENTS)
+        events = req.get("events") or ["dividend", "split"]
         if not isinstance(events, list) or not events or any(e not in CALENDAR_EVENTS for e in events):
-            raise ValueError("calendar events must be a list of: dividend, split")
+            raise ValueError("calendar events must be a list of: dividend, split, earnings")
         try:
             days = int(req.get("days_before", 3))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError("days before must be a whole number")
         if not 0 <= days <= 30:
             raise ValueError("days before must be between 0 and 30")
@@ -248,7 +249,7 @@ def build(ex, req: dict, now: float) -> dict:
     cooldown = req.get("cooldown", DEFAULT_COOLDOWN if repeat else 0)
     try:
         cooldown = int(float(cooldown or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError("cool-down must be a number of seconds")
     if not 0 <= cooldown <= MAX_COOLDOWN:
         raise ValueError("cool-down must be between 0 seconds and 30 days")
@@ -334,7 +335,8 @@ def describe(al: dict) -> str:
         return f"Reminder at {when(p['at'])}{every}"
     if k == "calendar":
         ev = " and ".join(p.get("events", []))
-        return f"Upcoming {ev} ex-dates of symbols you hold, {p.get('days_before', 0)} days ahead"
+        noun = "dates" if "earnings" in p.get("events", []) else "ex-dates"
+        return f"Upcoming {ev} {noun} of symbols you hold, {p.get('days_before', 0)} days ahead"
     return k
 
 

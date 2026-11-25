@@ -112,7 +112,7 @@ shows "connection limit exceeded" and falls back to polling.
 
 ### Where keys live
 
-- `.env` in the project root is read at start-up by PaperDesk itself (in `default_exchange`), so
+- `.env` in the project root is read first at start-up by PaperDesk itself (`app/core/envfile.py`), for every setting, so
   it works with `run.sh`, `run.bat`, Docker or a plain `uvicorn` command. Variables already set
   in the environment take priority over the file. Paths with spaces and Windows backslashes are
   fine. The file is read as UTF-8 and a byte order mark is ignored.
@@ -196,7 +196,7 @@ verified facts, how it works and what has not been tested against the live servi
 {"source": "Alpaca", "as_of": 1795500000.0, "available": true, "stale": false, "reason": null, "items": []}
 ```
 
-`available: false` comes with a `reason` (for example, no key or the synthetic feed). `stale: true`
+`available: false` comes with a `reason` (for example, no key). On the synthetic feed the same routes serve simulated research; see `docs/SIMULATED_RESEARCH.md`. `stale: true`
 means a refresh failed and saved data is shown. Fundamentals use `data` in place of `items`.
 
 **Corporate actions (for the dividend and split processing stream).** In process, call
