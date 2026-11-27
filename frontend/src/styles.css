@@ -46,7 +46,7 @@ th, td { padding: 4px 10px; border-bottom: 1px solid #1a2028; white-space: nowra
 table.tight th, table.tight td { padding: 3px 8px; }
 .num { text-align: right; } .center { text-align: center; }
 tr.click { cursor: pointer; } tr.click:hover td { background: var(--panel2); }
-tr.sel td { background: #1a2433; }
+tr.sel td { background: #1a2433; } tr.sel td.down { color: #f26b68; } /* --down is 4.48:1 on the selected row; this is 5.3:1 */
 .link { padding: 0; color: var(--text); font-weight: 600; } .link:hover { color: var(--accent); }
 .x { padding: 0 5px; color: var(--muted); } .x:hover { color: var(--down); }
 
@@ -180,7 +180,7 @@ th .info-pop { font-weight: 400; }
 /* Narrow desktop windows, 900-1100 px (the phone layout in mobile.css takes over below 900 px): two columns.
    Left: watchlist above the order ticket and depth. Right: quote, chart and the bottom tabs. */
 @media (max-width: 1100px) {
-  .app main { grid-template-columns: 236px minmax(0, 1fr); grid-template-rows: minmax(120px, 30%) minmax(0, 1fr);
+  .app main { grid-template-columns: 236px minmax(0, 1fr); grid-template-rows: minmax(300px, 45%) minmax(0, 1fr); /* the list controls take ~200 px; leave room for rows */
     grid-template-areas: "watch center" "right center"; }
   .app main > .watch { grid-area: watch; }
   .app main > .center-col { grid-area: center; }

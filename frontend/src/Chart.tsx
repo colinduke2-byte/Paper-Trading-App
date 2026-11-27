@@ -125,9 +125,13 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
   useEffect(() => { if (g?.alive) g.primitive.redraw(); }, [g, drawings, selected, drawMode]);
   useEffect(() => { setSelected(null); setMenu(null); setTextAt(null); }, [symbol]);
 
-  // Stream the latest price into the last bar and every indicator.
+  // Stream the latest price into the last bar and every indicator. A new chart already has the bars up to now, so
+  // the quote held when it was made is skipped: when a replay starts that quote is still the live one, hours after
+  // the recorded session, and streaming it appended a bar at the live time to the replay chart.
+  const streamedFor = useRef<Gen | null>(null);
   useEffect(() => {
     if (!g || !quote || quote.symbol !== symbol) return;
+    if (streamedFor.current !== g) { streamedFor.current = g; return; }
     streamPrice(g, quote.last, quote.ts);
   }, [g, quote?.ts, quote?.last]);
 

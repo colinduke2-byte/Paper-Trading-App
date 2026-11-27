@@ -96,11 +96,14 @@ export function Watchlists({ quotes, positions, selected, accountId, onSelect, o
   const patch = (body: any, what: string) => {
     if (!list) return Promise.resolve();
     const name = list.name;
+    // A rename takes effect when the server has made it: switching to the new name sooner sends the rows request
+    // for a list the server does not know yet (HTTP 404).
+    if (body.name) return api(`/watchlist-sets/${enc(name)}`, { method: "PATCH", body })
+      .then((j) => { setSets(j); setActive(body.name); }).catch((e) => { fail(what)(e); load(); });
     setSets((cur) => cur && { ...cur, lists: cur.lists.map((l) => l.name !== name ? l : {
-      ...l, symbols: body.symbols ?? l.symbols, name: body.name ?? l.name,
+      ...l, symbols: body.symbols ?? l.symbols,
       layout: { ...l.layout, ...Object.fromEntries(Object.entries(body).filter(([k]) => ["columns", "density", "sort"].includes(k))) } as Layout,
     }) });
-    if (body.name) setActive(body.name);
     return api(`/watchlist-sets/${enc(name)}`, { method: "PATCH", body }).then(setSets).catch((e) => { fail(what)(e); load(); });
   };
   const add = (s: string) => {

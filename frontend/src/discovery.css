@@ -8,8 +8,11 @@
 .badge-etf { color: #9fc3ff; border-color: #2b4a77; }
 
 /* Watchlists. A list with more than three columns gets a wider column on desktop. */
-.app main:has(.watch.wl-wide) { grid-template-columns: 380px minmax(0, 1fr) 300px; }
-.app main:has(.watch.wl-wider) { grid-template-columns: 470px minmax(0, 1fr) 300px; }
+/* Three-column layout only: below 1101 px the two-column layout (styles.css) keeps its 236 px watchlist. */
+@media (min-width: 1101px) {
+  .app main:has(.watch.wl-wide) { grid-template-columns: 380px minmax(0, 1fr) 300px; }
+  .app main:has(.watch.wl-wider) { grid-template-columns: 470px minmax(0, 1fr) 300px; }
+}
 .wl-head { display: flex; gap: 4px; padding: 8px 8px 6px; align-items: center; flex-wrap: wrap; }
 .wl-head select { flex: 1 1 110px; width: auto; }
 .wl-head button.on { color: var(--text); background: #1a2433; border-color: var(--line); }

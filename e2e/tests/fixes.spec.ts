@@ -1,13 +1,7 @@
-import { test, expect, createAccount, lastPrice, bottomTab } from "./fixtures";
+import { test, expect, createAccount, lastPrice, bottomTab, expectRefusals } from "./fixtures";
 
 const topButton = (page: any, name: string) => page.locator("header").getByRole("button", { name, exact: true });
 
-// The browser logs a refused request (HTTP 400 or 422) as a failed resource load; those entries are expected.
-function expectRefusals(problems: string[], status: number, n: number) {
-  const found = problems.filter((p) => new RegExp(`Failed to load resource: .* ${status}`).test(p));
-  expect(found).toHaveLength(n);
-  for (const f of found) problems.splice(problems.indexOf(f), 1);
-}
 
 test("dialogs close with Escape and give focus back to the button that opened them", async ({ page, open }) => {
   await open();
@@ -54,7 +48,7 @@ test("starting cash typed with thousands separators is accepted", async ({ page,
   await dialog.getByLabel("Starting cash").fill("1,5");
   await dialog.getByRole("button", { name: "Create account" }).click();
   await expect(dialog.getByRole("alert")).toContainText("starting cash is not a number");
-  expectRefusals(problems, 400, 1);
+  expectRefusals(page, problems, 400, 1);
 });
 
 test("a working order can be changed from the Orders tab, and a refusal shows the reason", async ({ page, request, problems }) => {
@@ -80,7 +74,7 @@ test("a working order can be changed from the Orders tab, and a refusal shows th
   await expect(dialog.getByRole("alert")).toContainText("The order was not changed: insufficient buying power for the change");
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  expectRefusals(problems, 422, 1);
+  expectRefusals(page, problems, 422, 1);
 });
 
 test("chart timeframes read 1m to 1W and have spoken names", async ({ page, open }) => {

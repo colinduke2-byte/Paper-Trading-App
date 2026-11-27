@@ -78,6 +78,9 @@ const DESKTOP_SPECS = { testIgnore: /(mobile|auth|crypto)\.spec/ };
 const CRYPTO_SPECS = { testMatch: /crypto\.spec/ };
 const PHONE_SPECS = { testMatch: /(mobile|a11y|visual)\.spec/ };
 const AUTH_SPECS = { testMatch: /auth\.spec/ };
+// chart.mobile.spec.ts drives real touch drags and long-presses through the Chrome DevTools Protocol (Playwright
+// itself only taps), so it runs on the Chromium phone projects; /mobile\.spec/ would otherwise pick it up too.
+const CDP_ONLY = { testIgnore: /chart\.mobile\.spec/ };
 
 type Engine = "chromium" | "firefox" | "webkit";
 const all: (Project & { engine: Engine })[] = [
@@ -98,10 +101,10 @@ const all: (Project & { engine: Engine })[] = [
 
   // WebKit: desktop Safari, iPhones in portrait and landscape, an iPad in both orientations.
   { engine: "webkit", name: "desktop-safari", ...DESKTOP_SPECS, use: { ...device("Desktop Safari"), viewport: DESKTOP } },
-  { engine: "webkit", name: "iphone-14-webkit", ...PHONE_SPECS, use: device("iPhone 14") },
-  { engine: "webkit", name: "iphone-13-webkit-landscape", testMatch: /mobile\.spec/, use: device("iPhone 13 landscape") },
+  { engine: "webkit", name: "iphone-14-webkit", ...PHONE_SPECS, ...CDP_ONLY, use: device("iPhone 14") },
+  { engine: "webkit", name: "iphone-13-webkit-landscape", testMatch: /mobile\.spec/, ...CDP_ONLY, use: device("iPhone 13 landscape") },
   // 810 px wide in portrait: below the 900 px breakpoint, so the iPad gets the phone layout.
-  { engine: "webkit", name: "ipad-webkit", testMatch: /mobile\.spec/, use: device("iPad (gen 7)") },
+  { engine: "webkit", name: "ipad-webkit", testMatch: /mobile\.spec/, ...CDP_ONLY, use: device("iPad (gen 7)") },
   // 1080 px in landscape: the desktop layout on a touch screen.
   { engine: "webkit", name: "ipad-webkit-landscape", testMatch: /app\.spec/, use: device("iPad (gen 7) landscape") },
   { engine: "webkit", name: "crypto-iphone-14-webkit", ...CRYPTO_SPECS, use: { ...device("iPhone 14"), baseURL: cryptoURL } },

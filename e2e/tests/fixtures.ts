@@ -23,7 +23,18 @@ type Fixtures = {
 // Browser messages that are not errors in the app. WebKit logs one at error level for the viewport meta key
 // interactive-widget, which index.html sets on purpose for Chrome and Firefox on Android (the layout shrinks
 // when the on-screen keyboard opens) and which Safari ignores.
-const BENIGN = [/^Viewport argument key "interactive-widget" not recognized and ignored\.$/];
+export const BENIGN = [/^Viewport argument key "interactive-widget" not recognized and ignored\.$/];
+
+/**
+ * A refused request (HTTP 4xx) is expected in some tests. Chromium and WebKit log each one as a failed resource
+ * load at error level; Firefox logs nothing for it. Check the engine's own count and drop those entries.
+ */
+export function expectRefusals(page: Page, problems: string[], status: number, n: number) {
+  const found = problems.filter((p) => new RegExp(`Failed to load resource: .*\\b${status}\\b`).test(p));
+  const engine = page.context().browser()?.browserType().name();
+  expect(found, `refused requests (HTTP ${status}) logged by ${engine}`).toHaveLength(engine === "firefox" ? 0 : n);
+  for (const f of found) problems.splice(problems.indexOf(f), 1);
+}
 
 // Every test fails if the page logs a console error or throws. A fresh account is created for each
 // test, so tests do not depend on each other's orders or positions.

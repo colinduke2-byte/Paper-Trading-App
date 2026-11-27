@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, confirmDialog, type Account } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, confirmDialog, expectRefusals, BENIGN, type Account } from "./fixtures";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 
 // Chart tools: chart types, indicators, drawings, order lines, trade at price and keyboard shortcuts.
@@ -156,7 +156,7 @@ test("a horizontal line stays after a reload, a timeframe change and in another 
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, baseURL: new URL(page.url()).origin });
   const other = await ctx.newPage();
   const errors: string[] = [];
-  other.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+  other.on("console", (m) => { if (m.type() === "error" && !BENIGN.some((b) => b.test(m.text()))) errors.push(m.text()); });
   await other.addInitScript((a) => localStorage.setItem("pd.account", a), account.id);
   await other.goto("/");
   await expect(other.getByRole("heading", { name: "MKTX", level: 2 })).toBeVisible();
@@ -211,7 +211,20 @@ test("drawing tools create, select, move and delete shapes", async ({ page, open
   const list = page.getByRole("dialog", { name: "Drawings" });
   const before = await list.getByRole("button", { name: /^Text note "Support test"/ }).textContent();
   await page.getByRole("button", { name: /^Drawings/ }).click();
-  await remeasure(); await drag({ x: at(0.1, 0.8).x + 20, y: at(0.1, 0.8).y - 8 }, { x: at(0.1, 0.5).x + 20, y: at(0.1, 0.5).y - 8 });
+  // The note keeps its price, not its pixel: live ticks rescale the price axis, and on a short chart that moves the
+  // note well away from where it was clicked. Find it where it is now: a click on it keeps it selected, a click on
+  // empty space clears the selection. Only the note is this close to the left edge.
+  const del = page.getByRole("button", { name: "Delete selected" });
+  await remeasure();
+  let grab: { x: number; y: number } | null = null;
+  for (const dy of [-8, -14, -2, -20, 4, -26, 10, -32, 16, -38, 22, -44, 28]) {
+    const p = { x: at(0.1, 0.8).x + 20, y: at(0.1, 0.8).y + dy };
+    if (p.y < box.y + 2 || p.y > box.y + box.height - 2) continue;
+    await page.mouse.click(p.x, p.y);
+    if (await expect(del).toBeEnabled({ timeout: 400 }).then(() => true, () => false)) { grab = p; break; }
+  }
+  expect(grab, "the text note was found near where it was placed").not.toBeNull();
+  await drag(grab!, { x: grab!.x, y: grab!.y - box.height * 0.3 });
   await page.getByRole("button", { name: /^Drawings/ }).click();
   await expect(list.getByRole("button", { name: /^Text note "Support test"/ })).not.toHaveText(before!);
   await page.getByRole("button", { name: /^Drawings/ }).click();
@@ -286,10 +299,7 @@ test("a change the server refuses shows the reason and puts the line back", asyn
   await expect(page.getByRole("dialog", { name: "Confirm order change" })).toHaveCount(0);
   await expect(handle).toContainText(limit.toFixed(2));
   expect((await getOrder(request, acc, o.id)).limit_price).toBe(limit);
-  // The browser logs the refused PATCH (HTTP 422) as a failed resource load; that one entry is expected.
-  const expected = problems.filter((p) => /Failed to load resource: .* 422/.test(p));
-  expect(expected).toHaveLength(1);
-  problems.splice(problems.indexOf(expected[0]), 1);
+  expectRefusals(page, problems, 422, 1); // the refused PATCH
 });
 
 test("multi-leg orders draw no line on the chart", async ({ page, open, request, account }) => {

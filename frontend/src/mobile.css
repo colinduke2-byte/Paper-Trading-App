@@ -231,7 +231,11 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
 /* Landscape phones: the tab bar becomes a rail on the left, the top bar a single row. */
 @media (orientation: landscape) and (max-height: 540px) {
   /* The chart tools must fit on one row here or they take the chart's height (40 px tall controls stay). */
-  .m-shell .ct-bar { gap: 4px; }
+  /* Narrower than ~860 px (iPhone 13 landscape is 750) they still do not fit: the row scrolls sideways inside
+     itself instead of wrapping onto a second row, which left the chart 120 px tall. */
+  .m-shell .ct-bar { gap: 4px; padding-top: 3px; padding-bottom: 3px; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .m-shell .ct-bar::-webkit-scrollbar { display: none; }
+  .m-shell .ct-bar > * { flex: none; }
   .m-shell .ct-bar button, .m-shell .ct-bar select, .m-shell .ct-bar input { padding-left: 7px; padding-right: 7px; }
   .m-shell .ct-bar .ct-seg button { padding: 3px 6px; }
   .m-shell .ct-bar .ct-compare input { width: 72px; }

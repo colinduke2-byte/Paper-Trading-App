@@ -1,4 +1,4 @@
-import { test, expect, createAccount } from "./fixtures";
+import { test, expect, createAccount, expectRefusals } from "./fixtures";
 import { readFileSync } from "node:fs";
 
 // Data and backups (frontend/src/DataBackups.tsx, backend/app/api/routes_data.py).
@@ -44,10 +44,7 @@ test("a damaged upload is refused with the reason", async ({ page, open, problem
   const dialog = page.getByRole("dialog", { name: "Data and backups" });
   await dialog.getByTestId("restore-file").setInputFiles({ name: "x.zip", mimeType: "application/zip", buffer: Buffer.from("PK\x03\x04junk") });
   await expect(dialog.getByRole("alert")).toContainText("damaged");
-  // The browser logs the expected 422 answer as a failed resource load; that one entry is not a problem.
-  const i = problems.findIndex((p) => p.includes("status of 422"));
-  expect(i).toBeGreaterThanOrEqual(0);
-  problems.splice(i, 1);
+  expectRefusals(page, problems, 422, 1);
 });
 
 test("export an account and import it again as a new account", async ({ page, open, request, account }) => {
