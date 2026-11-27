@@ -270,11 +270,16 @@ def test_search_is_fast_and_bounded_with_eleven_thousand_symbols():
     ex = Exchange(SimFeed(info), SimClock(T0))
     c = TestClient(create_app(ex, run_loop=False))
     c.get("/api/search", params={"q": "A"})  # builds the index
-    t = time.perf_counter()
-    for q in ("AB", "holdings", "zz", "company q"):
-        r = c.get("/api/search", params={"q": q, "limit": 50}).json()
-        assert len(r) <= 50
-    assert (time.perf_counter() - t) / 4 < 0.25
+    # The best of three rounds is compared with the bound: a search that got slower fails every round, while a CI
+    # runner that stalls for a moment (seen on macOS: 0.31 s a query against 0.015 s locally) only spoils one.
+    rounds = []
+    for _ in range(3):
+        t = time.perf_counter()
+        for q in ("AB", "holdings", "zz", "company q"):
+            r = c.get("/api/search", params={"q": q, "limit": 50}).json()
+            assert len(r) <= 50
+        rounds.append((time.perf_counter() - t) / 4)
+    assert min(rounds) < 0.25, rounds
     r = c.get("/api/search", params={"q": "ABAA"}).json()
     assert r[0]["symbol"] == "ABAA"
 
