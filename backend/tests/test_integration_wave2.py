@@ -530,3 +530,43 @@ def test_the_sign_in_lockout_says_1_second_not_1_seconds(tmp_path, monkeypatch):
     assert r.status_code == 429 and r.json()["detail"].endswith("Try again in 1 second.")
     monkeypatch.setattr(app.state.access.limiter, "retry_after", lambda key: 3)
     assert c.post("/api/auth/login", json={"passcode": "wrong"}, headers=same).json()["detail"].endswith("in 3 seconds.")
+
+
+def test_a_fast_ticking_server_snapshots_the_state_at_most_every_save_every_seconds_and_loses_nothing(tmp_path):
+    """Serialising the state is the largest piece of work under the exchange lock. At a fast tick rate the tick
+    takes a snapshot at most once per SAVE_EVERY wall seconds; every change still reaches state.json, and the
+    shutdown save writes the final state."""
+    from app.api import server as server_mod
+    from app.storage.fsutil import read_bytes
+    c, app, ex = make_app(tmp_path, run_loop=True, tick_seconds=0.002)
+    aid = list(ex.accounts)[0]
+    plans = []
+    real = ex.save_plan
+    import sys
+
+    def counted(*a, **k):
+        started = time.monotonic()  # the pacing counts from the start of each snapshot's turn
+        p = real(*a, **k)
+        if p is not None and sys._getframe(1).f_code.co_name == "turn":  # only the tick's snapshots
+            plans.append(started)
+        return p
+    ex.save_plan = counted
+    path = os.path.join(ex.data_dir, "state.json")
+    with c:
+        t0 = time.monotonic()
+        for _ in range(12):  # a change every 0.05 s keeps the state dirty on almost every turn
+            assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1,
+                                                               "type": "limit", "limit_price": "1"}).status_code == 200
+            time.sleep(0.05)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if os.path.exists(path) and len(json.loads(read_bytes(path))["orders"]) == 12:
+                break
+            time.sleep(0.02)
+        took = time.monotonic() - t0
+        assert len(json.loads(read_bytes(path))["orders"]) == 12, "a change never reached state.json"
+        ticked = [p for p in plans if p >= t0]
+        assert len(ticked) <= took / server_mod.SAVE_EVERY + 2, (len(ticked), took)
+        assert all(b - a >= server_mod.SAVE_EVERY * 0.9 for a, b in zip(ticked, ticked[1:])), ticked
+        c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1, "type": "limit", "limit_price": "1"})
+    assert len(json.loads(read_bytes(path))["orders"]) == 13  # the shutdown save

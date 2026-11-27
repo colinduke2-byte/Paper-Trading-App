@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.api import locking as api_locking
 from app.api.server import create_app
 from app.core.clock import SimClock
+from app.storage.fsutil import read_bytes
 from app.core.locking import Busy, StateLock, held
 from app.exchange import Exchange
 from app.marketdata.replay.control import ReplayController
@@ -601,8 +602,8 @@ def test_a_fault_while_building_the_broadcast_does_not_cost_the_snapshot(tmp_pat
         assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
 
         def saved():
-            with open(path, encoding="utf-8") as f:
-                return len(json.load(f)["orders"])
+            # The save thread replaces the file; on Windows a plain open() during that raises PermissionError.
+            return len(json.loads(read_bytes(path))["orders"])
         assert wait_for(lambda: os.path.exists(path) and saved() == 1), "the order never reached state.json"
         assert ctx.metrics["errors"] > 0
 
@@ -618,7 +619,7 @@ def test_a_bad_account_from_a_websocket_client_breaks_nothing(tmp_path):
         assert wait_for(lambda: len(ctx.clients) == 2 and aid in [v["account"] for v in ctx.clients.values()])
         assert None in [v["account"] for v in ctx.clients.values()]
         assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
-        assert wait_for(lambda: os.path.exists(path) and len(json.load(open(path, encoding="utf-8"))["orders"]) == 1)
+        assert wait_for(lambda: os.path.exists(path) and len(json.loads(read_bytes(path))["orders"]) == 1)
         for _ in range(50):
             msg = good.receive_json()
             if msg.get("positions"):

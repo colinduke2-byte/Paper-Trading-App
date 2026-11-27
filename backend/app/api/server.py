@@ -28,6 +28,10 @@ from . import locking
 from .locking import unlocked
 
 TICK_WAIT = 1.0  # seconds the tick waits for the exchange lock before it skips a turn and says who holds it
+# Wall seconds between two state snapshots taken by the tick. Serialising the state is the largest piece of
+# work done under the exchange lock; a real server ticks once a second, so this only limits fast tick rates
+# (replay, tests), where taking a snapshot every turn kept requests waiting. Shutdown always saves.
+SAVE_EVERY = 0.2
 MARKET_DATA = "market data: reads only the feed, which may ask the provider"
 
 
@@ -323,7 +327,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     # The tick runs on its own thread, so the event loop never waits for the exchange lock, and state
     # files are written by a second thread, so no thread writes to disk while holding it.
-    work = {"tick": None, "save": None, "saving": None, "stuck": False}
+    work = {"tick": None, "save": None, "saving": None, "stuck": False, "planned": float("-inf")}
     metrics = ctx.metrics
 
     def turn(elapsed: float) -> tuple:
@@ -347,9 +351,12 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 print(f"broadcast error: {e!r}")
                 out = []
             idle = work["saving"] is None or work["saving"].done()
+            due = got - work["planned"] >= SAVE_EVERY  # wall time paces saving only; business time is ex.now()
             # The last statement that can fail: once save_plan() has reset `dirty`, the plan must reach
             # the caller, or the changes it holds are not written until the next change.
-            files = ex.save_plan() if idle else None  # still dirty next turn when the last write is not done
+            files = ex.save_plan() if idle and due else None  # still dirty next turn when it is not saved now
+            if files is not None:
+                work["planned"] = got
         finally:
             ctx.lock.release()
         wait, took = got - asked, time.monotonic() - got

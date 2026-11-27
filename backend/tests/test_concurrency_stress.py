@@ -16,7 +16,10 @@ def check_everything(rig: Rig, capsys, state_findings=()):
     """After the server has shut down: no failed request, no tick fault, consistent books, consistent file."""
     out = capsys.readouterr().out
     assert "tick error" not in out, out[-2000:]
-    assert not rig.failures, rig.failures[:10]
+    m = rig.ctx.metrics
+    # Who held the lock longest, and how long the ticks waited and ran: names the holder when requests timed out.
+    assert not rig.failures, (len(rig.failures), rig.failures[:5], "longest hold", rig.ctx.lock.longest,
+                              "tick wait max", m.get("lock_wait_max"), "turn max", m.get("turn_max"))
     assert not list(state_findings), list(state_findings)[:10]
     assert problems(rig.ex) == []
     path = os.path.join(rig.data, "state.json")
