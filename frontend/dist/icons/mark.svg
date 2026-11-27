@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- PaperDesk mark: a sheet of paper with a folded corner and a rising price line. Original drawing. -->
+  <rect width="512" height="512" rx="112" fill="#12161c"/>
+  <path d="M140 104h168l64 64v240a24 24 0 0 1-24 24H140a24 24 0 0 1-24-24V128a24 24 0 0 1 24-24z" fill="#d9dfe7"/>
+  <path d="M308 104v40a24 24 0 0 0 24 24h40z" fill="#8591a1"/>
+  <path d="M152 360l56-64 48 36 88-112" fill="none" stroke="#2fbf71" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="344" cy="220" r="22" fill="#2fbf71"/>
+</svg>
