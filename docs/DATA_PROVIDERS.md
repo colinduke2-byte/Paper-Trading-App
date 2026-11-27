@@ -114,7 +114,7 @@ shows "connection limit exceeded" and falls back to polling.
 
 ### Where keys live
 
-- `.env` in the project root is read at start-up by PaperDesk itself (in `default_exchange`), so
+- `.env` in the project root is read first at start-up by PaperDesk itself (`app/core/envfile.py`), for every setting, so
   it works with `run.sh`, `run.bat`, Docker or a plain `uvicorn` command. Variables already set
   in the environment take priority over the file. Paths with spaces and Windows backslashes are
   fine. The file is read as UTF-8 and a byte order mark is ignored.
@@ -177,8 +177,10 @@ falls back to synthetic, with the cause shown.
   - With an empty side, a new market order during the regular session is rejected with the cause
     ("No ask for X right now, so a market buy has no price to fill at. Use a limit order, or wait
     for an ask."). Outside the session it is accepted and waits. A resting market or triggered stop
-    order never fills against an empty side: it waits (this is enforced in the matching engine for
-    every feed). Limit orders rest as usual.
+    order never fills against an empty side: it waits (enforced in the matching engine for quotes
+    marked `provider_book`, which only the Alpaca adapter sets). Limit orders rest as usual. The
+    simulated feed and option-model quotes are not affected: a model option with a 0.00 bid still
+    fills a market sell by walking its modelled book, as before.
   - Marks (position value, margin) use the last trade; before any trade the quote midpoint; with no
     two-sided quote either, the previous close. Such prices carry `stale: true` and a `note` in
     `/api/quotes`, and positions carry `price_note`, so a price from an earlier session is labelled.
@@ -243,8 +245,11 @@ these come from `/v1/corporate-actions` (code: `backend/app/marketdata/alpaca_ac
 - **Waiting, not skipping.** At each New York midnight the lifecycle asks for the new day. If that
   day's data has not been fetched on that date yet (for example the request is in flight or Alpaca
   answers 5xx or 429), the day roll stops before the day: no interest accrual, settlement, dividend
-  or split for it is done, so nothing happens twice, and it is retried on the next tick. Failed
-  requests are retried after 30 s, 60 s, 2, 5 and then every 15 minutes. `/api/status` shows
+  or split for it is done, so nothing happens twice, and it is retried on the next tick. The wait
+  lasts at most an hour (`ACTIONS_WAIT`): after that the day starts without the missing data, with
+  a notice ("Corporate action data for … did not arrive within 60 minutes …"), and while the outage
+  lasts later days do not wait again. Actions that arrive afterwards are applied as late records
+  (below). Failed requests are retried after 30 s, 60 s, 2, 5 and then every 15 minutes. `/api/status` shows
   `day_roll_waiting` and `corporate_actions` (state, message); the event stream says why it waits.
   An error that retrying will not fix (HTTP 400, 401, 403, 404, 422, for example a plan without
   corporate actions) is reported once ("Corporate actions are not available …") and the days roll
@@ -259,7 +264,12 @@ these come from `/v1/corporate-actions` (code: `backend/app/marketdata/alpaca_ac
   with the reason) and in the account log. The position is left as it is.
 - **Late records.** Alpaca warns that records can appear after the fact. A dividend or split found
   up to 10 days after its ex-date (never before the day the accounts started) is applied on the
-  next day roll and logged as late; holders are the positions at that time (an approximation).
+  next day roll and logged as late, only to the accounts that held the symbol (or options on it) at
+  the start of its ex-date. The lifecycle keeps a snapshot of every account's positions at the start
+  of each day for 12 days (`held` in `state.json`). A late split adjusts only the lots opened before
+  that snapshot (lots bought later were traded at post-split prices); a late dividend is owed on the
+  quantity held then. A late action no account held over its ex-date is logged ("… so it is not
+  applied") and never reconsidered; the live quote is not rescaled for it.
 - **Exactly once.** Every action has the id `alpaca:<Alpaca id>` and a revision key (symbol, kind,
   ex-date, regular or special). Both are saved with the accounts (`state.json`). A record seen
   again, re-issued under a new id, or amended after it was applied (different rate or ratio) is
@@ -279,10 +289,13 @@ these come from `/v1/corporate-actions` (code: `backend/app/marketdata/alpaca_ac
 
 A real split changes the price before or without the positions changing (if the day roll waits, or
 Alpaca publishes the split late). So, per account:
-- While the start of a day waits for corporate action data, or while a held symbol has a split
-  Alpaca has published (ex-date in the last 10 days, after the accounts started) that is not applied
-  to the accounts yet, no margin call is started, cleared or enforced. The summary's
+- While a held symbol has a split Alpaca has published (ex-date in the last 10 days, after the
+  accounts started) that is not applied to the account yet, and will be (the account held the
+  symbol at the start of the ex-date, or the ex-date has not started yet), no margin call is
+  started, cleared or enforced. The summary's
   `margin_paused` says why, and an event is sent once.
+- While the start of a day waits for corporate action data (at most an hour), margin calls go on
+  but liquidation waits.
 - For 5 days after an action PaperDesk cannot apply (merger, spin-off, ...) on a held symbol,
   margin calls are still shown but liquidation does not run ("Margin call liquidation paused: …"),
   because the price change may not be a real loss.
@@ -293,8 +306,9 @@ Alpaca publishes the split late). So, per account:
 On Alpaca it is the unadjusted daily bar close (SIP, IEX if refused), fetched by the poller thread
 through the shared rate limiter once the day's close is 16 minutes past, and cached for good. It
 never blocks: until the answer is in it returns `ready=False`; `ready=True, price=None` means there is
-no bar for that day. The simulated feeds answer from their stored daily bars. Meant for settling
-option expiry against the official close.
+no bar for that day. Option expiry settlement (`Exchange._settlement_price`) uses it and waits for
+it at most `PROVIDER_CLOSE_WAIT` (30 minutes) before settling at an approximate price, with a notice.
+Feeds without the method (the simulated and replay feeds) settle from their stored daily bars.
 
 ## Practising on real past days
 
@@ -346,7 +360,7 @@ whether the market was open at the time.
 {"source": "Alpaca", "as_of": 1795500000.0, "available": true, "stale": false, "reason": null, "items": []}
 ```
 
-`available: false` comes with a `reason` (for example, no key or the synthetic feed). `stale: true`
+`available: false` comes with a `reason` (for example, no key). On the synthetic feed the same routes serve simulated research; see `docs/SIMULATED_RESEARCH.md`. `stale: true`
 means a refresh failed and saved data is shown. Fundamentals use `data` in place of `items`.
 
 **Corporate actions (for the dividend and split processing stream).** In process, call

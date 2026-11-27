@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { AlertsTab } from "./AlertsTab";
+import { ChangeOrderButton } from "./ChangeOrder";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
-import { api, compact, dateTime, isOption, money, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
+import { api, compact, dateTime, isOption, money, numText, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
 
 const TABS = ["Positions", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
@@ -26,7 +28,7 @@ export function BottomPanel(p: {
         {tab === "Fills" && <Fills {...p} />}
         {tab === "Activity" && <Activity {...p} />}
         {tab === "Reports" && <Reports accountId={p.accountId} refreshKey={p.refreshKey} notify={p.notify} orders={p.orders} />}
-        {tab === "Alerts" && <Alerts {...p} />}
+        {tab === "Alerts" && <AlertsTab {...p} />}
         {tab === "Screener" && <Screener {...p} />}
       </div>
     </section>
@@ -105,7 +107,9 @@ function Orders({ accountId, orders, onChanged, notify, onSelect }: any) {
                 <td>{TIFS[o.tif]}</td>
                 <td className="num">{o.avg_fill_price == null ? "–" : money(o.avg_fill_price, o.avg_fill_price < 1 ? 4 : 2)}</td>
                 <td title={o.reason || undefined}>{STATUS[o.status] || o.status}{o.reason && o.status !== "filled" ? <span className="muted"> · {o.reason}</span> : null}</td>
-                <td className="num">{active(o) && <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button>}</td>
+                <td className="num row-actions">{active(o) && <>
+                  <ChangeOrderButton accountId={accountId} order={o} onChanged={onChanged} notify={notify} />
+                  <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button></>}</td>
               </tr>
             ))}
           </tbody>
@@ -157,42 +161,9 @@ function Activity({ accountId, refreshKey }: any) {
   );
 }
 
-function Alerts({ notify, refreshKey }: any) {
-  const [alerts, , reload] = usePoll<any[]>(`/alerts`, 5000, [refreshKey]);
-  const [symbol, setSymbol] = useState("");
-  const [op, setOp] = useState("above");
-  const [price, setPrice] = useState("");
-  const add = async () => {
-    try { await api("/alerts", { method: "POST", body: { symbol, op, price } }); setPrice(""); reload(); }
-    catch (e: any) { notify(`Could not add the alert: ${e.message}`, true); }
-  };
-  return (
-    <>
-      <div className="toolbar">
-        <input value={symbol} placeholder="Symbol" aria-label="Alert symbol" onChange={(e) => setSymbol(e.target.value.toUpperCase())} style={{ width: 90 }} />
-        <select value={op} aria-label="Condition" onChange={(e) => setOp(e.target.value)}><option value="above">rises to</option><option value="below">falls to</option></select>
-        <input value={price} placeholder="Price" aria-label="Alert price" inputMode="decimal" onChange={(e) => setPrice(e.target.value)} style={{ width: 90 }} />
-        <button className="ghost sm" onClick={add} disabled={!symbol || !price}>Add alert</button>
-      </div>
-      {!alerts || alerts.length === 0 ? <p className="muted pad">No price alerts. Add one above; it shows a notice here when the price is reached.</p> : (
-        <table>
-          <thead><tr><th>Symbol</th><th>Condition</th><th>Status</th><th /></tr></thead>
-          <tbody>
-            {alerts.map((a) => (
-              <tr key={a.id}><td><b>{a.symbol}</b></td><td>{a.op === "above" ? "Rises to" : "Falls to"} {money(Number(a.price))}</td>
-                <td>{a.triggered_at ? `Triggered ${dateTime(a.triggered_at)}` : "Waiting"}</td>
-                <td className="num"><button className="ghost sm" onClick={async () => { await api(`/alerts/${a.id}`, { method: "DELETE" }).catch(() => {}); reload(); }}>Remove</button></td></tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </>
-  );
-}
-
 function Screener({ onSelect }: any) {
   const [f, setF] = useState({ sector: "", min_price: "", max_price: "", min_change_pct: "", max_pe: "", min_dividend_yield: "" });
-  const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+  const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(k === "sector" ? v : numText(v))}`).join("&");
   const [rows, error] = usePoll<any[]>(`/screener?${qs}`, 5000);
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
   const num = (k: string, label: string) => <input key={k} value={(f as any)[k]} placeholder={label} aria-label={label} inputMode="decimal" onChange={set(k)} style={{ width: 110 }} />;

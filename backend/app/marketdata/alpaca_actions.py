@@ -266,7 +266,7 @@ class ActionBook:
                 if a.id in applied or (a.revision_key and a.revision_key in applied):
                     continue
                 out.setdefault(a.symbol, []).append({
-                    "kind": "split_pending",
+                    "kind": "split_pending", "ex_date": a.ex_date.isoformat(),
                     "reason": f"the {a.describe()} effective {a.ex_date.isoformat()} is not applied to the accounts yet"})
             for n in self.notices.values():
                 d = _day(n.get("date"))

@@ -5,6 +5,13 @@ fees are exact. Account value at a boundary is the saved account-value sample at
 (the live value for the current month); unrealised profit is that value minus cash and cost basis, so
 the statement always reconciles:
     closing value = opening value + deposits + realised - fees + other income + change in unrealised.
+
+Every line is classified from the ledger postings, not from the kind of a fill: deposits are postings to
+contributed capital, realised profit to income:realized, fees to expense:fees, and "other income and
+charges" every other income or expense account (dividends, interest, borrow fees, short dividends). Cash
+and cost basis are the asset side, so a reinvested dividend, cash in lieu of a fractional share or an
+option closed at expiry is counted exactly once. Month-end positions replay the fills and the splits
+recorded in the ledger (a split changes quantities without a fill).
 """
 from decimal import Decimal
 from html import escape
@@ -12,10 +19,16 @@ from typing import Optional
 
 from ..core.money import ZERO, D, cents
 from ..ledger.ledger import CAPITAL, CASH, FEES, REALIZED
-from ..options.symbology import describe, multiplier
+from ..lifecycle.splits import option_adjustable, tidy
+from ..options.symbology import build, describe, multiplier, parse
 from .common import iso, month_bounds, ny_date
 
-TRADE_KINDS = ("trade", "exercise", "assignment", "expiration")
+FOUR = Decimal("0.0001")
+
+
+def _other_account(a: str) -> bool:
+    """Income and expense accounts other than realised profit and fees: dividends, interest, borrow fees."""
+    return a.startswith(("income:", "expense:")) and a not in (REALIZED, FEES)
 
 
 def balances_before(ledger, ts: float) -> dict:
@@ -46,17 +59,55 @@ def equity_at(account, ts: float, bal: dict) -> tuple:
     return best, "account value sample"
 
 
-def _positions_at(account, end: float) -> dict:
+def positions_at(account, end: float, splits: Optional[dict] = None) -> dict:
+    """Quantities held just before `end`: every fill, and every split the ledger records, in time order.
+
+    splits: {action id: CorporateAction} for the splits the account went through (from the lifecycle's
+    split records). A split adjusts stock the way lifecycle.splits does (whole positions keep whole
+    shares, the rest is paid in lieu) and moves adjustable options to their new contracts; options it
+    cash settled have a split_settlement fill.
+    """
+    from decimal import ROUND_FLOOR
+    fills = {f.id: f for f in account.fills if f.ts < end}
+    events, seen = [], set()
+    for t in account.ledger.transactions:  # the ledger is in booking order; every fill is posted with its id
+        if t.ts >= end:
+            continue
+        if t.ref in fills and t.ref not in seen:
+            seen.add(t.ref)
+            events.append((0, fills[t.ref]))
+        elif t.kind == "split" and t.ref in (splits or {}) and t.ref not in seen:
+            seen.add(t.ref)
+            events.append((1, splits[t.ref]))
+    events += [(0, f) for fid, f in fills.items() if fid not in seen]  # (a fill without a posting: none expected)
     qty: dict = {}
-    for f in account.fills:
-        if f.ts < end:
-            qty[f.symbol] = qty.get(f.symbol, ZERO) + (f.qty if f.side == "buy" else -f.qty)
+    for kind, ev in events:
+        if kind == 0:
+            qty[ev.symbol] = qty.get(ev.symbol, ZERO) + (ev.qty if ev.side == "buy" else -ev.qty)
+            continue
+        n, o = Decimal(ev.new), Decimal(ev.old)
+        q = qty.get(ev.symbol, ZERO)
+        if q:
+            exact = abs(q) * n / o
+            kept = exact.to_integral_value(ROUND_FLOOR) if q == q.to_integral_value() else exact.quantize(FOUR, ROUND_FLOOR)
+            qty[ev.symbol] = (1 if q > 0 else -1) * tidy(kept) if kept else ZERO
+        for sym in [s for s in qty if (c := parse(s)) is not None and c.underlying == ev.symbol and qty[s]]:
+            if option_adjustable(ev, sym):
+                c, f = parse(sym), ev.whole_forward_factor
+                new_sym = build(c.underlying, c.expiry, c.kind, c.strike / f)
+                qty[new_sym] = qty.get(new_sym, ZERO) + qty.pop(sym) * f
     return {s: q for s, q in qty.items() if q != 0}
 
 
 def monthly_statement(account, year: int, month: int, now: float, live_equity: Optional[Decimal] = None,
-                      marks: Optional[dict] = None) -> dict:
-    """Statement for one New York calendar month. marks: {symbol: price} at month end (optional)."""
+                      marks: Optional[dict] = None, splits: Optional[dict] = None,
+                      source: Optional[dict] = None) -> dict:
+    """Statement for one New York calendar month. marks: {symbol: price} at month end (optional);
+    splits: {action id: CorporateAction} (see positions_at).
+    source: where the prices come from (app.marketdata.labels.price_source); simulated when not given."""
+    source = source or {"simulated": True, "price_source": "simulated prices",
+                        "price_note": "All figures use simulated prices."}
+    simulated = source["simulated"]
     start, end = month_bounds(year, month)
     if start > now:
         raise ValueError(f"{year:04d}-{month:02d} has not started yet")
@@ -73,8 +124,9 @@ def monthly_statement(account, year: int, month: int, now: float, live_equity: O
     get = lambda t, acct: sum((v for a, v in t.postings if a == acct), ZERO)
 
     deposits = [{"ts": t.ts, "time": iso(t.ts), "memo": t.memo, "amount": -get(t, CAPITAL)} for t in txns if get(t, CAPITAL)]
-    other = [{"ts": t.ts, "time": iso(t.ts), "kind": t.kind, "memo": t.memo, "amount": get(t, CASH)}
-             for t in txns if t.kind not in TRADE_KINDS and not get(t, CAPITAL)]
+    other_amount = lambda t: -sum((v for a, v in t.postings if _other_account(a)), ZERO)
+    other = [{"ts": t.ts, "time": iso(t.ts), "kind": t.kind, "memo": t.memo, "amount": other_amount(t)}
+             for t in txns if any(_other_account(a) for a, _ in t.postings)]
     by_kind: dict = {}
     for o in other:
         by_kind[o["kind"]] = by_kind.get(o["kind"], ZERO) + o["amount"]
@@ -93,7 +145,9 @@ def monthly_statement(account, year: int, month: int, now: float, live_equity: O
     other_total = sum((o["amount"] for o in other), ZERO)
 
     positions = []
-    for sym, q in sorted(_positions_at(account, end).items()):
+    held = positions_at(account, end, splits)
+    unexplained = [t for t in account.ledger.transactions if t.kind == "split" and t.ts < end and t.ref not in (splits or {})]
+    for sym, q in sorted(held.items()):
         cost = close_bal.get(f"pos:{sym}", ZERO)
         mark = (marks or {}).get(sym)
         mv = cents(q * mark * multiplier(sym)) if mark is not None else None
@@ -116,10 +170,16 @@ def monthly_statement(account, year: int, month: int, now: float, live_equity: O
         "realized_pnl": realized, "unrealized_change": close_unreal - open_unreal,
         "reconciliation_difference": close_eq - (open_eq + dep_total + realized - fees + other_total + close_unreal - open_unreal),
         "positions": positions,
-        "notes": ["All prices are simulated. This is a paper trading statement, not a brokerage record.",
+        "simulated": simulated, "price_source": source["price_source"],
+        "notes": [("All prices are simulated. " if simulated else f"Prices are {source['price_source']}; the trades "
+                   "are simulated. ") + "This is a paper trading statement, not a brokerage record.",
                   "Account value at a month boundary is the account value sample taken at or just before it; "
-                  "month-end marks come from the simulated feed's last price before the month end.",
-                  "Other income and charges lists any ledger entry that is not a trade or deposit, such as dividends or interest."],
+                  f"month-end marks come from the {'simulated feed' if simulated else 'price feed'}'s last price "
+                  "before the month end.",
+                  "Other income and charges lists every entry to an income or expense account other than realised "
+                  "profit and fees, such as dividends, margin interest and borrow fees."]
+                 + (["Month-end quantities may be wrong: a split in the ledger has no record of its ratio."]
+                    if unexplained else []),
     }
 
 
@@ -173,7 +233,7 @@ th {{ font-weight: 600; color: #444; font-size: 12px; }} .n {{ text-align: right
 .empty {{ color: #777; }} ul {{ color: #555; padding-left: 18px; }}
 @media print {{ body {{ padding: 0; }} .noprint {{ display: none; }} }}
 </style></head><body>
-<p class="paper">Paper trading: simulated, no real money</p>
+<p class="paper">{'Paper trading: simulated prices, no real money' if st.get('simulated', True) else 'Paper trading: real market prices, simulated trades, no real money'}</p>
 <h1>Monthly statement · {e(st['month'])}</h1>
 <p class="meta">{e(st['account_name'])} ({e(st['account_id'])}, {e(st['account_type'])} account) ·
 period {_d(st['period_start'])} to {_d(st['period_end'] - 1)} (New York time){' · month in progress' if st['current'] else ''} ·

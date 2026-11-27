@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, usd } from "./util";
+import { Dialog } from "./Dialog";
+import { api, numText, usd } from "./util";
 import "./replay.css";
 
 // Replay times are shown in New York time, the exchange's own clock.
@@ -71,7 +72,7 @@ export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onSt
   const start = async () => {
     setBusy(true); setError("");
     try {
-      await api("/replay/start", { method: "POST", body: { session: pick, starting_cash: cash, account_type: type, speed } });
+      await api("/replay/start", { method: "POST", body: { session: pick, starting_cash: numText(cash), account_type: type, speed } });
       const st = await api("/status");
       const s = sessions?.find((x) => x.id === pick);
       onStarted(st, `Replay started: ${s ? sessionDate(s.date) : pick}. Press play when you are ready.`);
@@ -79,8 +80,7 @@ export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onSt
   };
 
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal replay-modal" role="dialog" aria-modal="true" aria-labelledby="replay-title" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} className="modal replay-modal" labelledBy="replay-title">
         <h3 id="replay-title">Replay a trading session</h3>
         <p className="muted">You trade in a separate sandbox account while the session plays back on its own clock. Your paper accounts are saved and left exactly as they are; the sandbox is discarded when you exit.</p>
         {sessions === null && !error && <p className="muted">Loading sessions…</p>}
@@ -119,10 +119,9 @@ export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onSt
         {error && <div className="notice bad" role="alert">{error}</div>}
         <div className="row">
           <button className="ghost" onClick={onClose}>Cancel</button>
-          <button className="primary" disabled={!pick || busy} onClick={start}>{busy ? "Starting…" : `Start with ${usd(Number(cash) || 0)}`}</button>
+          <button className="primary" disabled={!pick || busy} onClick={start}>{busy ? "Starting…" : `Start with ${usd(Number(numText(cash)) || 0)}`}</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

@@ -10,6 +10,11 @@ import { CHART_TYPES, ChartType, useChartSettings, useDrawings } from "./chart/s
 import "./chart/chart.css";
 
 const TFS = ["1m", "5m", "15m", "1h", "1d", "1w"];
+// Short labels that cannot be misread ("1M" looks like a month) and full names for screen readers.
+export const TF_LABELS: Record<string, [string, string]> = {
+  "1m": ["1m", "1 minute"], "5m": ["5m", "5 minutes"], "15m": ["15m", "15 minutes"], "1h": ["1h", "1 hour"],
+  "1d": ["1D", "1 day"], "1w": ["1W", "1 week"],
+};
 const TOOLS: DrawingType[] = ["trend", "ray", "hline", "vline", "rect", "fib", "text"];
 const TOOL_SHORT: Record<DrawingType, string> = { trend: "Trend", ray: "Ray", hline: "H-line", vline: "V-line", rect: "Rect", fib: "Fib", text: "Text" };
 export const TIMEFRAME_EVENT = "pd:timeframe";
@@ -283,7 +288,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
     <div className="chart-wrap ct-wrap">
       <div className="ct-bar" role="toolbar" aria-label="Chart tools">
         <div className="ct-seg" role="group" aria-label="Timeframe">
-          {TFS.map((t) => <button key={t} type="button" className={t === tf ? "on" : ""} aria-pressed={t === tf} onClick={() => setTf(t)}>{t.toUpperCase()}</button>)}
+          {TFS.map((t) => <button key={t} type="button" className={t === tf ? "on" : ""} aria-pressed={t === tf} aria-label={TF_LABELS[t][1]} title={TF_LABELS[t][1]} onClick={() => setTf(t)}>{TF_LABELS[t][0]}</button>)}
         </div>
         <select className="ct-select" aria-label="Chart type" value={settings.type} onChange={(e) => setSettings({ ...settings, type: e.target.value as ChartType })}>
           {Object.entries(CHART_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
@@ -323,6 +328,9 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
           <span className="muted ct-hint">{tool === "select" ? "Tap a drawing to select it, drag to move it." : POINTS_HINT[tool]}</span>
         </div>
       )}
+      <div className="ct-credit">
+        <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Charting by TradingView</a>
+      </div>
       {error && <div className="notice bad">Could not load chart data: {error}</div>}
       {compareError && <div className="notice bad">{compareError}</div>}
       <div className="ct-stage" data-chart-type={settings.type} data-log={settings.log ? "1" : "0"} data-loaded={loadTick > 0 ? "1" : "0"}

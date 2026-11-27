@@ -16,41 +16,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from ..core import envfile
+
 log = logging.getLogger("paperdesk.config")
 
 LIVE_WATCHLIST = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA"]
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    return envfile.project_root()
 
 
 def load_dotenv(path: Path, environ=None) -> list:
     """Read KEY=VALUE lines into the environment without overriding variables already set.
 
-    Returns the names it set (never the values). Missing file: does nothing.
+    Returns the names it set (never the values). Missing file: does nothing. See app.core.envfile.
     """
-    environ = os.environ if environ is None else environ
-    path = Path(path)
-    if not path.is_file():
-        return []
-    names = []
-    for raw in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        name, value = line.split("=", 1)
-        name, value = name.strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        elif " #" in value:
-            value = value.split(" #", 1)[0].rstrip()
-        if name and name not in environ:
-            environ[name] = value
-            names.append(name)
-    return names
+    return envfile.load_into(path, environ)
 
 
 @dataclass
@@ -97,7 +79,7 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
     """Pick the feed. Never raises for configuration problems: it falls back to synthetic and says why."""
     from .synthetic import SyntheticFeed
     environ = os.environ if environ is None else environ
-    load_dotenv(dotenv if dotenv is not None else project_root() / ".env", environ)
+    load_dotenv(dotenv if dotenv is not None else envfile.env_file_path(environ), environ)
     choice = (environ.get("PAPERDESK_FEED") or "auto").strip().lower()
     key, secret = environ.get("APCA_API_KEY_ID", "").strip(), environ.get("APCA_API_SECRET_KEY", "").strip()
     reason = None
@@ -108,17 +90,18 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
     elif not key or not secret:
         reason = ("No Alpaca API key is set (APCA_API_KEY_ID and APCA_API_SECRET_KEY), so PaperDesk is showing "
                   "simulated prices for fictional companies. See docs/DATA_PROVIDERS.md.")
-    else:
+    live_cause = None
+    if reason is None:
         sel = _alpaca(now, data_dir, environ, key, secret, start, **alpaca_kw)
-        if sel is not None and not isinstance(sel, str):
+        if isinstance(sel, Selection):
             return sel
-        reason = sel
+        reason, live_cause = sel
     mode = environ.get("PAPERDESK_SESSIONS", "always")
     feed = SyntheticFeed(seed=synthetic_seed, now=now, always_open=mode == "always")
-    feed.fallback_reason = reason
-    from .research import ResearchHub
-    feed.research = ResearchHub(simulated_reason="The synthetic feed uses fictional companies, so there is no "
-                                                 "real news, calendar or fundamental data for them.")
+    feed.fallback_reason = reason  # the feed carries its own simulated research (app.marketdata.simresearch)
+    # Alpaca was configured but could not be used: the app runs on simulated data and the simulated accounts
+    # (the live-data accounts in <data>/alpaca are not loaded). The UI shows a persistent notice saying so.
+    feed.live_unavailable = live_cause
     return Selection(feed, mode, data_dir, [], reason)
 
 
@@ -134,14 +117,16 @@ def _alpaca(now, data_dir, environ, key, secret, start, **kw):
                           trading_url=environ.get("APCA_API_BASE_URL", PAPER_TRADING_URL).strip().rstrip("/"),
                           rpm=float(environ.get("PAPERDESK_ALPACA_RPM", "190")), data_dir=live_dir, **kw)
     except ValueError as e:
-        return f"Alpaca settings are invalid: {e}. Using simulated prices."
+        return f"Alpaca settings are invalid: {e}. Using simulated prices.", f"the settings are invalid: {e}"
     try:
         feed.load_assets()
     except ProviderError as e:
         if e.status in (401, 403):
-            return (f"Alpaca rejected the API key (HTTP {e.status}). Check APCA_API_KEY_ID and APCA_API_SECRET_KEY "
-                    f"(paper keys need APCA_API_BASE_URL unset or https://paper-api.alpaca.markets). Using simulated prices.")
-        return f"Could not reach Alpaca to load the symbol list ({e.message}). Using simulated prices."
+            return ((f"Alpaca rejected the API key (HTTP {e.status}). Check APCA_API_KEY_ID and APCA_API_SECRET_KEY "
+                     f"(paper keys need APCA_API_BASE_URL unset or https://paper-api.alpaca.markets). Using simulated prices."),
+                    f"the API key was rejected, HTTP {e.status}")
+        return (f"Could not reach Alpaca to load the symbol list ({e.message}). Using simulated prices.",
+                f"it could not be reached: {e.message}")
     fh_key = environ.get("FINNHUB_API_KEY", "").strip()
     feed.research = ResearchHub(alpaca=feed.rest, finnhub=FinnhubClient(fh_key) if fh_key else None)
     if start:

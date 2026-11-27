@@ -1,4 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Dialog } from "./Dialog";
+import { FeedNotice } from "./FeedNotice";
 import { Chart, SHORTCUTS_EVENT } from "./Chart";
 import { Shortcuts } from "./chart/Shortcuts";
 import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
@@ -9,8 +11,10 @@ import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { HelpDialog } from "./Help";
-import { api, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, underlyingOf, usd } from "./util";
+import { api, dateTime, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
 import { useSignOutAction } from "./Login";
+import { bellLabel, deliver, NotificationBell, NotificationPanel, useNotifications } from "./Notifications";
+import { ALERT_AT_PRICE, AlertBuilder, AlertSeed } from "./AlertsTab";
 
 type Toast = { id: number; text: string; bad?: boolean };
 
@@ -41,7 +45,7 @@ export default function App() {
   const [seed, setSeed] = useState<TicketSeed>({ symbol });
   const [refreshKey, setRefreshKey] = useState(0);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [dialog, setDialog] = useState<null | "new" | "reset">(null);
+  const [dialog, setDialog] = useState<null | "new" | "reset" | "delete">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -50,6 +54,11 @@ export default function App() {
   const signOut = useSignOutAction(); // null unless a passcode is set and this browser had to sign in
   const ws = useRef<WebSocket | null>(null);
   const toastId = useRef(0);
+  const notes = useNotifications(accountId, modeKey(status) || "live", connected); // the bell and its log
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [alertBuilder, setAlertBuilder] = useState<null | { seed?: AlertSeed; editing?: any }>(null);
 
   const notify = useCallback((text: string, bad = false) => {
     const id = ++toastId.current;
@@ -113,8 +122,7 @@ export default function App() {
         if (m.events?.length) {
           setRefreshKey((k) => k + 1);
           for (const e of m.events) {
-            if (e.type === "alert") notify(`Alert: ${e.alert.symbol} ${e.alert.op === "above" ? "rose to" : "fell to"} ${money(e.last)}`);
-            if (e.type === "fill" && e.fill.kind !== "trade") notify(`${e.fill.kind === "reinvestment" ? "Dividend reinvestment" : e.fill.kind === "split_settlement" ? "Split settlement" : `Option ${e.fill.kind}`}: ${e.fill.side} ${e.fill.qty} ${e.fill.symbol} at ${money(e.fill.price)}`);
+            if (e.type === "notification" && notesRef.current.receive(e.notification)) deliver(e.notification, notify);
             if (e.type === "order" && e.order.status === "filled" && e.order.parent_id) notify(`Filled: ${e.order.role?.replace("_", " ") || "order"} on ${e.order.symbol} at ${money(e.order.avg_fill_price)}`);
           }
         }
@@ -154,6 +162,25 @@ export default function App() {
     setRefreshKey((k) => k + 1);
   });
 
+  // "Alert me at this price": anything can call requestPriceAlert(symbol, price) from AlertsTab.tsx.
+  const quotesRef = useRef(quotes);
+  quotesRef.current = quotes;
+  useEffect(() => {
+    const on = (ev: Event) => {
+      const { symbol: s, price } = (ev as CustomEvent).detail || {};
+      if (!s || !(Number(price) > 0)) return;
+      const last = quotesRef.current[s]?.last;
+      setAlertBuilder({ seed: { kind: "price", symbol: s, price: Number(price).toFixed(2), op: last != null && Number(price) < last ? "below" : "above" } });
+    };
+    window.addEventListener(ALERT_AT_PRICE, on);
+    return () => window.removeEventListener(ALERT_AT_PRICE, on);
+  }, []);
+  const editAlert = (id: string) =>
+    api(`/alert-rules?account_id=${encodeURIComponent(accountId)}`).then((list: any[]) => {
+      const a = list.find((x) => x.id === id);
+      if (a) setAlertBuilder({ editing: a }); else notify("That alert has been deleted.", true);
+    }).catch((e) => notify(`Could not load the alert: ${e.message}`, true));
+
   const shown = symbolChecked ? symbol : ""; // nothing is fetched for a symbol until it is known to exist
   const [info] = usePoll<any>(shown ? `/fundamentals/${shown}` : null, 30000, [modeKey(status)]);
   const ticketPos = positions.find((p) => p.symbol === seed.symbol);
@@ -169,7 +196,8 @@ export default function App() {
   };
   const pickSymbol = (s: string) => { setSymbol(s); setScreen("Chart"); };
   const tradeOption = (s: string, side: string, price: number) => {
-    setSeed({ symbol: s, side, type: "limit", limit_price: price, qty: 1, nonce: Date.now() });
+    const { limit, note } = marketableLimit(side, price);
+    setSeed({ symbol: s, side, type: "limit", limit_price: limit, note, qty: 1, nonce: Date.now() });
     setScreen("Trade");
   };
   const startTrade = (side: string) => { setSeed({ symbol, side, nonce: Date.now() }); setScreen("Trade"); };
@@ -178,8 +206,12 @@ export default function App() {
 
   // Top-bar actions: desktop shows them in the header, the phone layout lists them in its menu.
   const topActions: TopAction[] = [
+    ...(accountId ? [small
+      ? { label: bellLabel(notes.unread), onClick: () => setNotesOpen(true) }
+      : { label: "Notifications", element: <NotificationBell unread={notes.unread} onClick={() => setNotesOpen(true)} /> }] : []),
     { label: "New account", onClick: () => setDialog("new") },
     { label: "Reset", onClick: () => setDialog("reset") },
+    ...(accounts.length > 1 && accountId ? [{ label: "Delete account", title: "Delete this paper account and its history", onClick: () => setDialog("delete") }] : []),
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
     { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
@@ -197,9 +229,15 @@ export default function App() {
       {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
     </select>
   );
-  const marginNotice = summary?.margin_call && (
-    <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.</div>
-  );
+  const feedNotice = <FeedNotice status={status} />;
+  const unpriced: string[] = summary?.prices_unavailable ?? [];
+  const marginNotice = (summary?.margin_call || status?.ui_stale || unpriced.length > 0) ? (
+    <>
+      {summary?.margin_call && <div className="notice bad wide" role="alert">Margin call: account value {usd(summary.equity)} is below the {usd(summary.maintenance_requirement)} maintenance requirement. Only closing orders are accepted until this is resolved.{summary.liquidation_at ? ` Positions are closed after the grace period, counting only time while the market is open and PaperDesk is running (at about ${dateTime(summary.liquidation_at)} if it keeps running).` : ""}</div>}
+      {unpriced.length > 0 && <div className="notice wide" role="status">Waiting for prices for {unpriced.join(", ")}: until they arrive the account value leaves those positions out, margin checks are paused and orders that add risk are not accepted.</div>}
+      {status?.ui_stale && <div className="notice wide" role="status">This page was built from older sources than the ones in frontend/src. Run "npm run build" in the frontend folder and reload to see the current version.</div>}
+    </>
+  ) : null;
   const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
   const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
   const mainTabs = (
@@ -217,7 +255,7 @@ export default function App() {
         onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
       {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
       {view === "Company" && <Company info={info} />}
-      {view === "Research" && <Research symbol={underlyingOf(symbol)} />}
+      {view === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
     </div>
   );
   const bottom = accountId && (
@@ -237,13 +275,20 @@ export default function App() {
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className={t.bad ? "toast bad" : "toast"}>{t.text}</div>)}
       </div>
+      {notesOpen && accountId && (
+        <NotificationPanel notes={notes} onClose={() => setNotesOpen(false)} onSelect={pickSymbol} onAlert={editAlert} />
+      )}
+      {alertBuilder && accountId && (
+        <AlertBuilder accountId={accountId} seed={alertBuilder.seed} editing={alertBuilder.editing} quotes={quotes} positions={positions}
+          onClose={() => setAlertBuilder(null)} onSaved={(m) => { setAlertBuilder(null); notify(m); setRefreshKey((k) => k + 1); }} />
+      )}
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {settingsOpen && accountId && (
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
       )}
       {dialog && (
-        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} onClose={() => setDialog(null)}
+        <AccountDialog mode={dialog} account={accounts.find((a) => a.id === accountId)} next={accounts.find((a) => a.id !== accountId)} onClose={() => setDialog(null)}
           onDone={async (id, msg) => { setDialog(null); await loadAccounts(); if (id) setAccountId(id); setRefreshKey((k) => k + 1); notify(msg); }} />
       )}
     </>
@@ -253,7 +298,7 @@ export default function App() {
     return (
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
-        notice={marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        notice={status?.live_unavailable && marginNotice ? <div className="m-notices">{feedNotice}{marginNotice}</div> : status?.live_unavailable ? feedNotice : marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
         ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
         replayBar={status?.replay ? replayBar : null} mode={mode}>
         {overlays}
@@ -281,6 +326,7 @@ export default function App() {
         </div>
       </header>
       {replayBar}
+      {feedNotice}
       {marginNotice}
       <main key={mode}>
         {watchlist}
@@ -302,13 +348,8 @@ export default function App() {
   );
 }
 
-function describeOption(s: string) {
-  const m = s.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
-  if (!m) return s;
-  return `${m[1]} 20${m[2]}-${m[3]}-${m[4]} ${Number(m[6]) / 1000} ${m[5] === "C" ? "Call" : "Put"}`;
-}
-
-function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "reset"; account: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+function AccountDialog({ mode, account, next, onClose, onDone }: { mode: "new" | "reset" | "delete"; account: any; next?: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+  if (mode === "delete") return <DeleteAccountDialog account={account} next={next} onClose={onClose} onDone={onDone} />;
   const [name, setName] = useState("");
   const [type, setType] = useState("margin");
   const [cash, setCash] = useState(mode === "reset" && account ? String(account.starting_cash) : "100000");
@@ -316,19 +357,18 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
   const submit = async () => {
     try {
       if (mode === "new") {
-        const a = await api("/accounts", { method: "POST", body: { name, type, starting_cash: cash } });
+        const a = await api("/accounts", { method: "POST", body: { name, type, starting_cash: numText(cash) } });
         onDone(a.id, `Account "${a.name}" created`);
       } else {
-        await api(`/accounts/${account.id}/reset`, { method: "POST", body: { starting_cash: cash } });
-        onDone(account.id, `Account "${account.name}" reset to ${usd(Number(cash))}`);
+        await api(`/accounts/${account.id}/reset`, { method: "POST", body: { starting_cash: numText(cash) } });
+        onDone(account.id, `Account "${account.name}" reset to ${usd(Number(numText(cash)))}`);
       }
     } catch (e: any) { setError(e.message); }
   };
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <h3>{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
-        {mode === "reset" && <p className="muted">This erases the account's positions, orders and history and starts again with the cash below. It cannot be undone.</p>}
+    <Dialog onClose={onClose} labelledBy="account-dialog-title" destructive={mode === "reset"}>
+        <h3 id="account-dialog-title">{mode === "new" ? "New paper account" : `Reset "${account?.name}"`}</h3>
+        {mode === "reset" && <p className="muted">This erases the account's positions, orders, history and trade journal and starts again with the cash below. The account's rule settings and tax-lot method are kept. It cannot be undone.</p>}
         {mode === "new" && (
           <>
             <label>Name<input value={name} placeholder="Paper account" onChange={(e) => setName(e.target.value)} autoFocus /></label>
@@ -346,7 +386,32 @@ function AccountDialog({ mode, account, onClose, onDone }: { mode: "new" | "rese
           <button className="ghost" onClick={onClose}>Cancel</button>
           <button className="primary" onClick={submit}>{mode === "new" ? "Create account" : "Erase and reset"}</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
+  );
+}
+
+function DeleteAccountDialog({ account, next, onClose, onDone }: { account: any; next?: any; onClose: () => void; onDone: (id: string, msg: string) => void }) {
+  const [typed, setTyped] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const name = account?.name ?? "";
+  const confirm = async () => {
+    setBusy(true); setError("");
+    try {
+      await api(`/accounts/${account.id}`, { method: "DELETE" });
+      onDone(next?.id ?? "", `Account "${name}" deleted`);
+    } catch (e: any) { setError(e.message); setBusy(false); }
+  };
+  return (
+    <Dialog onClose={onClose} labelledBy="delete-title" destructive>
+        <h3 id="delete-title">Delete "{name}"</h3>
+        <p className="muted">This permanently deletes the paper account with its positions, open orders, fills, statements and trade journal. It cannot be undone. Type the account name to confirm.</p>
+        <label>Account name<input value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus aria-label="Type the account name to confirm" /></label>
+        {error && <div className="notice bad" role="alert">{error}</div>}
+        <div className="row">
+          <button className="ghost" onClick={onClose}>Cancel</button>
+          <button className="primary danger" disabled={busy || typed.trim() !== name.trim()} onClick={confirm}>Delete account</button>
+        </div>
+    </Dialog>
   );
 }

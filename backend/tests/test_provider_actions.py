@@ -499,22 +499,23 @@ def test_market_orders_on_a_one_sided_or_empty_book_reject_with_the_cause_or_wai
 
 
 def test_resting_market_sell_never_fills_against_an_empty_bid():
+    # an empty bid on a provider's real book (live feeds set Quote.provider_book)
     feed = SimFeed()
     ex = Exchange(feed, SimClock(0))
     a = ex.create_account("Margin", "margin")
     feed.set_quote("X", "9.99", "10.00")
     ex.tick()
     ex.submit(a.id, {"symbol": "X", "side": "buy", "qty": 10})
-    feed.set_quote("X", "0", "10.00", last="10.00")
+    feed.set_quote("X", "0", "10.00", last="10.00", provider_book=True)
     ex.tick()
     ex.session_mode = "us"
     ex.clock.set(ny("2024-04-22", "08:00"))  # closed for market orders: accepted, waits for the open
     (o,) = ex.submit(a.id, {"symbol": "X", "side": "sell", "qty": 10})
     ex.clock.set(ny("2024-04-22", "09:31"))
-    feed.set_quote("X", "0", "10.00", last="10.00")
+    feed.set_quote("X", "0", "10.00", last="10.00", provider_book=True)
     ex.tick()
     assert ex.engine.orders[o.id].status == "working"  # no fill at a made-up 0.01
-    feed.set_quote("X", "9.98", "10.00", last="9.99")
+    feed.set_quote("X", "9.98", "10.00", last="9.99", provider_book=True)
     ex.clock.advance(1)
     ex.tick()
     assert ex.engine.orders[o.id].status == "filled" and ex.engine.orders[o.id].avg_fill_price == D("9.98")
@@ -770,10 +771,12 @@ def test_waiting_for_the_feed_never_skips_or_repeats_a_day(ready, hours, restart
 @hsettings(max_examples=60, deadline=None)
 @given(bid=st.integers(0, 2000), ask=st.integers(0, 2000), qty=st.integers(1, 500), side=st.sampled_from(["buy", "sell"]))
 def test_market_orders_never_fill_against_an_empty_side(bid, ask, qty, side):
+    # on a provider's real book; simulated and model quotes keep walking (see the zero-bid model option test)
     from app.core.models import Order, Quote
     from app.matching.engine import MatchingEngine
     e = MatchingEngine()
-    q = Quote(symbol="X", bid=D(bid) / 100, ask=D(ask) / 100, bid_size=D(100), ask_size=D(100), last=D("10"))
+    q = Quote(symbol="X", bid=D(bid) / 100, ask=D(ask) / 100, bid_size=D(100), ask_size=D(100), last=D("10"),
+              provider_book=True)
     ev = e.submit(Order(id="O1", account_id="A", symbol="X", side=side, qty=D(qty)), q, 0.0)
     fills = [o for k, o in ev if k == "fill"]
     top = q.ask if side == "buy" else q.bid
@@ -946,12 +949,8 @@ def test_closing_price_is_fetched_off_the_tick_and_cached():
     assert r.ready and r.price is None and "no daily bar" in r.note
 
 
-def test_closing_price_from_the_simulated_feed():
+def test_simulated_feed_has_no_closing_price_so_expiry_settles_from_its_bar_store():
+    # One implementation: Exchange._settlement_price reads the bar store for feeds without closing_price.
+    # The simulated feed must not grow one (its settlement notes and fills stay as on main).
     from app.marketdata.synthetic import SyntheticFeed
-    feed = SyntheticFeed(now=ny("2024-04-22", "10:00"))
-    row = feed.store.daily["NVLX"][-1]
-    day = date(1970, 1, 1) + timedelta(seconds=row[0])
-    r = feed.closing_price("NVLX", day)
-    assert r.ready and r.price == D(str(row[4])).quantize(D("0.01"))
-    none = feed.closing_price("NVLX", date(1999, 1, 4))
-    assert none.ready and none.price is None and "no synthetic daily bar" in none.note
+    assert getattr(SyntheticFeed(now=ny("2024-04-22", "10:00")), "closing_price", None) is None

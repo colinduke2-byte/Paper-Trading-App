@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, dateTime, usd } from "./util";
+import { Dialog } from "./Dialog";
+import { api, dateTime, numText, usd } from "./util";
 
 type Field = { key: string; type: "bool" | "number"; default: any; label: string; help: string; min: string | null; max: string | null };
 
@@ -39,7 +40,9 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
   const save = async () => {
     setBusy(true); setError("");
     try {
-      load(await api(`/accounts/${accountId}/settings`, { method: "PUT", body: values }));
+      const body = Object.fromEntries(Object.entries(values).map(([k, v]) =>
+        [k, typeof v === "string" && fields.find((f) => f.key === k)?.type === "number" ? numText(v) : v]));
+      load(await api(`/accounts/${accountId}/settings`, { method: "PUT", body }));
       onSaved("Account settings saved");
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
@@ -54,12 +57,14 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
   const hidden = fields.length - shown.length;
 
   return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" style={S.modal} role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={(e) => e.stopPropagation()}>
+    <Dialog onClose={onClose} style={S.modal} labelledBy="settings-title">
         <h3 id="settings-title">Account rules</h3>
         {summary && (
           <div style={S.stats}>
-            <div style={S.stat}><span className="muted">Settled cash</span><b>{usd(summary.settled_cash)}</b></div>
+            {type === "margin" && summary.settled_cash < 0
+              ? <div style={S.stat} title="Cash is below zero because the account has borrowed to buy (a margin loan). Margin interest is charged on it when that rule is on.">
+                  <span className="muted">Margin loan (borrowed)</span><b>{usd(-summary.settled_cash)}</b></div>
+              : <div style={S.stat}><span className="muted">Settled cash</span><b>{usd(summary.settled_cash)}</b></div>}
             <div style={S.stat}><span className="muted">Unsettled</span><b>{usd(summary.unsettled_cash)}</b></div>
             {type === "margin" && <div style={S.stat}><span className="muted">Day trades (5 days)</span><b>{summary.day_trades ?? "–"}{summary.day_trades_left != null ? ` · ${summary.day_trades_left} left` : ""}</b></div>}
             {type === "margin" && <div style={S.stat}><span className="muted">Accrued interest</span><b>{usd(summary.accrued_interest)}</b></div>}
@@ -67,11 +72,17 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
             {summary.pending_dividends ? <div style={S.stat}><span className="muted">Dividends pending</span><b>{usd(summary.pending_dividends)}</b></div> : null}
           </div>
         )}
+        {summary && (summary.accrued_charges > 0 || summary.pending_dividends) ? (
+          <p className="muted" style={S.help}>Account value includes dividends pending and subtracts interest and borrow fees accrued but not yet charged (they are charged on the first day of each month).</p>
+        ) : null}
+        {type === "margin" && summary?.settled_cash < 0 && (
+          <p className="muted" style={S.help}>This account has borrowed {usd(-summary.settled_cash)} to buy: its cash is below zero. That is normal in a margin account; margin interest is charged on the loan when that rule is on.</p>
+        )}
         {summary?.prices_unavailable?.length > 0 && (
           <div className="notice" role="status">Prices unavailable for {summary.prices_unavailable.join(", ")}: margin checks are paused until they return.</div>
         )}
         {summary?.liquidation_at && (
-          <div className="notice bad" role="alert">Margin call: positions will be liquidated from {dateTime(summary.liquidation_at)} unless it is met.</div>
+          <div className="notice bad" role="alert">Margin call: positions will be liquidated after {summary.grace_hours_left != null ? `${summary.grace_hours_left.toFixed(1)} more hours` : "the grace period"} of open market time unless it is met (about {dateTime(summary.liquidation_at)} if PaperDesk keeps running). Time while PaperDesk is closed or a replay runs does not count.</div>
         )}
         {!fields.length && !error && <p className="muted">Loading settings…</p>}
         <div style={S.list}>
@@ -91,6 +102,7 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
             );
           })}
         </div>
+        <LifecycleLog accountId={accountId} />
         {hidden > 0 && <p className="muted">Rules that only apply to {type === "cash" ? "margin" : "cash"} accounts are hidden.</p>}
         {error && <div className="notice bad" role="alert">{error}</div>}
         <div className="row">
@@ -98,7 +110,27 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
           <button className="ghost" onClick={onClose}>Close</button>
           <button className="primary" onClick={save} disabled={busy || !fields.length}>Save</button>
         </div>
-      </div>
-    </div>
+    </Dialog>
+  );
+}
+
+/** Margin calls, liquidation steps, expiry settlements and other account events (GET /lifecycle). */
+function LifecycleLog({ accountId }: { accountId: string }) {
+  const [log, setLog] = useState<any[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api(`/accounts/${accountId}/lifecycle`).then((r) => setLog(r.log)).catch((e) => setError(e.message));
+  }, [accountId]);
+  return (
+    <details className="lifecycle-log">
+      <summary>Margin call and liquidation log{log ? ` (${log.length})` : ""}</summary>
+      {error && <div className="notice bad" role="alert">Could not load the log: {error}</div>}
+      {log && !log.length && <p className="muted" style={S.help}>No margin calls or liquidations on this account.</p>}
+      {log && log.length > 0 && (
+        <ul style={{ ...S.list, gap: 4, paddingLeft: 16, margin: "6px 0", fontSize: 12 }}>
+          {log.map((e, i) => <li key={i}><span className="muted">{dateTime(e.ts)}</span> {e.message}</li>)}
+        </ul>
+      )}
+    </details>
   );
 }

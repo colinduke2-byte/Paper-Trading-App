@@ -1,7 +1,6 @@
 """Market data provider interface, bar storage and the scripted test feed."""
 from collections import deque
 from dataclasses import replace
-from datetime import date
 from decimal import Decimal
 from typing import NamedTuple, Optional
 
@@ -151,20 +150,15 @@ class MarketDataProvider:
         """{"stale": bool, "note": text} when the price shown for symbol needs explaining, else None."""
         return None
 
-    def closing_price(self, symbol: str, day) -> ClosePrice:
-        """Official closing price of symbol on day (a date), unadjusted. Never blocks: a live feed fetches it on
-        its own thread and answers ClosePrice(False, None) until it has it. This default reads stored daily bars."""
-        ts = int((day - date(1970, 1, 1)).total_seconds())
-        for r in reversed(self.store.daily.get(symbol, [])):
-            if r[0] == ts:
-                return ClosePrice(True, cents(Decimal(repr(r[4]))), f"{self.name} daily bar")
-            if r[0] < ts:
-                break
-        return ClosePrice(True, None, f"no {self.name} daily bar for {symbol} on {day.isoformat()}")
-
     def no_price_reason(self, symbol: str) -> str:
         """Plain sentence: why there is no quote for symbol."""
         return f"no quote available for {symbol}"
+
+    def event_variance(self, symbol: str, expiry_ts: float, now: float) -> float:
+        """Extra variance (log return squared) the option model adds for scheduled events, such as an
+        earnings report, between now and expiry. The research hub supplies it; default none."""
+        f = getattr(self.research, "event_variance", None)
+        return f(symbol, expiry_ts, now) if f is not None else 0.0
 
     def status_info(self) -> dict:
         """Extra fields for /api/status: data source, real-time or delayed, stream health."""
@@ -232,7 +226,7 @@ class SimFeed(MarketDataProvider):
             adjust_for_split(self, action)
 
     def set_quote(self, symbol: str, bid, ask, last=None, bid_size=1000, ask_size=1000, last_size=100,
-                  trade: bool = True, ts: float = 0.0) -> Quote:
+                  trade: bool = True, ts: float = 0.0, provider_book: bool = False) -> Quote:
         bid, ask = D(bid), D(ask)
         last = D(last) if last is not None else ask
         prev = self.quotes.get(symbol)
@@ -240,7 +234,8 @@ class SimFeed(MarketDataProvider):
                   last_size=D(last_size) if trade else ZERO, ts=ts, trade=trade,
                   volume=(prev.volume if prev else ZERO) + (D(last_size) if trade else ZERO),
                   open=prev.open if prev else last, high=max(prev.high, last) if prev else last,
-                  low=min(prev.low, last) if prev else last, prev_close=prev.prev_close if prev else last)
+                  low=min(prev.low, last) if prev else last, prev_close=prev.prev_close if prev else last,
+                  provider_book=provider_book)
         self.info.setdefault(symbol, {"symbol": symbol, "name": symbol, "sector": "Test", "vol": 0.3})
         self.quotes[symbol] = q
         self._pending.append(q)

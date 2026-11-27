@@ -324,7 +324,7 @@ class SymbolState:
                      ask_size=self.ask_size if ask else ZERO, last=last,
                      last_size=self.last_size if self.new_trade else ZERO, volume=self.volume,
                      ts=self.ts, trade=self.new_trade, open=self.open, high=self.high, low=self.low,
-                     prev_close=self.prev_close)
+                     prev_close=self.prev_close, provider_book=True)
 
     def filled_from_trade(self, now: float) -> bool:
         """True while a missing side is being filled from a recent trade (it stops when the trade ages)."""
@@ -366,7 +366,8 @@ def option_quote_from_snapshot(symbol: str, snap: dict) -> Optional[Quote]:
         ask = bid
     mid = (bid + ask) / 2
     return Quote(symbol=symbol, bid=bid, ask=ask, bid_size=dec(q.get("bs")) or ZERO, ask_size=dec(q.get("as")) or ZERO,
-                 last=last if last else max(mid, CENT), ts=max(parse_ts(q.get("t")) or 0.0, parse_ts(t.get("t")) or 0.0))
+                 last=last if last else max(mid, CENT), ts=max(parse_ts(q.get("t")) or 0.0, parse_ts(t.get("t")) or 0.0),
+                 provider_book=True)
 
 
 def option_leg(c: Contract, snap: Optional[dict], spot: float, base_vol: float, now: float, source: str,
@@ -545,7 +546,11 @@ class WebsocketsConnection(Connection):
 
     def __init__(self, url: str):
         from websockets.sync.client import connect
-        self._ws = connect(url, open_timeout=15, close_timeout=3, max_size=2 ** 24)
+        # Entered as a context manager: websockets 17.1+ deprecates using connect()'s return value directly
+        # (it warns once the handshake is done); older versions return the connection, whose __enter__ is
+        # itself, so this works with every supported version.
+        self._cm = connect(url, open_timeout=15, close_timeout=3, max_size=2 ** 24)
+        self._ws = self._cm.__enter__()
 
     def send(self, text: str) -> None:
         self._ws.send(text)
@@ -559,7 +564,7 @@ class WebsocketsConnection(Connection):
 
     def close(self) -> None:
         try:
-            self._ws.close()
+            self._cm.__exit__(None, None, None)
         except Exception:
             pass
 
@@ -1245,32 +1250,77 @@ class AlpacaFeed(MarketDataProvider):
 # ---------------------------------------------------------------------------------------------
 # Manual check: python -m app.marketdata.alpaca --check
 # ---------------------------------------------------------------------------------------------
-def _check(seconds: float = 8.0, thin: str = "IEP", transport: Optional[Transport] = None,
-           connector=None, environ=None, out_dir: Optional[str] = None) -> int:
+def _check(seconds: float = 8.0, environ=None, out=None, thin: str = "IEP", out_dir: Optional[str] = None,
+           **feed_kw) -> int:
+    """One line per check (PASS or FAIL with the reason), then a summary. Exit code 0 only if all pass.
+
+    The adapter's own log messages are captured and folded into the FAIL line they explain, so nothing
+    else is printed. feed_kw (transport, connector) lets tests run it against saved responses."""
+    import logging
     import os
-    import tempfile
-    from .config import load_dotenv, project_root
+    import warnings
+    from ..core import envfile
     env = os.environ if environ is None else environ
-    load_dotenv(project_root() / ".env", env)
+    envfile.load_into(envfile.env_file_path(env), env)
+    say = out or (lambda line: print(line, flush=True))
     key, secret = env.get("APCA_API_KEY_ID", ""), env.get("APCA_API_SECRET_KEY", "")
     if not key or not secret:
-        print("FAIL keys: APCA_API_KEY_ID and APCA_API_SECRET_KEY are not set (environment or .env)")
+        say("FAIL keys: APCA_API_KEY_ID and APCA_API_SECRET_KEY are not set (environment or .env)")
+        say("SUMMARY: 0 of 1 checks passed")
         return 1
-    feed_name = env.get("PAPERDESK_ALPACA_FEED", "iex")
-    feed = AlpacaFeed(key, secret, feed=feed_name, options_feed=env.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative"),
-                      trading_url=env.get("APCA_API_BASE_URL", PAPER_TRADING_URL), transport=transport,
-                      connector=connector)
+
+    class Collect(logging.Handler):
+        def __init__(self):
+            super().__init__(logging.WARNING)
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    collect = Collect()
+    loggers = [logging.getLogger(n) for n in ("paperdesk", "websockets")]
+    saved = [(lg, lg.handlers[:], lg.propagate, lg.level) for lg in loggers]
+    for lg in loggers:
+        lg.handlers, lg.propagate = [collect], False
+        lg.setLevel(logging.WARNING)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # library warnings are not check results
+            return _run_checks(seconds, env, key, secret, say, collect, feed_kw, thin, out_dir)
+    finally:
+        for lg, handlers, propagate, level in saved:
+            lg.handlers, lg.propagate = handlers, propagate
+            lg.setLevel(level)
+
+
+def _run_checks(seconds, env, key, secret, say, collect, feed_kw, thin="IEP", out_dir=None) -> int:
+    import os
+    import tempfile
+    try:
+        feed = AlpacaFeed(key, secret, feed=env.get("PAPERDESK_ALPACA_FEED", "iex").strip().lower(),
+                          options_feed=env.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative").strip().lower(),
+                          trading_url=env.get("APCA_API_BASE_URL", PAPER_TRADING_URL).strip().rstrip("/"), **feed_kw)
+    except ValueError as e:
+        say(f"FAIL settings: {e}")
+        say("SUMMARY: 0 of 1 checks passed")
+        return 1
     results = []
 
     def item(name, fn):
+        collect.messages.clear()
         try:
             detail = fn()
             results.append(True)
-            print(f"PASS {name}: {detail}")
+            say(f"PASS {name}: {detail}")
         except Exception as e:
             results.append(False)
-            msg = e.message if isinstance(e, ProviderError) else repr(e)
-            print(f"FAIL {name}: {msg.replace(key, '<key>').replace(secret, '<secret>')}")
+            msg = e.message if isinstance(e, ProviderError) else str(e) or type(e).__name__
+            why = "; ".join(dict.fromkeys(m for m in collect.messages if m not in msg))
+            line = f"FAIL {name}: {msg}" + (f" ({why})" if why else "")
+            for value, label in ((key, "<key>"), (secret, "<secret>")):
+                if len(value) >= 6:  # a provider error may echo a key back; never print it
+                    line = line.replace(value, label)
+            say(line)
 
     def one_quote():
         feed.apply_snapshots(feed.rest.snapshots(["SPY"], feed.data_feed))
@@ -1365,6 +1415,8 @@ def _check(seconds: float = 8.0, thin: str = "IEP", transport: Optional[Transpor
     item("thin symbol snapshot", thin_symbol)
     item("replay session from bars", replay_build)
     item("stream", stream)
+    say(f"SUMMARY: {sum(results)} of {len(results)} checks passed" + ("" if all(results) else
+        "; see the FAIL lines above and docs/DATA_PROVIDERS.md"))
     return 0 if all(results) else 1
 
 
