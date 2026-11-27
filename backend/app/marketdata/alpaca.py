@@ -679,6 +679,7 @@ class AlpacaFeed(MarketDataProvider):
     name = "alpaca"
     simulated = False
     late_actions = True  # Alpaca can publish a corporate action after its ex-date
+    lists_options = True  # option_listing() answers with the real contracts (fetched over the network)
 
     def __init__(self, key: str, secret: str, *, feed: str = "iex", options_feed: str = "indicative",
                  trading_url: str = PAPER_TRADING_URL, transport: Optional[Transport] = None,

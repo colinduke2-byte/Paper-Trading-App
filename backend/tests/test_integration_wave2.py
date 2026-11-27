@@ -430,3 +430,103 @@ def test_reset_takes_its_backup_outside_the_lock_and_a_failed_backup_stops_it(tm
     r = c.post(f"/api/accounts/{aid}/reset", json={})
     assert r.status_code in (400, 409, 422) and "backup" in r.json()["detail"]
     assert len(ex.accounts[aid].fills) == 1  # nothing was reset
+
+
+# ---- hardening extras (PR 31): an account step that fails is not hidden (release review finding 1) ---------
+
+def test_a_failing_margin_check_stays_flagged_is_reported_and_still_raises_the_margin_call(monkeypatch, caplog):
+    import logging
+    from helpers import make_exchange, move
+    ex, feed, clock = make_exchange(ABC="100.00")
+    a = ex.create_account("m", "margin", D("100000"))
+    ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 1800})  # on margin: at 30 the account is in deficit
+    real = ex.lifecycle._margin_step
+
+    def broken(acct, now):
+        raise ZeroDivisionError("division by zero")
+    monkeypatch.setattr(ex.lifecycle, "_margin_step", broken)
+    caplog.set_level(logging.ERROR, logger="paperdesk")
+    for _ in range(3):
+        move(ex, feed, clock, "ABC", "30.00")
+        ex.safe_summary(a.id)  # a valuation that works must not clear the step's fault
+    assert ex.step_faults[a.id] == {"the margin check": "the margin check failed: ZeroDivisionError"}
+    row = ex.safe_summary(a.id)
+    assert row["faults"] == ["the margin check failed: ZeroDivisionError"] and not row.get("broken")
+    assert a.life.margin_call_since is not None  # the fallback raised the call
+    assert sum("the margin check failed" in r.getMessage() for r in caplog.records) == 1  # logged once, with traceback
+    assert caplog.records[0].exc_info is not None
+    kinds = [e.get("kind") for e in ex.events if e.get("type") == "lifecycle"]
+    assert kinds.count("account_fault") == 1 and "margin_call" in kinds
+    # once the check works again the fault clears
+    monkeypatch.setattr(ex.lifecycle, "_margin_step", real)
+    move(ex, feed, clock, "ABC", "30.00")
+    assert a.id not in ex.step_faults and "faults" not in ex.safe_summary(a.id)
+
+
+def test_a_failed_accrual_day_is_retried_in_order_and_leaves_nothing_half_done(monkeypatch):
+    from helpers import make_exchange, move
+    ex, feed, clock = make_exchange(ABC="100.00")
+    a = ex.create_account("m", "margin", D("10000"))
+    other = ex.create_account("o", "margin", D("10000"))
+    ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 150})  # borrows: interest accrues daily
+    real = ex.lifecycle._accrue
+    days = []
+
+    def flaky(acct, day):
+        if acct.id == a.id:
+            days.append(day)
+            real(acct, day)  # changes state first, then fails: the change must be undone
+            if fail[0]:
+                raise RuntimeError("accrual broke")
+        else:
+            real(acct, day)
+    fail = [True]
+    monkeypatch.setattr(ex.lifecycle, "_accrue", flaky)
+    before = (str(a.life.accrued_interest), len(a.ledger.transactions))
+    move(ex, feed, clock, "ABC", "100.00", seconds=86400)
+    first = days[-1]
+    assert (str(a.life.accrued_interest), len(a.ledger.transactions)) == before  # rolled back
+    assert ex.lifecycle.accrual_retry[a.id] == [[first.isoformat(), False]]
+    assert "interest accrual" in ex.step_faults[a.id]
+    assert other.id not in ex.lifecycle.accrual_retry  # the other account's day went on
+    fail[0] = False
+    days.clear()
+    move(ex, feed, clock, "ABC", "100.00", seconds=86400)
+    assert days[:2] == [first, first.fromordinal(first.toordinal() + 1)]  # the missed day first, then the new one
+    assert a.id not in ex.lifecycle.accrual_retry and a.id not in ex.step_faults
+    assert a.life.accrued_interest > 0
+
+
+# ---- release review findings 4 and 5 ------------------------------------------------------------------------
+
+def test_parsing_a_restore_upload_does_not_hold_up_other_requests(tmp_path, monkeypatch):
+    from app.storage import archive
+    c, app, ex = make_app(tmp_path)
+    data = c.get("/api/data/export").content
+    real = archive.read
+
+    def slow(raw):
+        time.sleep(1.0)  # a big archive being unpacked and verified
+        return real(raw)
+    monkeypatch.setattr(archive, "read", slow)
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("r", c.post("/api/data/restore/preview", content=data,
+                                                                     headers={"content-type": "application/zip"})))
+    t.start()
+    time.sleep(0.2)
+    t0 = time.monotonic()
+    assert c.get("/api/auth/state").status_code == 200
+    assert time.monotonic() - t0 < 0.5, "the event loop waited for the archive to be parsed"
+    t.join(10)
+    assert out["r"].status_code == 200
+
+
+def test_the_sign_in_lockout_says_1_second_not_1_seconds(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAPERDESK_PASSCODE", "correct horse 42")
+    c, app, ex = make_app(tmp_path)
+    monkeypatch.setattr(app.state.access.limiter, "retry_after", lambda key: 0.4)
+    same = {"origin": "http://testserver", "sec-fetch-site": "same-origin"}
+    r = c.post("/api/auth/login", json={"passcode": "wrong"}, headers=same)
+    assert r.status_code == 429 and r.json()["detail"].endswith("Try again in 1 second.")
+    monkeypatch.setattr(app.state.access.limiter, "retry_after", lambda key: 3)
+    assert c.post("/api/auth/login", json={"passcode": "wrong"}, headers=same).json()["detail"].endswith("in 3 seconds.")

@@ -83,6 +83,9 @@ def install(app, ctx) -> None:
 def _guard(ctx, endpoint, path: str):
     @functools.wraps(endpoint)
     def guarded(*args, **kwargs):
+        before = getattr(ctx, "before_lock", None)
+        if before is not None:  # provider work the route will need, done before the lock is taken
+            before(kwargs)
         with ctx.lock.hold(wait_seconds(), label=path):
             result = endpoint(*args, **kwargs)
             return result if isinstance(result, Response) else detach(result)

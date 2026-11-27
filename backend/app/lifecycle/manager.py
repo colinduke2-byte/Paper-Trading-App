@@ -153,6 +153,7 @@ class LifecycleManager:
     def __init__(self, ex):
         self.ex = ex
         self.last_date: Optional[date] = None
+        self.accrual_retry: dict = {}  # account id -> [[day ISO, month end], ...] whose accrual failed
         self.applied: set = set()  # corporate action ids already applied to the accounts
         self.split_records: dict = {}  # id -> plain record of every applied split, to repair the feed
         self.records: dict = {}  # id -> plain record of every applied action from a feed with revision keys
@@ -274,11 +275,7 @@ class LifecycleManager:
                 break  # wait for the feed; a later tick retries from the same day
             acts, notices = fetched
             for a in list(self.ex.accounts.values()):
-                def accrue(a=a, d=d, nxt=nxt):
-                    self._accrue(a, d)
-                    if nxt.month != d.month:
-                        self._post_accruals(a, now, d)
-                self.ex.isolated(a, accrue, "interest accrual")  # one bad account must not stop the day roll
+                self._accrue_day(a, d, nxt.month != d.month, now)
             acts = [x for x in acts if not is_crypto(x.symbol)]  # crypto has no corporate actions here (PR 14)
             self._start_of_day(nxt, sorted(acts, key=lambda x: (x.kind != SPLIT, x.ex_date, x.symbol)), now)
             self._snapshot_held(nxt, now)
@@ -429,6 +426,30 @@ class LifecycleManager:
         return list(self.notices.get(symbol, [])) + (list(self.notices.get(c.underlying, [])) if c else [])
 
     # ---- interest and borrow fees ---------------------------------------------------
+    def _accrue_day(self, a, d: date, month_end: bool, now: float) -> bool:
+        """Interest and borrow fees of day `d` for one account, all or nothing. One bad account must not stop
+        the day roll for the others, and its day is not lost: a failed day is kept in `accrual_retry` and
+        tried again, oldest first, at every later day roll until it works (release review, PR 32)."""
+        pending = self.accrual_retry.setdefault(a.id, [])
+        todo = [(date.fromisoformat(x), bool(m)) for x, m in pending] + [(d, month_end)]
+        done = 0
+        for day, me in todo:
+            def accrue(day=day, me=me):
+                with self.ex._atomic(a.id):  # a failure half way leaves nothing behind
+                    self._accrue(a, day)
+                    if me:
+                        self._post_accruals(a, now, day)
+                return True
+            if self.ex.isolated(a, accrue, "interest accrual", step=True) is None:
+                break  # this day and the ones after it wait for the next roll, in order
+            done += 1
+        left = [[day.isoformat(), me] for day, me in todo[done:]]
+        if left:
+            self.accrual_retry[a.id] = left
+        else:
+            self.accrual_retry.pop(a.id, None)
+        return not left
+
     def _accrue(self, a, day: date) -> None:
         if a.type != "margin":
             return
@@ -788,8 +809,23 @@ class LifecycleManager:
     # ---- margin calls ----------------------------------------------------------------------
     def after_step(self, now: float) -> None:
         for a in list(self.ex.accounts.values()):
-            # One account that cannot be valued must not stop margin checks for the others.
-            self.ex.isolated(a, lambda: self._margin_step(a, now), "the margin check")
+            # One account that cannot be valued must not stop margin checks for the others. If the full check
+            # fails, a plain deficit check still raises the margin call (no liquidation from the fallback).
+            if self.ex.isolated(a, lambda: (self._margin_step(a, now), True)[1], "the margin check", step=True) is None:
+                self.ex.isolated(a, lambda: self._fallback_call(a, now), "the margin call check", step=True)
+
+    def _fallback_call(self, a, now: float) -> None:
+        if a.type != "margin" or a.life.margin_call_since is not None:
+            return
+        pos, marks, eq, maint = self._state(a)
+        if pos and eq < maint and not self._missing_prices(pos, marks):
+            life = a.life
+            life.margin_call_ok_since = None
+            life.margin_call_since, life.margin_call_deficit = now, maint - eq
+            life.margin_call_counted, life.margin_call_last = 0.0, now
+            self._log(a, now, "margin_call", f"Margin call: equity {_fmt(eq)} is below the {_fmt(maint)} maintenance "
+                                             f"requirement (deficit {_fmt(maint - eq)}). The full margin check is failing "
+                                             f"for this account, so positions are not sold automatically.")
 
     def _margin_step(self, a, now: float) -> None:
         if a.type != "margin" or (not a.lots and a.life.margin_call_since is None):
@@ -1080,6 +1116,8 @@ class LifecycleManager:
             out["notices"] = self.notices
         if self.held:
             out["held"] = self.held
+        if self.accrual_retry:
+            out["accrual_retry"] = {k: v for k, v in sorted(self.accrual_retry.items())}
         return out
 
     def restore(self, d) -> None:
@@ -1093,6 +1131,8 @@ class LifecycleManager:
         self.notices = {k: list(v) for k, v in (d.get("notices") or {}).items()}
         self.held = {k: {"ts": float(v["ts"]), "accounts": {aid: dict(p) for aid, p in v["accounts"].items()}}
                      for k, v in (d.get("held") or {}).items() if isinstance(v, dict) and "accounts" in v}
+        self.accrual_retry = {str(k): [[str(x), bool(m)] for x, m in v] for k, v in (d.get("accrual_retry") or {}).items()
+                              if isinstance(v, list)}
         # State written before `since` existed: late actions never reach back before the saved day.
         self.since = date.fromisoformat(d["since"]) if d.get("since") else self.last_date
         self.repair_feed()

@@ -72,7 +72,7 @@ def register(app, ctx):
         if wait > 0:
             secs = max(1, math.ceil(wait))
             auth.log.warning("sign-in from %s refused: too many failed attempts (retry in %ds)", client, secs)
-            return JSONResponse({"detail": f"Too many wrong passcodes. Try again in {secs} seconds.",
+            return JSONResponse({"detail": f"Too many wrong passcodes. Try again in {secs} second{'' if secs == 1 else 's'}.",
                                  "retry_after": secs}, status_code=429, headers={"Retry-After": str(secs)})
         if not access.check_passcode(passcode):
             failures, delay = access.limiter.failed(key)

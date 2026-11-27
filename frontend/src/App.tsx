@@ -333,8 +333,10 @@ export default function App() {
   );
   const feedNotice = <FeedNotice status={status} />;
   const unpriced: string[] = summary?.prices_unavailable ?? [];
-  const marginNotice = (summary?.margin_call || status?.ui_stale || unpriced.length > 0) ? (
+  const faults: string[] = summary?.faults ?? [];
+  const marginNotice = (summary?.margin_call || status?.ui_stale || unpriced.length > 0 || faults.length > 0) ? (
     <>
+      {faults.length > 0 && <div className="notice bad wide" role="alert">Something is failing for this account: {faults.join("; ")}. PaperDesk keeps trying; reset or delete the account if it does not clear.</div>}
       {summary?.margin_call && (
         <div className="notice bad wide" role="alert">
           Margin call: your account value ({usd(summary.equity)}) is {usd(Math.max(0, summary.maintenance_requirement - summary.equity))} below

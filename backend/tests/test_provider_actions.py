@@ -414,6 +414,7 @@ def test_chain_with_listing_but_no_option_quotes_is_labelled_model():
 
 def test_expiry_on_a_provider_listed_wednesday_exercises_on_that_date():
     lv, a = option_live()
+    lv.feed.option_listing("AAPL")  # the order routes fetch this before taking the exchange lock (server.warm_option_listings)
     (o,) = lv.ex.submit(a.id, {"symbol": "AAPL240424C00160000", "side": "buy", "qty": 1})
     assert o.status == "filled"
     lv.goto(ny("2024-04-24", "15:59"))
@@ -426,6 +427,7 @@ def test_expiry_on_a_provider_listed_wednesday_exercises_on_that_date():
 
 def test_held_contract_the_provider_no_longer_lists_is_valued_by_the_model_and_can_be_closed():
     lv, a = option_live()
+    lv.feed.option_listing("AAPL")  # the order routes fetch this before taking the exchange lock (server.warm_option_listings)
     (o,) = lv.ex.submit(a.id, {"symbol": "AAPL240426C00165000", "side": "buy", "qty": 1})
     assert o.status == "filled"
     # Alpaca stops listing that strike (delisted or adjusted); the cached listing is refreshed.
@@ -523,6 +525,7 @@ def test_resting_market_sell_never_fills_against_an_empty_bid():
 
 def test_option_marks_and_prices_unavailable_only_when_there_is_no_price():
     lv, a = option_live()
+    lv.feed.option_listing("AAPL")  # the order routes fetch this before taking the exchange lock (server.warm_option_listings)
     (o,) = lv.ex.submit(a.id, {"symbol": "AAPL240426P00160000", "side": "buy", "qty": 1})
     assert o.status == "filled"
     # A provider option quote with no bid or ask but a last trade is marked at the last trade, not 0.

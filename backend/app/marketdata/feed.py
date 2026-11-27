@@ -162,6 +162,8 @@ class MarketDataProvider:
         """Provider chain in the shape of options.chain.chain(), or None to use the model."""
         return None
 
+    lists_options = False  # True for a feed whose option_listing() fetches the provider's real contracts
+
     def option_listing(self, underlying: str, fetch: bool = True) -> Optional[dict]:
         """{expiry date: set of strike Decimals} the provider lists, or None to use the model calendar.
         With fetch=False only what is already cached is returned (for code on the tick path)."""

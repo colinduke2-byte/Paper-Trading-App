@@ -238,10 +238,39 @@ class AppContext:
             pass
 
 
+def warm_option_listings(feed, request) -> None:
+    """Fetch the provider's option listings for the option symbols in a request, before the exchange lock is taken:
+    _check_symbol only reads the cache under the lock. Bounded (at most 5 underlyings) and never raises."""
+    if not getattr(feed, "lists_options", False):
+        return
+    found: list = []
+
+    def walk(x, depth=0):
+        if depth > 4 or len(found) >= 5:
+            return
+        if isinstance(x, dict):
+            for v in list(x.values())[:50]:
+                walk(v, depth + 1)
+        elif isinstance(x, list):
+            for v in x[:50]:
+                walk(v, depth + 1)
+        elif isinstance(x, str) and len(x) <= 40:
+            c = parse_option(x.strip().upper())
+            if c is not None and c.underlying not in found:
+                found.append(c.underlying)
+    walk(request)
+    for u in found:
+        try:
+            feed.option_listing(u)
+        except Exception as e:  # noqa: BLE001 - _check_symbol answers "still loading" if this failed
+            print(f"option listing {u}: {e!r}")
+
+
 def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_seconds: float = 1.0,
                replay_tick_seconds: float = 0.25) -> FastAPI:
     clients: dict[WebSocket, dict] = {}
     ctx = AppContext(ex or default_exchange(), clients)
+    ctx.before_lock = lambda kwargs: warm_option_listings(ctx.ex.feed, kwargs.get("body"))
     del ex  # every route looks the active exchange up through ctx.ex
     dist = os.environ.get("PAPERDESK_UI", os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "dist"))
     ui_stale = os.path.isdir(dist) and ui_build.check(dist)  # silent without the sources (ZIP, Docker)

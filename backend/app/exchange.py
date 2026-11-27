@@ -2,6 +2,7 @@
 import contextlib
 import copy
 import json
+import logging
 import os
 import re
 import tempfile
@@ -31,6 +32,8 @@ from .options import chain as optchain
 from .options.symbology import describe, multiplier, parse as parse_option
 from .risk import margin
 from .core.errors import NotFound
+
+log = logging.getLogger("paperdesk")
 
 OPTION_FEE = Decimal("0.65")  # per contract
 STOCK_FEE = ZERO  # per share
@@ -135,6 +138,7 @@ class Exchange:
         self.load_result = None  # what the last load() found (app.storage.store.LoadResult)
         self.before_destructive = None  # set by the data service: snapshot before a reset or delete
         self.faults: dict = {}  # account id -> why it cannot be valued right now (see isolated())
+        self.step_faults: dict = {}  # account id -> {step: why it failed}; cleared only when that step next works
         # Expiry settlement prices: (underlying, expiry ISO) -> (price, exact, note); fetches of the provider's
         # daily close in progress or finished: key -> {"started": ts, "done": bool}.
         self._settle_prices: dict = {}
@@ -297,6 +301,8 @@ class Exchange:
         self._day_start_wanted.pop(old.id, None)
         self.accounts[old.id] = new
         self.faults.pop(old.id, None)
+        self.step_faults.pop(old.id, None)
+        self.lifecycle.accrual_retry.pop(old.id, None)  # a fresh account owes nothing for old days
         self.dirty = True
         return new
 
@@ -310,6 +316,8 @@ class Exchange:
         self.engine.reindex()
         del self.accounts[account_id]
         self.faults.pop(account_id, None)
+        self.step_faults.pop(account_id, None)
+        self.lifecycle.accrual_retry.pop(account_id, None)
         self.dirty = True
 
     def account(self, account_id: str) -> Account:
@@ -318,30 +326,52 @@ class Exchange:
         except KeyError:
             raise NotFound(f"no such account {account_id}")
 
-    def isolated(self, account, fn, what: str):
+    def isolated(self, account, fn, what: str, step: bool = False):
         """Run fn(); if it fails, record a fault on this account and return None instead of raising.
 
         One damaged account (an impossible number from an old state file, say) must not stop the tick,
         the stream or the account list for every other account. The fault is shown in the account list
         so the user can reset or delete that account.
+
+        Two kinds of fault are kept apart (release review, PR 32): valuing the account (`faults`, cleared
+        when a valuation works) and a step of the day (`step=True`: the margin check, interest accrual;
+        `step_faults`, cleared only when that same step works again). A new step fault is logged with its
+        traceback, written to the account's log and sent to the notifications once.
         """
         try:
-            return fn()
+            out = fn()
         except Exception as e:  # noqa: BLE001 - any failure of one account is contained
             reason = f"{what} failed: {type(e).__name__}"
-            if self.faults.get(account.id) != reason:
-                print(f"account {account.id}: {reason}: {e!r}"[:300])
-            self.faults[account.id] = reason
+            book = self.step_faults.setdefault(account.id, {}) if step else self.faults
+            key = what if step else account.id
+            if book.get(key) != reason:
+                log.exception("account %s: %s", account.id, reason)
+                if step:
+                    try:
+                        self.lifecycle._log(account, self.now(), "account_fault",
+                                            f"{what[:1].upper()}{what[1:]} is failing for this account "
+                                            f"({type(e).__name__}). Reset or delete the account if it keeps failing.")
+                    except Exception:  # noqa: BLE001 - reporting must not raise from here
+                        pass
+            book[key] = reason
             return None
+        if step:
+            left = self.step_faults.get(account.id)
+            if left and left.pop(what, None) is not None and not left:
+                del self.step_faults[account.id]
+        return out
 
     def safe_summary(self, account_id: str) -> dict:
         """summary(), or a flagged row for an account that cannot be valued."""
         a = self.account(account_id)
         out = self.isolated(a, lambda: self.summary(account_id), "valuing the account")
+        steps = sorted(self.step_faults.get(account_id, {}).values())
         if out is not None:
-            self.faults.pop(account_id, None)
+            self.faults.pop(account_id, None)  # only a valuation fault clears here; step faults stay
+            if steps:
+                out["faults"] = steps
             return out
-        return {"id": a.id, "name": a.name, "type": a.type, "broken": True,
+        return {"id": a.id, "name": a.name, "type": a.type, "broken": True, "faults": steps,
                 "error": "This account cannot be valued (" + self.faults.get(a.id, "unknown error")
                          + "). Reset it with a new starting cash or delete it."}
 
@@ -519,7 +549,12 @@ class Exchange:
             held = account.position(symbol) != 0
             if contract.strike <= 0:
                 raise OrderRejected("strike is not listed")
-            listing = self.feed.option_listing(contract.underlying)
+            # Never fetched here (this runs under the exchange lock): the order routes warm the listing before
+            # they take the lock (server.warm_option_listings); if it is still unknown, say so.
+            listing = self.feed.option_listing(contract.underlying, fetch=False)
+            if listing is None and getattr(self.feed, "lists_options", False) and not held:
+                raise OrderRejected(f"the list of {self.feed.name.capitalize()} option contracts for "
+                                    f"{contract.underlying} is still loading; try again in a few seconds")
             if listing is not None:  # a live feed: its real contracts, not the model calendar
                 strikes = listing.get(contract.expiry)
                 if strikes is None and not held:

@@ -149,7 +149,7 @@ def register(app, ctx) -> None:
                 raise HTTPException(400, "Send {\"backup\": name} or a backup file.")
             need_backups()
             try:
-                arc = svc.backups.read(str(name))
+                arc = await run_in_threadpool(svc.backups.read, str(name))  # parse and verify off the event loop
             except KeyError:
                 raise HTTPException(404, f"There is no backup named {str(name)[:80]}.")
             except archive.ArchiveError as e:
@@ -158,7 +158,7 @@ def register(app, ctx) -> None:
         elif ctype in UPLOAD_TYPES:
             data = await _body(request, archive.MAX_UPLOAD)
             try:
-                arc = archive.read(data)
+                arc = await run_in_threadpool(archive.read, data)  # up to 64 MB: parse and verify off the event loop
             except archive.ArchiveError as e:
                 bad(e)
             source = "uploaded file"
@@ -196,7 +196,7 @@ def register(app, ctx) -> None:
         no_replay()
         data = await _body(request, archive.MAX_ACCOUNT_UPLOAD)
         try:
-            raw = archive.read_account(data)
+            raw = await run_in_threadpool(archive.read_account, data)
             return await run_in_threadpool(svc.preview_import, raw)
         except archive.ArchiveError as e:
             bad(e)
