@@ -1,0 +1,70 @@
+/* Order ticket additions (linked orders, auction hints, the list of orders a request creates) and the
+   grouped Positions and Orders tabs. */
+.ticket-hint { font-size: 11.5px; color: var(--muted); margin: 0; line-height: 1.45; }
+.ticket .linked { display: flex; flex-direction: column; gap: 8px; }
+.ticket .linked > button { align-self: flex-start; }
+.sub-order { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px 8px; margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sub-order legend { color: var(--text); font-weight: 600; font-size: 11.5px; padding: 0 4px; }
+.sub-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 8px; }
+.sub-grid > label { min-width: 0; }
+.sub-order > button { align-self: flex-end; }
+.created { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
+.created h4 { margin: 0 0 4px; font-size: 11.5px; font-weight: 600; color: var(--text); }
+.created ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.created li { font-size: 11.5px; }
+.created-role { display: inline-block; color: var(--accent); margin-right: 6px; font-weight: 600; }
+
+/* Orders tab */
+tr.og-head td { color: var(--muted); font-size: 11px; padding-top: 8px; padding-bottom: 3px; border-bottom: 0; background: var(--panel); }
+tr.og-member td:first-child { box-shadow: inset 3px 0 0 #2f5487; }
+tr.og-member + tr.og-member td, tr.og-member td { border-bottom-color: #18202a; }
+.role-tag { display: inline-block; font-size: 10.5px; color: #9cc3ff; border: 1px solid #2f4b72; border-radius: 3px; padding: 0 5px; margin-right: 6px; white-space: nowrap; }
+.ml-toggle .caret, .pg-toggle .caret { display: inline-block; width: 14px; color: var(--muted); }
+tr.ml-leg td { color: var(--muted); font-size: 11.5px; background: #0f1318; }
+tr.ml-leg td:nth-child(2) { color: var(--text); padding-left: 26px; }
+
+/* Positions tab: strategy groups */
+tr.pos-group td { background: #141b25; padding-top: 5px; padding-bottom: 5px; }
+.pg-head { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.pg-toggle { padding: 2px 4px; font-weight: 700; color: var(--text); }
+.pg-head .ghost { margin-left: auto; }
+tr.pos-leg td:first-child { padding-left: 28px; box-shadow: inset 3px 0 0 #2f5487; }
+
+/* Option chain: strategy picking */
+.chain-strategy { display: flex; gap: 6px; margin-left: auto; }
+.chain-strategy .on { background: #223149; border-color: var(--accent); color: var(--text); }
+.px.picked { outline: 2px solid var(--accent); outline-offset: -2px; background: #1c2a40; }
+.strategy-tray { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 10px; border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line); background: #101a28; flex: none; }
+.strategy-tray > span:first-child { flex: 1 1 240px; min-width: 0; }
+.strategy-tray-actions { display: flex; gap: 6px; margin-left: auto; }
+.primary.sm { padding: 4px 10px; }
+
+/* Phone layout */
+.m-shell .sub-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+.m-shell .sub-order legend { font-size: 13px; }
+.m-shell .ticket-hint { font-size: 12.5px; }
+.m-shell .created li { font-size: 13px; }
+.m-shell .role-tag { font-size: 12px; }
+/* Group headings span the whole (sideways-scrolling) table; their content stays on screen instead. */
+.m-account .bottom tr.og-head > td, .m-account .bottom tr.pos-group > td {
+  position: static; max-width: none; min-width: 0; box-shadow: none; white-space: normal;
+}
+.m-account .bottom tr.og-head > td { height: auto; }
+.m-account .bottom .og-label, .m-account .bottom .pg-head {
+  position: sticky; left: 10px; display: flex; width: calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right));
+}
+.m-account .bottom .toolbar label.check input { flex: none; width: 22px !important; }
+.m-account .bottom .toolbar label.check { flex: 1 1 auto; }
+.m-shell .pg-head { gap: 6px 12px; }
+.m-shell .pg-head .ghost { margin-left: 0; }
+.m-shell tr.ml-leg td:nth-child(2), .m-shell tr.pos-leg td:first-child { padding-left: 18px; }
+.m-shell .chain-strategy { margin-left: 0; flex: 1 1 100%; }
+.m-shell .chain-strategy button { flex: 1; }
+.m-shell .strategy-tray { position: sticky; bottom: 0; z-index: 3; padding: 8px; }
+.m-shell .strategy-tray-actions { flex: 1 1 100%; }
+.m-shell .strategy-tray-actions button { flex: 1; }
+
+/* The sticky Review button of the phone ticket lost its colour to the sticky-row background in
+   mobile.css (it read as dark text on the panel); give an enabled button its colour back. */
+.m-trade .ticket > .primary:last-child:not(:disabled) { background: var(--accent); }

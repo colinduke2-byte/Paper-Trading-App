@@ -533,7 +533,8 @@ class Exchange:
             c.oco_group = entry.id if oco else None
             children.append(c)
         if not oco and sum(c.role == m.EXIT for c in children) > 1:
-            raise OrderRejected("several exits for one entry must be one-cancels-other: set triggers_oco")
+            raise OrderRejected("several exit orders for one entry must cancel each other: choose "
+                                "\"Cancel the others when one fills\" (triggers_oco in the API)")
         return [entry] + children
 
     def _validate_one(self, account: Account, req: dict, linked: Optional[str] = None) -> list:
@@ -1115,12 +1116,12 @@ class Exchange:
         if entry.type == m.MARKET:
             warnings.append("Market orders fill at the available price, which can differ from the estimate.")
         if entry.type in m.AUCTION_TYPES:
-            which = "open" if entry.type in m.OPEN_TYPES else "close"
-            warnings.append(f"This order waits for the next market {which} and trades once, at the {which}ing price."
+            which, word = ("open", "opening") if entry.type in m.OPEN_TYPES else ("close", "closing")
+            warnings.append(f"This order waits for the next market {which} and trades once, at the {word} price."
                             + (" In this session mode the market never closes, so that is the next UTC midnight."
                                if self.session_mode == "always" else ""))
             if entry.limit_price is not None:
-                warnings.append(f"If the {which}ing price is worse than the limit, the order expires unfilled.")
+                warnings.append(f"If the {word} price is worse than the limit, the order expires unfilled.")
         elif self.session_for(entry.symbol) != "regular" and not entry.extended_hours:
             warnings.append("The market is closed; the order will wait for the regular session.")
         if crypto:

@@ -12,6 +12,7 @@ import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { DataDialog, SaveNotice } from "./DataBackups";
+import { BuilderInit, closingLegs, StrategyBuilder } from "./StrategyBuilder";
 import { HelpDialog } from "./Help";
 import { api, dateTime, isCrypto, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
 import { useSignOutAction } from "./Login";
@@ -40,6 +41,7 @@ export default function App() {
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dataOpen, setDataOpen] = useState(false);
+  const [builder, setBuilder] = useState<BuilderInit | null>(null); // the strategy builder, when open
   const [helpOpen, setHelpOpen] = useState(false);
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
@@ -189,6 +191,11 @@ export default function App() {
     setScreen("Trade");
   };
   const startTrade = (side: string) => { setSeed({ symbol, side, nonce: Date.now() }); setScreen("Trade"); };
+  const openBuilder = (init: Omit<BuilderInit, "nonce">) => { if (init.symbol !== symbol) setSymbol(init.symbol); setBuilder({ ...init, nonce: Date.now() }); };
+  const closeStrategy = (rows: any[], name: string) => {
+    const { legs, qty } = closingLegs(rows);
+    openBuilder({ symbol: rows.find((r) => r.underlying)?.underlying || rows[0].symbol, legs, qty, title: `Close ${name.toLowerCase()}` });
+  };
 
   if (fatal) return <div className="fatal"><h1>PaperDesk</h1><p>{fatal}</p></div>;
 
@@ -247,14 +254,15 @@ export default function App() {
       {shown === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol}
         accountId={accountId} notify={notify} onOrdersChanged={() => setRefreshKey((k) => k + 1)} scope={status?.replay ? `replay:${status.replay.session_id}` : "live"}
         onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
-      {shown === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
+      {shown === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} onStrategy={(legs) => openBuilder({ symbol, legs })} />}
       {shown === "Company" && <Company info={info} />}
       {shown === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
     </div>
   );
   const bottom = accountId && (
     <BottomPanel accountId={accountId} positions={positions} orders={orders} refreshKey={refreshKey} quotes={quotes}
-      onSelect={pickSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify} />
+      onSelect={pickSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify}
+      onCloseStrategy={closeStrategy} />
   );
   const ticketEl = accountId && (isCrypto(seed.symbol) ? (
     <CryptoTicket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} position={ticketPos} summary={summary}
@@ -283,6 +291,10 @@ export default function App() {
       {dataOpen && (
         <DataDialog accountId={accountId} onClose={() => setDataOpen(false)} notify={notify}
           onRestored={async () => { const list = await loadAccounts(); if (!list.find((a: any) => a.id === accountId)) setAccountId(list[0]?.id || ""); setRefreshKey((k) => k + 1); }} />
+      )}
+      {builder && accountId && (
+        <StrategyBuilder key={builder.nonce} init={builder} accountId={accountId} stockQuote={quotes[builder.symbol]} feed={status?.feed || "feed"}
+          onClose={() => setBuilder(null)} onPlaced={(m) => { setBuilder(null); notify(m); setRefreshKey((k) => k + 1); }} />
       )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {settingsOpen && accountId && (

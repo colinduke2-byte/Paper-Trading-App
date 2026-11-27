@@ -198,3 +198,24 @@ def test_crypto_fractional_lots_and_fees_survive_a_segment_save_and_reload(tmp_p
     a, b = ex.accounts[c], back.accounts[c]
     assert _lots_view(back, c) == _lots_view(ex, c)
     assert b.cash == a.cash and sum(f.fee for f in b.fills) == sum(f.fee for f in a.fills) > 0
+
+
+# ---- order ticket linked orders (PR 18) x tax lots (PR 13) ----------------------------------------------
+
+def test_linked_orders_cannot_name_tax_lots_and_reserve_nothing():
+    """The ticket drops the lot choice when a link is set; the server refuses it too, and nothing stays reserved."""
+    import pytest
+    from app.exchange import OrderRejected
+    from helpers import make_exchange, move
+    ex, feed, clock = make_exchange()
+    a = ex.create_account("t", "margin", D("100000")).id
+    for _ in range(2):
+        ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
+        move(ex, feed, clock, "ABC", "100.00")
+    lot = {"lots": [{"lot_id": "L2", "qty": 5}]}
+    sell = {"symbol": "ABC", "side": "sell", "qty": 5, "tif": "gtc"}
+    with pytest.raises(OrderRejected, match="one-cancels-other"):
+        ex.submit(a, {"oco": [dict(sell, type="limit", limit_price="200", **lot), dict(sell, type="stop", stop_price="50")]})
+    with pytest.raises(OrderRejected, match="one-triggers-other"):
+        ex.submit(a, dict(sell, type="limit", limit_price="200", triggers=[{"side": "buy", "type": "limit", "limit_price": "90"}], **lot))
+    assert ex.reserved_lots(a) == {} and not [o for o in ex.engine.orders.values() if o.active]

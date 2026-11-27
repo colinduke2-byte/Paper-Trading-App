@@ -4,13 +4,15 @@ import { ChangeOrderButton } from "./ChangeOrder";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
 import { Lots } from "./Lots";
-import { api, compact, dateTime, isOption, money, numText, ORDER_TYPES, pct, price, qty, signed, STATUS, TIFS, tone, usd } from "./util";
+import { OrdersTable, PositionsTable } from "./OrdersView";
+import { api, compact, dateTime, money, numText, pct, price, qty, signed, tone } from "./util";
 
 const TABS = ["Positions", "Lots", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
 export function BottomPanel(p: {
   accountId: string; positions: any[]; orders: any[]; refreshKey: number; quotes: Record<string, any>;
   onSelect: (s: string) => void; onClose: (pos: any) => void; onChanged: () => void; notify: (m: string, bad?: boolean) => void;
+  onCloseStrategy?: (rows: any[], name: string) => void; // opens the strategy builder with the opposite legs
 }) {
   const [tab, setTab] = useState("Positions");
   const open = p.orders.filter((o) => ["working", "partially_filled", "held"].includes(o.status));
@@ -24,9 +26,9 @@ export function BottomPanel(p: {
         ))}
       </div>
       <div className="scroll">
-        {tab === "Positions" && <Positions {...p} />}
+        {tab === "Positions" && <PositionsTable {...p} />}
         {tab === "Lots" && <Lots accountId={p.accountId} refreshKey={p.refreshKey} onSell={p.onClose} />}
-        {tab === "Orders" && <Orders {...p} />}
+        {tab === "Orders" && <OrdersTable {...p} />}
         {tab === "Fills" && <Fills {...p} />}
         {tab === "Activity" && <Activity {...p} />}
         {tab === "Reports" && <Reports accountId={p.accountId} refreshKey={p.refreshKey} notify={p.notify} orders={p.orders} />}
@@ -34,89 +36,6 @@ export function BottomPanel(p: {
         {tab === "Screener" && <Screener {...p} />}
       </div>
     </section>
-  );
-}
-
-function Positions({ positions, onSelect, onClose }: any) {
-  if (!positions.length) return <p className="muted pad">No open positions. Use the order ticket to place a paper trade.</p>;
-  return (
-    <table>
-      <thead><tr><th>Position</th><th className="num">Qty</th><th className="num">Avg cost</th><th className="num">Mark</th>
-        <th className="num">Market value</th><th className="num">Day P&amp;L</th><th className="num">Open P&amp;L</th><th className="num">Open %</th><th /></tr></thead>
-      <tbody>
-        {positions.map((x: any) => (
-          <tr key={x.symbol}>
-            <td><button className="link" onClick={() => onSelect(x.underlying || x.symbol)}>{x.description}</button>
-              {x.asset_class === "crypto" && <span className="tag" title="Crypto: fully paid, trades 24/7">Crypto</span>}</td>
-            <td className={"num " + tone(x.qty)}>{qty(x.qty)}</td>
-            <td className="num">{price(x.avg_cost)}</td>
-            <td className="num">{price(x.mark)}</td>
-            <td className="num">{usd(x.market_value)}</td>
-            <td className={"num " + tone(x.day_pnl)}>{x.day_pnl == null ? "–" : signed(x.day_pnl)}</td>
-            <td className={"num " + tone(x.unrealized_pnl)}>{signed(x.unrealized_pnl)}</td>
-            <td className={"num " + tone(x.unrealized_pnl)}>{pct(x.unrealized_pct)}</td>
-            <td className="num"><button className="ghost sm" onClick={() => onClose(x)}>Close…</button></td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-function orderPrice(o: any) {
-  if (o.type === "trailing_stop") return `trail ${o.trail_amount != null ? "$" + money(o.trail_amount) : o.trail_percent + "%"}${o.stop_price != null ? ` (stop ${money(o.stop_price)})` : ""}`;
-  const parts: string[] = [];
-  if (o.stop_price != null) parts.push(`stop ${price(o.stop_price)}`);
-  if (o.limit_price != null) parts.push(`limit ${price(o.limit_price)}`);
-  return parts.join(", ") || "market";
-}
-
-function Orders({ accountId, orders, onChanged, notify, onSelect }: any) {
-  const [all, setAll] = useState(false);
-  const active = (o: any) => ["working", "partially_filled", "held"].includes(o.status);
-  const rows = all ? orders : orders.filter(active);
-  const cancel = async (id: string) => {
-    try { await api(`/accounts/${accountId}/orders/${id}`, { method: "DELETE" }); notify("Order canceled"); }
-    catch (e: any) { notify(`Could not cancel the order: ${e.message}`, true); }
-    onChanged();
-  };
-  const cancelAll = async () => {
-    try { const r = await api(`/accounts/${accountId}/orders`, { method: "DELETE" }); notify(`${r.canceled} order${r.canceled === 1 ? "" : "s"} canceled`); }
-    catch (e: any) { notify(`Could not cancel orders: ${e.message}`, true); }
-    onChanged();
-  };
-  return (
-    <>
-      <div className="toolbar">
-        <label className="check"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />Show finished orders</label>
-        <button className="ghost sm" onClick={cancelAll} disabled={!orders.some(active)}>Cancel all open orders</button>
-      </div>
-      {rows.length === 0 ? <p className="muted pad">{all ? "No orders yet." : "No open orders."}</p> : (
-        <table>
-          <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th className="num">Qty</th><th className="num">Filled</th><th>Type</th><th>Price</th>
-            <th>Duration</th><th className="num">Avg fill</th><th>Status</th><th /></tr></thead>
-          <tbody>
-            {rows.map((o: any) => (
-              <tr key={o.id}>
-                <td className="muted">{dateTime(o.created_at)}</td>
-                <td><button className="link" onClick={() => onSelect(isOption(o.symbol) ? o.symbol.replace(/\d{6}[CP]\d{8}$/, "") : o.symbol)}>{o.description}</button></td>
-                <td className={o.side === "buy" ? "up" : "down"}>{o.side === "buy" ? "Buy" : "Sell"}</td>
-                <td className="num">{qty(o.qty)}</td>
-                <td className="num">{qty(o.filled_qty)}</td>
-                <td>{ORDER_TYPES[o.type]}{o.role ? ` (${o.role.replace("_", " ")})` : ""}</td>
-                <td>{orderPrice(o)}</td>
-                <td>{TIFS[o.tif]}</td>
-                <td className="num">{o.avg_fill_price == null ? "–" : price(o.avg_fill_price)}</td>
-                <td title={o.reason || undefined}>{STATUS[o.status] || o.status}{o.reason && o.status !== "filled" ? <span className="muted"> · {o.reason}</span> : null}</td>
-                <td className="num row-actions">{active(o) && <>
-                  <ChangeOrderButton accountId={accountId} order={o} onChanged={onChanged} notify={notify} />
-                  <button className="ghost sm" onClick={() => cancel(o.id)}>Cancel</button></>}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </>
   );
 }
 
