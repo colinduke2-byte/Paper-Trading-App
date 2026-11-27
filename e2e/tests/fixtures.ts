@@ -38,12 +38,18 @@ export const test = base.extend<Fixtures>({
   account: async ({ request }, use) => { await use(await createAccount(request)); },
   open: async ({ page, account }, use) => {
     await use(async (acc = account, symbol = "MKTX") => {
-      await page.addInitScript(([a, s]) => {
+      await page.addInitScript(([a, s, token]) => {
         localStorage.setItem("pd.account", a);
         localStorage.setItem("pd.symbol", s);
         // The first-run welcome card has its own test (ux.spec.ts); it is dismissed for every other test.
         if (localStorage.getItem("pd.welcomed") === null) localStorage.setItem("pd.welcomed", "1");
-      }, [acc.id, symbol]);
+        // The phone layout remembers its last view; each open() starts on the Chart view, as documented, while a
+        // reload later in the test keeps what the test chose (only the first load after this open() clears it).
+        if (sessionStorage.getItem("e2e.opened") !== token) {
+          localStorage.removeItem("pd.screen");
+          sessionStorage.setItem("e2e.opened", token);
+        }
+      }, [acc.id, symbol, `${Date.now()}-${Math.random()}`]);
       await page.goto("/");
       // The phone layout keeps the account picker in its menu, so check the account on the root element there.
       if ((page.viewportSize()?.width ?? 1440) < 900) await expect(page.locator(".m-shell")).toHaveAttribute("data-account", acc.id);

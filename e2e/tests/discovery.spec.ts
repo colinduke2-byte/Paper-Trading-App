@@ -92,7 +92,7 @@ test("a saved screen runs and its results go into a watchlist", async ({ page, o
   await open();
   await bottomTab(page, "Screener").click();
   const scr = page.locator(".screener");
-  await expect(scr.getByRole("note")).toContainText("All 26 simulated symbols");
+  await expect(scr.getByRole("note")).toContainText("All 30 simulated symbols");
   await scr.getByLabel("Price minimum").fill("100");
   await scr.getByLabel("Add filter").selectOption({ label: "Asset type" });
   await expect(scr.locator(".sc-summary")).toContainText(/\d+ match/);

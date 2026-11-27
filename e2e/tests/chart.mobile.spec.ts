@@ -22,9 +22,14 @@ async function touch(page: Page, from: { x: number; y: number }, to: { x: number
   const pt = (p: { x: number; y: number }) => [{ x: p.x, y: p.y, id: 1 }];
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: pt(from) });
   if (holdMs) await page.waitForTimeout(holdMs);
-  if (to)
+  if (to) {
     for (let i = 1; i <= 8; i++)
       await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: pt({ x: from.x + ((to.x - from.x) * i) / 8, y: from.y + ((to.y - from.y) * i) / 8 }) });
+    // Rest on the end point before lifting, as a finger does. Lifted straight after the last move, Chrome reads
+    // the drag as a fling, and the next tap only stops the fling: its click never arrives.
+    await page.waitForTimeout(150);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: pt(to) });
+  }
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 

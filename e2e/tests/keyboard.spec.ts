@@ -69,7 +69,7 @@ test("the trading path works with the keyboard alone", async ({ page, open }) =>
 
 for (const which of [
   { button: "New account", dialog: "New paper account" },
-  { button: "Settings", dialog: "Account rules" },
+  { button: "Account rules", dialog: "Account rules" },
   { button: "Replay", dialog: "Replay a trading session" },
 ]) {
   test(`the ${which.button} dialog traps focus, closes on Escape and restores focus`, async ({ page, open }) => {

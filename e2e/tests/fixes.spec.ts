@@ -11,7 +11,7 @@ function expectRefusals(problems: string[], status: number, n: number) {
 
 test("dialogs close with Escape and give focus back to the button that opened them", async ({ page, open }) => {
   await open();
-  for (const [button, title] of [["New account", "New paper account"], ["Settings", "Account rules"], ["Replay", "Replay a trading session"], ["Help", "Help"]]) {
+  for (const [button, title] of [["New account", "New paper account"], ["Account rules", "Account rules"], ["Replay", "Replay a trading session"], ["Help", "Help"]]) {
     await topButton(page, button).click();
     const dialog = page.getByRole("dialog", { name: title });
     await expect(dialog).toBeVisible();
@@ -27,7 +27,7 @@ test("dialogs close with Escape and give focus back to the button that opened th
 
 test("the reset dialog ignores a backdrop click; the new-account dialog closes on one", async ({ page, open }) => {
   await open();
-  await topButton(page, "Reset").click();
+  await topButton(page, "Reset account").click();
   const reset = page.getByRole("dialog", { name: /^Reset/ });
   await page.mouse.click(5, 5);
   await expect(reset).toBeVisible();
@@ -46,7 +46,7 @@ test("starting cash typed with thousands separators is accepted", async ({ page,
   await dialog.getByLabel("Name").fill(name);
   await dialog.getByLabel("Starting cash").fill("12,500");
   await dialog.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByText(`Account "${name}" created`)).toBeVisible();
+  await expect(page.getByText(`"${name}" created and selected.`)).toBeVisible();
   const accounts = await (await request.get("/api/accounts")).json();
   expect(accounts.find((a: any) => a.name === name).starting_cash).toBe(12500);
   // an unclear number gets the server's message, not a server error
@@ -87,7 +87,7 @@ test("chart timeframes read 1m to 1W and have spoken names", async ({ page, open
   await open();
   const tfs = page.getByRole("group", { name: "Timeframe" });
   for (const [text, name] of [["1m", "1 minute"], ["5m", "5 minutes"], ["15m", "15 minutes"], ["1h", "1 hour"], ["1D", "1 day"], ["1W", "1 week"]]) {
-    await expect(tfs.getByRole("button", { name, exact: true })).toHaveText(text);
+    await expect(tfs.getByRole("button", { name: `${text}, ${name}`, exact: true })).toHaveText(text); // the spoken name starts with the visible text
   }
 });
 

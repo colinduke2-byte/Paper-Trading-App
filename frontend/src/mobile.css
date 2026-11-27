@@ -79,8 +79,9 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
   display: flex; gap: 16px; margin: 0; width: 100%; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px;
 }
 .m-quote .qh-grid::-webkit-scrollbar { display: none; }
-/* Strips that scroll sideways fade out at the right edge, so it is clear there is more. */
-.m-quote .qh-grid, .m-shell .chart-bar, .m-shell .ct-bar, .m-shell .tabs {
+/* Strips that scroll sideways fade out at the right edge, so it is clear there is more. (Not the chart tools: on a
+   phone they wrap to fit, and the extra padding pushed a button onto a second row in landscape.) */
+.m-quote .qh-grid, .m-shell .chart-bar, .m-shell .tabs {
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
   padding-right: 28px;
 }
@@ -229,6 +230,12 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
 
 /* Landscape phones: the tab bar becomes a rail on the left, the top bar a single row. */
 @media (orientation: landscape) and (max-height: 540px) {
+  /* The chart tools must fit on one row here or they take the chart's height (40 px tall controls stay). */
+  .m-shell .ct-bar { gap: 4px; }
+  .m-shell .ct-bar button, .m-shell .ct-bar select, .m-shell .ct-bar input { padding-left: 7px; padding-right: 7px; }
+  .m-shell .ct-bar .ct-seg button { padding: 3px 6px; }
+  .m-shell .ct-bar .ct-compare input { width: 72px; }
+  .m-shell .ct-bar .ct-select { max-width: 100px; } /* measured: the row was 4 px too wide for Reset view at 863 px */
   .m-shell:not(.m-kb) {
     grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto auto minmax(0, 1fr);
     grid-template-areas: "nav top" "nav strip" "nav notice" "nav views";

@@ -138,7 +138,7 @@ test("chain add-to-strategy mode by tapping, and a cash account refusal", async 
   await page.getByRole("tab", { name: "Options" }).tap();
   await expect(page.getByTitle("Buy at the ask").first()).toBeVisible();
   await page.getByRole("button", { name: "Add to strategy" }).tap();
-  const rows = page.locator(".chain-table tbody tr");
+  const rows = page.locator(".chain-table tbody tr:not(.spot-row)");
   const mid = Math.floor((await rows.count()) / 2);
   await rows.nth(mid).getByTitle("Add a sell leg").first().tap();
   await rows.nth(mid + 2).getByTitle("Add a buy leg").first().tap();

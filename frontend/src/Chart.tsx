@@ -288,7 +288,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
     <div className="chart-wrap ct-wrap">
       <div className="ct-bar" role="toolbar" aria-label="Chart tools">
         <div className="ct-seg" role="group" aria-label="Timeframe">
-          {TFS.map((t) => <button key={t} type="button" className={t === tf ? "on" : ""} aria-pressed={t === tf} aria-label={TF_LABELS[t][1]} title={TF_LABELS[t][1]} onClick={() => setTf(t)}>{TF_LABELS[t][0]}</button>)}
+          {TFS.map((t) => <button key={t} type="button" className={t === tf ? "on" : ""} aria-pressed={t === tf} aria-label={`${TF_LABELS[t][0]}, ${TF_LABELS[t][1]}`} title={TF_LABELS[t][1]} onClick={() => setTf(t)}>{TF_LABELS[t][0]}</button>)}
         </div>
         <select className="ct-select" aria-label="Chart type" value={settings.type} onChange={(e) => setSettings({ ...settings, type: e.target.value as ChartType })}>
           {Object.entries(CHART_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}

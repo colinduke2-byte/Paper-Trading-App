@@ -52,5 +52,10 @@ test("toasts appear above the tab bar, clear of the account figures", async ({ p
   const top = (await page.locator(".m-top").boundingBox())!;
   const bar = (await page.getByRole("navigation", { name: "Views" }).boundingBox())!;
   expect(t.y, "toast below the top bar").toBeGreaterThan(top.y + top.height);
-  expect(t.y + t.height, "toast above the tab bar").toBeLessThanOrEqual(bar.y + 1);
+  if (bar.height > bar.width) {  // phone landscape: the views bar is a rail at the side, so stay clear of it
+    expect(t.x, "toast clear of the side rail").toBeGreaterThanOrEqual(bar.x + bar.width - 1);
+    expect(t.y + t.height, "toast inside the screen").toBeLessThanOrEqual(page.viewportSize()!.height + 1);
+  } else {
+    expect(t.y + t.height, "toast above the tab bar").toBeLessThanOrEqual(bar.y + 1);
+  }
 });

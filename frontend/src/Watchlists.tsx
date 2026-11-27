@@ -238,7 +238,7 @@ export function Watchlists({ quotes, positions, selected, accountId, onSelect, o
           </div>
         </div>
       )}
-      <SymbolSearch onPick={add} />
+      <SymbolSearch onPick={add} assetFilter />
       {reorder && layout.sort && (
         <p className="muted wl-hint">Sorted by {SHORT[layout.sort.key] || layout.sort.key}. <button className="link" onClick={() => patch({ sort: null }, "clear the sort")}>Clear the sort</button> to reorder by hand.</p>
       )}

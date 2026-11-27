@@ -114,10 +114,10 @@ test("legs can be picked from the chain in add-to-strategy mode", async ({ page,
   await expect(page.getByTitle("Buy at the ask").first()).toBeVisible();
   await page.getByRole("button", { name: "Add to strategy" }).click();
   await expect(page.getByRole("button", { name: "Add to strategy" })).toHaveAttribute("aria-pressed", "true");
-  const n = await page.locator(".chain-table tbody tr").count();
+  const n = await page.locator(".chain-table tbody tr:not(.spot-row)").count();
   const row = Math.floor(n / 2);
-  const buy = page.locator(".chain-table tbody tr").nth(row).getByTitle("Add a buy leg").first();
-  const sell = page.locator(".chain-table tbody tr").nth(row + 1).getByTitle("Add a sell leg").first();
+  const buy = page.locator(".chain-table tbody tr:not(.spot-row)").nth(row).getByTitle("Add a buy leg").first();
+  const sell = page.locator(".chain-table tbody tr:not(.spot-row)").nth(row + 1).getByTitle("Add a sell leg").first();
   await buy.click();
   await sell.click();
   await expect(buy).toHaveAttribute("aria-pressed", "true");
@@ -144,7 +144,7 @@ test("legs can be picked from the chain in add-to-strategy mode", async ({ page,
 
 test("the builder is keyboard operable and does not resize the chart", async ({ page, open }) => {
   await open();
-  const chart = page.getByRole("img", { name: "MKTX price chart" });
+  const chart = page.getByRole("figure", { name: "MKTX price chart" });
   const before = await chart.boundingBox();
   const d = await openBuilder(page);
   await expect(d.getByLabel("Strategy")).toBeFocused();

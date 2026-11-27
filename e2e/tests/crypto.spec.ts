@@ -64,7 +64,7 @@ test("the stock market is closed but crypto trades: buy, limit order, sell and r
   await expect(row).toContainText("0.0125");
   await expect(row.locator(".tag")).toHaveText("Crypto");
   await tap(page, bottomTab(page, /^Orders/));
-  await expect(page.locator(".bottom tr", { hasText: "SIMCOIN/USD" }).filter({ hasText: `limit ${Number(limit).toLocaleString("en-US", { minimumFractionDigits: 2 })}` })).toContainText("Working");
+  await expect(page.locator(".bottom tr", { hasText: "SIMCOIN/USD" }).filter({ hasText: `limit $${Number(limit).toLocaleString("en-US", { minimumFractionDigits: 2 })}` })).toContainText("Working");
 
   // Sell it all (selling more than held is refused with the reason).
   await view(page, "Trade");
@@ -91,7 +91,7 @@ test("the stock market is closed but crypto trades: buy, limit order, sell and r
 test("buy a small-priced coin by dollar amount in a cash account", async ({ page, request, open }) => {
   const cash = await createAccount(request, "cash", "1000");
   await open(cash, "SIMDUST/USD");
-  await expect(page.locator(".quote-head strong")).toHaveText(/^0\.00\d{4,}/); // a price under a cent keeps its decimals
+  await expect(page.locator(".quote-head strong")).toHaveText(/^\$0\.00\d{4,}/); // a price under a cent keeps its decimals
   await view(page, "Trade");
   const t = ticket(page);
   await tap(page, t.getByRole("button", { name: "Amount (USD)" }));

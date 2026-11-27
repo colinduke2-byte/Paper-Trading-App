@@ -18,7 +18,8 @@ const stage = (page: Page) => page.locator(".ct-stage");
 async function chartReady(page: Page) {
   await expect(stage(page)).toHaveAttribute("data-loaded", "1");
   await expect(legend(page)).toBeVisible();
-  await expect(page.getByText(/^(Market open|Market closed|Pre-market|After hours) · /)).toBeVisible(); // the header has its final size
+  // the header has its final size; in a replay it has no clock (the replay bar shows it)
+  await expect(page.getByText(/^(Market open|Market closed|Pre-market|After hours)( · |$)/)).toBeVisible();
 }
 
 /** The element's box once it has stopped moving (the price scale settles after the data and order lines load). */
@@ -72,7 +73,7 @@ test("legend shows the bar's prices, change and volume", async ({ page, open }) 
   await expect(legend(page)).toContainText(/L \d/);
   await expect(legend(page)).toContainText(/C \d/);
   await expect(legend(page)).toContainText(/Vol /);
-  await expect(legend(page)).toContainText(/\([+-]?\d+\.\d\d%\)/);
+  await expect(legend(page)).toContainText(/\([+\-\u2212]?\d+\.\d\d%\)/);
   await expect(legend(page)).toContainText("SMA 20");
   // Hovering an earlier bar changes the date and time shown.
   const before = await legend(page).locator(".ct-legend-row").first().textContent();
@@ -146,9 +147,9 @@ test("a horizontal line stays after a reload, a timeframe change and in another 
   await page.reload();
   await chartReady(page);
   await check(page);
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1h, 1 hour", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 day", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1D, 1 day", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
 
   // A fresh browser profile has no local cache: the drawing comes from the server.
@@ -375,9 +376,9 @@ test("keyboard shortcuts and their help", async ({ page, open }) => {
   await search.blur();
 
   await page.keyboard.press("4");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1h, 1 hour", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.keyboard.press("2");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5 minutes", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5m, 5 minutes", exact: true })).toHaveAttribute("aria-pressed", "true");
   const t = ticket(page);
   await page.keyboard.press("s");
   await expect(t.getByRole("button", { name: "Sell", exact: true })).toHaveClass(/on/);
@@ -436,7 +437,7 @@ test("no console errors when switching symbol, timeframe, indicators and views q
   const tfs = page.getByRole("group", { name: "Timeframe" });
   for (let round = 0; round < 3; round++) {
     for (const s of ["TECX", "MKTX", "NVLX", "MKTX"]) await watch.getByRole("cell", { name: s, exact: true }).click();
-    for (const tf of ["1 minute", "1 day", "15 minutes", "1 week", "5 minutes"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
+    for (const tf of ["1m, 1 minute", "1D, 1 day", "15m, 15 minutes", "1W, 1 week", "5m, 5 minutes"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
     await page.getByLabel("Chart type").selectOption(round % 2 ? "line" : "candles");
     await page.getByRole("tab", { name: "Options" }).click();
     await page.getByRole("tab", { name: "Chart" }).click();

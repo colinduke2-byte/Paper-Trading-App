@@ -41,9 +41,9 @@ async function reports(page: Page) {
 async function settings(page: Page) {
   if (isPhone(page)) {
     await page.getByRole("button", { name: "Menu" }).click();
-    await page.getByRole("dialog", { name: "Menu" }).getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("dialog", { name: "Menu" }).getByRole("button", { name: "Account rules" }).click();
   } else {
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Account rules", exact: true }).click();
   }
   await expect(page.getByRole("dialog", { name: "Account rules" })).toBeVisible();
   // The account figures and the rules load separately after the dialog opens.

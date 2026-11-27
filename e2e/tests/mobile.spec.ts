@@ -261,7 +261,9 @@ test("option chain: puts and both sides", async ({ page, open }) => {
   await open();
   await page.getByRole("tab", { name: "Options" }).tap();
   await expect(page.getByTitle("Buy at the ask").first()).toBeVisible();
-  const visibleHeads = () => page.locator(".chain-table thead tr").last().locator("th:visible").allTextContents();
+  // Header text without the Info buttons ("i") that some headings carry.
+  const visibleHeads = () => page.locator(".chain-table thead tr").last().locator("th:visible").evaluateAll((ths) =>
+    ths.map((th) => [...th.childNodes].filter((n) => !(n instanceof Element && n.classList.contains("info"))).map((n) => n.textContent).join("").trim()));
   expect(await visibleHeads()).toEqual(["IV", "Delta", "Bid", "Ask", "Strike"]);
   await page.getByRole("button", { name: "Puts" }).tap();
   expect(await visibleHeads()).toEqual(["Strike", "Bid", "Ask", "Delta", "IV"]);
