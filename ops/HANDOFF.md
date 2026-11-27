@@ -371,3 +371,4 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   PR 30 stands; it ports only missing items into stream/hardening-extra after PR 30 is on main.
   stream/hardening-b can be deleted later.
 - Old sessions the owner restarted by accident were interrupted by the owner's session; left stopped.
+- 02:10 UTC: PR 30 (security hardening) MERGED on top of PR 28; all 8 checks green.
