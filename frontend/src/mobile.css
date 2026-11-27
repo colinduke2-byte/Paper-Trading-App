@@ -234,7 +234,7 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
   /* Narrower than ~860 px (iPhone 13 landscape is 750) they still do not fit: the row scrolls sideways inside
      itself instead of wrapping onto a second row, which left the chart 120 px tall. */
   .m-shell .ct-bar { gap: 4px; padding-top: 3px; padding-bottom: 3px; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
-  .m-shell .ct-bar::-webkit-scrollbar { display: none; }
+  .m-shell .ct-bar::-webkit-scrollbar { display: none; width: 0; height: 0; } /* WebKit otherwise keeps a 15 px bar */
   .m-shell .ct-bar > * { flex: none; }
   .m-shell .ct-bar button, .m-shell .ct-bar select, .m-shell .ct-bar input { padding-left: 7px; padding-right: 7px; }
   .m-shell .ct-bar .ct-seg button { padding: 3px 6px; }
@@ -249,7 +249,9 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
     padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   .m-shell:not(.m-kb) .m-nav button { min-height: 0; padding: 0 8px; min-width: 68px; }
-  .m-shell:not(.m-kb) .m-top { display: flex; align-items: center; gap: 10px; min-height: 48px; padding-left: 10px; padding-bottom: 0; }
+  .m-shell:not(.m-kb) .m-top { display: flex; align-items: center; gap: 10px; min-height: 44px; padding-left: 10px; padding-bottom: 0; }
+  /* Height for the chart (342 px tall on an iPhone 13 in landscape): 40 px view tabs, like the chart tools. */
+  .m-shell:not(.m-kb) .m-chart > .tabs button { min-height: 40px; padding-top: 0; padding-bottom: 0; }
   .m-shell:not(.m-kb) .m-top-row, .m-shell:not(.m-kb) .m-top-row2 { display: contents; }
   .m-shell:not(.m-kb) .m-brand { order: -3; } .m-shell:not(.m-kb) .m-top-row2 .paper-banner { order: -2; }
   .m-shell:not(.m-kb) .m-stats { order: -1; } .m-shell:not(.m-kb) .m-menu-btn { order: 0; }
@@ -259,7 +261,7 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
   .m-shell:not(.m-kb) .m-brand { flex-direction: row; }
   .m-shell:not(.m-kb) .m-view { padding-left: 0; }
   .m-shell:not(.m-kb) .m-quote .qh-grid { display: none; }
-  .m-shell:not(.m-kb) .m-quote .quote-head { flex-direction: row; align-items: center; padding: 4px 10px; }
+  .m-shell:not(.m-kb) .m-quote .quote-head { flex-direction: row; align-items: center; padding: 2px 10px; }
   .m-shell:not(.m-kb) .m-quote .qh-main { display: flex; align-items: baseline; gap: 10px; min-height: 0; padding-right: 190px; }
   .m-shell:not(.m-kb) .m-quote .qh-main > .muted { max-width: 30vw; }
   .m-shell:not(.m-kb) .m-tradebtns { flex-direction: row; top: 4px; }
