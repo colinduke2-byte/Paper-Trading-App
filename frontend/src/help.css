@@ -18,4 +18,4 @@
 .help-sec[open] > summary::after { transform: rotate(-135deg); margin-top: 4px; }
 
 /* A full-size link target (40 px), as on every phone control. */
-.help-link { display: inline-flex; align-items: center; min-height: 40px; padding: 0 4px; }
+.help-link { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; }

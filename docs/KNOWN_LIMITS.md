@@ -13,8 +13,8 @@ while writing this list.
   (Chromium with iPhone 13 and Pixel 7 profiles). Nobody has used it on a real phone, a real Wi-Fi
   network, or iOS Safari. Touch behaviour, the on-screen keyboard and pinch-zoom on charts are
   unverified.
-- **The live data adapter with a real key.** At the time of writing, the Alpaca adapter has never been
-  run with a real Alpaca key. It was built and tested against saved example responses and (for the
+- **No real-key Alpaca test yet.** The Alpaca adapter (stocks, options and crypto) has never been
+  run with a real Alpaca key; this is the largest gap before relying on real prices. It was built and tested against saved example responses and (for the
   start of the handshake) a fake key. Not verified: real quotes arriving, the 30-symbol streaming
   limit in practice, reconnecting after a real dropped connection, the asset list and option contracts
   (`paper-api.alpaca.markets`), whether the free plan includes corporate actions, news and delayed
@@ -23,7 +23,13 @@ while writing this list.
 - **Alpaca crypto data.** Built only against the example responses in Alpaca's documentation; never run
   with a real key (plan coverage, rate limits, stream limits, listed increments vs quoted prices). See
   [CRYPTO.md](CRYPTO.md#what-has-not-been-tested-against-the-live-service).
-- **Finnhub.** Not tested against the live service at all, including its free per-minute limit.
+- **Finnhub.** Not tested against the live service at all, including its free per-minute limit. It supplies
+  earnings dates and fundamentals only. PaperDesk takes no prices from it, and prices behave as before
+  (Alpaca or simulated).
+- **Firefox end-to-end tests (issue #33).** In the automated Firefox job, a page load in a fresh browser
+  context sometimes never completes, about once per run and in a different test each time. The cause is not
+  known. Firefox is not a target browser for this program (Windows PC and phone), and a cause that real
+  users could hit has not been ruled out.
 - **Windows.** `run.bat` is started by an automated Windows test, but nobody has used the Windows
   instructions by hand on a real PC while this guide was written. The firewall and Wi-Fi network
   steps are general Windows knowledge, not checked here, and Windows menus differ between versions.
@@ -68,9 +74,10 @@ while writing this list.
 - **Stops trigger on the last trade price**, then become market or limit orders. A stop is not
   guaranteed to fill near the stop price.
 - **Auction orders** (market and limit on open or close) fill in full at the last trade price of the
-  chosen quote, regardless of displayed size. They have no screen on this branch; in the engine only.
-- **Multi-leg orders** are all-or-none at a net price taken from the legs' quotes (buying at the ask,
-  selling at the bid). No screen on this branch.
+  chosen quote, regardless of displayed size. In the always-open simulated market the open and the close
+  are both midnight UTC. An auction order that finds PaperDesk not running at its time expires.
+- **Multi-leg orders** (the strategy builder) are all-or-none at a net price taken from the legs' quotes
+  (buying at the ask, selling at the bid).
 - No trading halts, limit-up/limit-down, short-sale restrictions, locates or hard-to-borrow stocks. Any
   stock can be sold short.
 - Fees: no stock commission and no regulatory fees; $0.65 per option contract on each fill, none on
@@ -101,13 +108,28 @@ while writing this list.
 - Dividends and splits are applied **only for the simulated feed**. With real data, the provider's
   dividends and splits appear in Research but are **not applied** to your accounts, and mergers,
   spin-offs, name changes and other corporate actions are not handled at all.
+- **Alerts** run only while PaperDesk runs. Browser notifications work only on the PC itself or over HTTPS,
+  so on a phone using the plain Wi-Fi address they stay inside the app. There is no phone push.
+- **Simulated research** (statements, earnings, news, economic calendar) is invented and never describes a real
+  company. The screener and quote header use the listed EPS and share count, which differ slightly from
+  the Research tab's trailing figures.
 - **Wash-sale detail is informational**: it matches losses with replacement lots of the same symbol and shows
   the disallowed loss and the basis and holding period the replacement would carry, but it never changes
   realised gains or cost basis, does not look at similar securities or other accounts, and does not rescale
   carried amounts after a later split. Nothing in the reports is tax advice.
-- There is no way in the screens to delete an account, deposit or withdraw cash.
-- **A corrupt `state.json` is replaced silently** with two fresh default accounts (tested): PaperDesk does
-  not keep a backup of the unreadable file. Back up `backend\data` yourself.
+- There is no way in the screens to deposit or withdraw cash. Accounts can be deleted from the menu
+  (never the last one).
+- **Cash accounts are checked pessimistically.** Open orders are reserved for as if all filled in full,
+  and no unfilled order's proceeds are counted. An order a real broker would accept can be rejected, and
+  open orders can be canceled when later events leave the account unable to cover them.
+- **A damaged saved file does not open the trading screen.** PaperDesk copies the files to `recovery/`,
+  stops saving and shows a recovery screen (restore a backup, start fresh, or quit). Automatic backups
+  are hourly by default, so up to an hour of changes can be lost on restoring one. Keep your own copy of a
+  downloaded backup outside the data folder.
+- **Account and request limits.** 1,000 accounts, 1,000 open orders per account, 50 watchlists, 10,000
+  alerts, 5 linked orders, 20 screener filters, orders up to 1,000,000 shares. A request that waits more
+  than about 2 seconds for the simulator's single lock is refused with "busy" and does not run; the page
+  retries twice before showing it.
 
 ## Security and access
 
@@ -150,12 +172,15 @@ while writing this list.
 - The default benchmark is the fictional MKTX, which does not exist with real data. Type a real symbol
   such as SPY.
 
+## Licence
+
+- **PaperDesk has no LICENSE file.** That is the owner's decision. Without one, others have no
+  permission to copy or reuse the code. The third-party packages it uses are listed with their licences in
+  [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+
 ## Not built yet
 
-- Screens for multi-leg orders, on-open and on-close orders, good-till-date orders,
-  one-cancels-other groups and changing a working order. The engine supports them; another branch
-  is building the ticket and strategy builder for them.
-- Chart drawing tools, more indicators and keyboard shortcuts (another branch).
 - Early assignment and American-style option pricing.
 - User accounts and HTTPS.
 - Real-provider corporate actions applied to accounts.
+- Trailing stops, linked orders and auctions for crypto.
