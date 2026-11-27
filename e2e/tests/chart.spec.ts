@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, confirmDialog, expectRefusals, BENIGN, type Account } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, confirmDialog, expectRefusals, BENIGN, navDefaults, type Account } from "./fixtures";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 
 // Chart tools: chart types, indicators, drawings, order lines, trade at price and keyboard shortcuts.
@@ -154,7 +154,7 @@ test("a horizontal line stays after a reload, a timeframe change and in another 
 
   // A fresh browser profile has no local cache: the drawing comes from the server.
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, baseURL: new URL(page.url()).origin });
-  const other = await ctx.newPage();
+  const other = navDefaults(await ctx.newPage());
   const errors: string[] = [];
   other.on("console", (m) => { if (m.type() === "error" && !BENIGN.some((b) => b.test(m.text()))) errors.push(m.text()); });
   await other.addInitScript((a) => localStorage.setItem("pd.account", a), account.id);

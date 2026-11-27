@@ -105,7 +105,7 @@ test("signed in, CSV export downloads and the printable statement prints with th
     page.locator(".bottom").getByRole("link", { name: "Open printable statement" }).click(),
   ]);
   statement.on("console", (m) => { if (m.type() === "error") problems.push(m.text()); });
-  await statement.waitForLoadState("load");
+  await statement.waitForLoadState("domcontentloaded"); // not "load": see navDefaults in fixtures.ts
   expect(statement.url()).toContain("/statements/");
   await statement.getByRole("button", { name: "Print" }).click();
   await expect.poll(() => statement.evaluate(() => (window as any).__printed)).toBe(1);

@@ -39,6 +39,15 @@ Environment: `E2E_ENGINES`, `E2E_CHANNEL` (`msedge` runs the Chromium projects i
 
 No retries: a test that fails sometimes is fixed (usually by waiting for the right thing), not retried.
 
+`chart.mobile.spec.ts` sends real touch drags and long-presses through the Chrome DevTools Protocol (Playwright
+itself only taps), so it runs on the Chromium phone projects only (`CDP_ONLY` in `playwright.config.ts`).
+
+Known Firefox behaviour: Firefox sometimes never fires the load event for a page whose script has run and whose
+WebSocket is open (seen about once per CI run, in a different test each time). Every `page.goto` and
+`page.reload` therefore waits for `domcontentloaded` (`navDefaults` in `tests/fixtures.ts`, applied to the
+`page` fixture), and the test then waits for the real UI it checks. A page made in another browser context goes
+through `navDefaults` too; never wait for `"load"`.
+
 ## CI
 
 `.github/workflows/ci.yml` runs one e2e job per engine (WebKit in two shards) and a Windows job that starts

@@ -36,9 +36,23 @@ export function expectRefusals(page: Page, problems: string[], status: number, n
   for (const f of found) problems.splice(problems.indexOf(f), 1);
 }
 
+/**
+ * Navigation in every test waits for the document (DOMContentLoaded), not the load event, and then for the real UI
+ * the test checks. Firefox sometimes never fires load for a page whose script has run and whose WebSocket is open
+ * (about once per CI run, in a different test each time), which hung page.goto for the whole test timeout.
+ * Applied to the page fixture; a page made in another context goes through navDefaults too.
+ */
+export function navDefaults(p: Page): Page {
+  const goto = p.goto.bind(p), reload = p.reload.bind(p);
+  p.goto = (url, options) => goto(url, { waitUntil: "domcontentloaded", ...options });
+  p.reload = (options) => reload({ waitUntil: "domcontentloaded", ...options });
+  return p;
+}
+
 // Every test fails if the page logs a console error or throws. A fresh account is created for each
 // test, so tests do not depend on each other's orders or positions.
 export const test = base.extend<Fixtures>({
+  page: async ({ page }, use) => { await use(navDefaults(page)); },
   problems: [async ({ page }, use) => {
     const problems: string[] = [];
     page.on("console", (m) => { if (m.type() === "error" && !BENIGN.some((b) => b.test(m.text()))) problems.push(`console: ${m.text()}`); });
