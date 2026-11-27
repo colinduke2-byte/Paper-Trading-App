@@ -12,7 +12,7 @@ test("a remembered symbol the active feed does not know falls back to the watchl
   await page.goto("/");
   const first = (await (await page.request.get("/api/watchlists")).json()).Main[0];
   await expect(page.getByRole("heading", { name: first, level: 2 })).toBeVisible();
-  await expect(page.getByRole("img", { name: `${first} price chart` })).toBeVisible();
+  await expect(page.getByRole("figure", { name: `${first} price chart` })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("pd.symbol"))).toBe(first);
 });
 
