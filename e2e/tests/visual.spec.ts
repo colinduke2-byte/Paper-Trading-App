@@ -27,6 +27,9 @@ test("key screens match their visual baselines", async ({ page, open, request })
   for (const screen of screensFor(page)) {
     await open(account);
     await screen.show(page);
+    // The banner ends with the feed's label once /api/status has answered; until then it is shorter and the
+    // page below it sits a line higher, so wait for it (the e2e servers run the simulated feed).
+    await expect(page.locator(".paper-banner").first()).toContainText("simulated market data");
     await page.evaluate(() => document.fonts.ready);
     await expect.soft(page, `${isPhone(page) ? "phone" : "desktop"} ${screen.name}`).toHaveScreenshot(`${screen.name}.png`, { stylePath });
   }
