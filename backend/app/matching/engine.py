@@ -52,21 +52,38 @@ class MatchingEngine:
     def __init__(self, config: Optional[FillConfig] = None):
         self.cfg = config or FillConfig()
         self.orders: dict[str, Order] = {}
+        # The orders that were open when they were last looked at, in the order they were added: so the
+        # tick and the rollback snapshot of a request do not walk every order the exchange ever had.
+        # Pruned as it is read; an order never becomes open again once it has finished.
+        self._open: dict[str, Order] = {}
         self._fill_seq = count(1)
 
     # ---- queries -------------------------------------------------------
     def active_orders(self, symbol: Optional[str] = None):
-        return [o for o in self.orders.values() if o.active and (symbol is None or o.symbol == symbol)]
+        orders = self.orders
+        live = [o for k, o in self._open.items() if o.active and orders.get(k) is o]
+        if len(live) != len(self._open):
+            self._open = {o.id: o for o in live}
+        return live if symbol is None else [o for o in live if o.symbol == symbol]
+
+    def reindex(self) -> None:
+        """Rebuild the open-order index from `orders` (after `orders` was replaced or restored)."""
+        self._open = {k: o for k, o in self.orders.items() if o.active}
+
+    def _add(self, order: Order) -> None:
+        self.orders[order.id] = order
+        self._open[order.id] = order
 
     def restore(self, orders, fill_seq: int = 1):
         self.orders = {o.id: o for o in orders}
+        self.reindex()
         self._fill_seq = count(fill_seq)
 
     # ---- commands ------------------------------------------------------
     def submit(self, order: Order, quote: Optional[Quote], now: float, session: str = "regular") -> list:
         order.status = WORKING
         order.created_at = order.updated_at = now
-        self.orders[order.id] = order
+        self._add(order)
         events = [("order", order)]
         self._process(order, quote, now, session, events, initial=True)
         return events
@@ -82,7 +99,7 @@ class MatchingEngine:
             c.oco_group = parent.id if oco else None
             c.status = HELD
             c.created_at = c.updated_at = now
-            self.orders[c.id] = c
+            self._add(c)
         events = self.submit(parent, quote, now, session)
         events.extend(("order", c) for c in children if c.status == HELD)
         return events
@@ -98,7 +115,7 @@ class MatchingEngine:
             o.oco_group = group
             o.status = WORKING
             o.created_at = o.updated_at = now
-            self.orders[o.id] = o
+            self._add(o)
             events.append(("order", o))
         for o in orders:
             if o.status in (WORKING, PARTIAL):  # an earlier leg may already have canceled this one
@@ -108,7 +125,7 @@ class MatchingEngine:
     def submit_multileg(self, order: Order, quotes: dict, now: float, session: str = "regular") -> list:
         order.status = WORKING
         order.created_at = order.updated_at = now
-        self.orders[order.id] = order
+        self._add(order)
         events = [("order", order)]
         self._process_multileg(order, quotes, now, session, events, initial=True)
         return events

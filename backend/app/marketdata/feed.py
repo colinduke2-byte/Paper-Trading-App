@@ -100,6 +100,19 @@ class MarketDataProvider:
             today = [day, float(q.open), float(q.high), float(q.low), float(q.last), float(q.volume)]
         return self.store.bars(symbol, tf, limit, today)
 
+    def bars_ready(self, symbol: str, tf: str, limit: int = 500, after=None) -> Optional[list]:
+        """Bars from memory only, for code that runs under the exchange lock (the tick, alerts).
+
+        Never asks a provider. Returns None when the history is not in memory yet; a feed that loads
+        history over the network then loads it in the background, and a later call returns it.
+        `after` is a value from history_mark(): only history read after that mark counts.
+        Feeds that keep their bars in memory (synthetic, replay, scripted) always answer."""
+        return self.bars(symbol, tf, limit)
+
+    def history_mark(self):
+        """A mark for "now" to pass to bars_ready(after=...). None for feeds whose bars are always current."""
+        return None
+
     def trades(self, symbol: str, limit: int = 50) -> list:
         return list(self.prints.get(symbol, ()))[-limit:][::-1]
 
