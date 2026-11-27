@@ -209,7 +209,7 @@ function ValueChart({ account, bench, benchName }: { account: number[][]; bench?
         <span><i className="sw acct" />Account value</span>
         {bench && <span><i className="sw bench" />{benchName} scaled to the starting value</span>}
       </div>
-      <div className="rep-chart" ref={el} aria-label="Account value over time against the benchmark" role="img" />
+      <div className="rep-chart" ref={el} aria-label="Account value over time against the benchmark" role="figure" />
       {!enough && <p className="muted rep-note">The curve fills in as the account is sampled, about once a minute.</p>}
     </div>
   );

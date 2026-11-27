@@ -310,7 +310,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
         )}
         <button type="button" className={"ct-btn" + (drawMode ? " on" : "")} aria-pressed={drawMode}
           title="Draw mode: tap-drag draws instead of panning the chart" onClick={() => { setDrawMode(!drawMode); setTool("select"); setSelected(null); }}>Draw</button>
-        <button type="button" className="ct-btn" onClick={resetView} aria-label="Reset chart view" title="Reset chart view">Reset view</button>
+        <button type="button" className="ct-btn" onClick={resetView} title="Reset chart view">Reset view</button>
       </div>
       {drawMode && (
         <div className="ct-bar ct-draw-bar" role="toolbar" aria-label="Drawing tools">
@@ -336,7 +336,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
       <div className="ct-stage" data-chart-type={settings.type} data-log={settings.log ? "1" : "0"} data-loaded={loadTick > 0 ? "1" : "0"}
         onPointerDown={stagePointerDown} onPointerMove={stagePointerMove} onPointerUp={stagePointerEnd} onPointerCancel={stagePointerEnd}
         onContextMenu={stageContextMenu}>
-        <div className="chart ct-host" ref={el} role="img" aria-label={`${symbol} price chart`} />
+        <div className="chart ct-host" ref={el} role="figure" aria-label={`${symbol} price chart`} />
         <Legend g={g} tick={[loadTick, quote?.ts]} />
         <OrderHandles g={g} lines={lines} draft={confirm ? { key: confirm.line.key, price: confirm.to } : draft}
           onDraft={(key, price) => { if (!confirm) setDraft(price == null ? null : { key, price }); }}

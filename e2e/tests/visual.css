@@ -1,0 +1,11 @@
+/* Applied only while visual.spec.ts takes a screenshot. Hides what changes from run to run (prices, sizes,
+   clocks, P&L, dates, chart canvases, toasts) in place, so overlays and layout stay as they are. */
+.num:not(th), .px, .qh-price, .qh-price *, .qh-grid b, .top-stats b, .m-stats b, .m-acct-stats b, .m-session,
+.top-right > .muted, .m-sheet-status, .ticket .muted, .preview b, .preview dd, .preview td, .depth td,
+.m-quote .muted, .chain select, .chain-table td:not(.strike), .bottom td, .modal b, .rep-cards b, .curve, td.strike,
+.qh-main > span {
+  color: transparent !important;
+  text-shadow: none !important;
+}
+canvas, .chart a, .rep-chart a, .toasts, .bar { visibility: hidden !important; }
+* { caret-color: transparent !important; }

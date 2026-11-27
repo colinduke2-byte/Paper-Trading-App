@@ -109,7 +109,7 @@ test("chart toolbars fit the screen with 40 px controls and the legend stays off
 test("a long-press on the chart offers trade at price and opens the Trade view with the ticket filled in", async ({ page, open }) => {
   await open();
   await ready(page);
-  const host = page.getByRole("img", { name: "MKTX price chart" });
+  const host = page.getByRole("figure", { name: "MKTX price chart" });
   await host.scrollIntoViewIfNeeded();
   const box = await stableBox(page, host);
   await touch(page, { x: box.x + box.width * 0.4, y: box.y + box.height * 0.3 }, null, 900);

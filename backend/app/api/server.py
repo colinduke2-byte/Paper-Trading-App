@@ -683,11 +683,15 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     # ---- static UI -----------------------------------------------------------------
     if os.path.isdir(dist):
         app.mount("/assets", StaticFiles(directory=os.path.join(dist, "assets")), name="assets")
+        from .auth import PUBLIC_STATIC
 
         @app.get("/{path:path}", include_in_schema=False)
         def ui(path: str):
             if path.startswith("api/"):
                 raise HTTPException(404)
+            media = PUBLIC_STATIC.get("/" + path)  # manifest and icons: an exact allowlist, never a path lookup
+            if media and os.path.isfile(os.path.join(dist, path)):
+                return FileResponse(os.path.join(dist, path), media_type=media)
             return FileResponse(os.path.join(dist, "index.html"))
 
     return app

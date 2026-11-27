@@ -91,7 +91,7 @@ export function QuoteHeader({ symbol, quote, info }: { symbol: string; quote: an
           <span className={tone(quote?.change)}>{quote ? `${quote.change > 0 ? "+" : ""}${price(quote.change)} (${pct(quote.change_pct)})` : ""}</span>
         </div>
       </div>
-      <div className="qh-grid">
+      <div className="qh-grid" tabIndex={0} role="group" aria-label="Quote details">
         {cell("Bid", quote ? `${price(quote.bid)} × ${qty(quote.bid_size)}` : "–")}
         {cell("Ask", quote ? `${price(quote.ask)} × ${qty(quote.ask_size)}` : "–")}
         {cell(isCrypto(symbol) ? "Open (UTC day)" : "Open", price(quote?.open))}
@@ -131,7 +131,7 @@ export function DepthTape({ symbol }: { symbol: string }) {
         </table>
       </div>
       <h3>Time and sales</h3>
-      <div className="scroll">
+      <div className="scroll" tabIndex={0} role="group" aria-label="Time and sales">
         <table className="tight">
           <thead><tr><th>Time</th><th className="num">Price</th><th className="num">Size</th></tr></thead>
           <tbody>

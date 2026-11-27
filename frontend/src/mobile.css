@@ -279,3 +279,7 @@ html:has(.m-shell), body:has(.m-shell) { overflow: hidden; overscroll-behavior: 
   .m-stats { flex: none; }
   .m-top-row2 .paper-banner { flex: 1 1 auto; }
 }
+
+/* Touch-sized Reports controls in the phone shell at every width (reports.css only does this below 700 px, which
+   left the CSV links 32-35 px tall on wider phones in landscape and on the iPad in portrait). */
+.m-shell .reports button, .m-shell .reports .btnlink, .m-shell .reports input, .m-shell .reports select { min-height: 40px; }
