@@ -386,3 +386,9 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   PHASE 5 started: docs worker (Sonnet) session_01ByytwcTC4TtgMUZdZTJGfs on stream/docs-v1.
   After docs: phase 6 is the owner's (real Windows PC, phone, Alpaca keys), then tag v1.0 on the
   owner's go.
+- 17:35 UTC: PHASE 5: docs PR 34 (3b24947) ready but CI red: backend test
+  test_integration_wave1::test_access_every_feature_route... fails during US hours (NVLX multileg
+  preview rejects a sold leg with a zero bid). Time-of-day dependence, also on main. Fix worker
+  session_01ByytwbHUspwrSQ6ofo7MA1 on fix/multileg-route-test. Merge it, then PR 34.
+  PHASE 6 (owner testing on Windows PC, phone, Alpaca keys) started via the owner's session.
+  Small follow-up: hardening.py docstring points to docs/LIMITS.md (now KNOWN_LIMITS.md).
