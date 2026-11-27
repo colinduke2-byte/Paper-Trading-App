@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..core import calendar as cal
 from ..core.locking import Busy, StateLock
-from ..exchange import Exchange, OrderRejected
+from ..exchange import MAX_WATCHLISTS, Exchange, OrderRejected
 from ..marketdata.feed import TIMEFRAMES
 from ..marketdata.labels import price_source
 from ..marketdata.synthetic import SyntheticFeed
@@ -333,7 +333,10 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         if lock is not None:
             lock.release()
 
-    app = FastAPI(title="PaperDesk", lifespan=lifespan)
+    # The interactive API docs list every route; they are off unless PAPERDESK_API_DOCS=1 asks for them.
+    docs = os.environ.get("PAPERDESK_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
+    app = FastAPI(title="PaperDesk", lifespan=lifespan, docs_url="/docs" if docs else None,
+                  redoc_url="/redoc" if docs else None, openapi_url="/openapi.json" if docs else None)
     ctx.app = app
     app.state.exchange = ctx.ex
     app.state.ctx = ctx
@@ -621,7 +624,10 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             s = str(s).upper().strip()
             if ex.is_stock(s) and s not in syms:
                 syms.append(s)
-        ex.watchlists[name[:30]] = syms
+        name = name[:30]
+        if name not in ex.watchlists and len(ex.watchlists) >= MAX_WATCHLISTS:
+            raise ValueError(f"there are already {MAX_WATCHLISTS} watchlists; delete one first")
+        ex.watchlists[name] = syms
         ex.dirty = True
         return ex.watchlists
 
@@ -658,7 +664,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 msg = await ws.receive_json()
                 if isinstance(msg, dict):
                     if isinstance(msg.get("symbols"), list):
-                        clients[ws]["symbols"] = [str(s).upper() for s in msg["symbols"][:300]]
+                        clients[ws]["symbols"] = [str(s).upper()[:32] for s in msg["symbols"][:300]]
                     if "account" in msg:  # an id string; anything else would break the broadcast for everyone
                         clients[ws]["account"] = msg["account"] if isinstance(msg["account"], str) else None
         except (WebSocketDisconnect, Exception):

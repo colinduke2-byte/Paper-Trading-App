@@ -11,7 +11,7 @@ import time
 from datetime import date, timedelta
 from typing import Optional
 
-from .http import JsonClient, RateLimiter, Transport, dec, parse_ts
+from .http import JsonClient, RateLimiter, Transport, dec, parse_ts, web_url
 
 BASE_URL = "https://finnhub.io/api/v1"
 
@@ -56,9 +56,9 @@ def news_records(rows: list) -> list:
     out = []
     for r in rows or []:
         out.append({"id": r.get("id"), "headline": r.get("headline") or "", "summary": r.get("summary") or "",
-                    "source": r.get("source") or "", "url": r.get("url") or "", "author": "",
+                    "source": r.get("source") or "", "url": web_url(r.get("url")), "author": "",
                     "created_at": float(r["datetime"]) if r.get("datetime") is not None else None,
-                    "symbols": [s for s in (r.get("related") or "").split(",") if s], "image": r.get("image") or None,
+                    "symbols": [s for s in (r.get("related") or "").split(",") if s], "image": web_url(r.get("image")) or None,
                     "provider": "finnhub"})
     return sorted(out, key=lambda r: r["created_at"] or 0, reverse=True)
 
@@ -69,8 +69,8 @@ def fundamentals_record(profile: dict, metrics: dict) -> dict:
     mc = dec(p.get("marketCapitalization"))
     so = dec(p.get("shareOutstanding"))
     return {"name": p.get("name"), "industry": p.get("finnhubIndustry"), "exchange": p.get("exchange"),
-            "country": p.get("country"), "currency": p.get("currency"), "ipo": p.get("ipo"), "website": p.get("weburl"),
-            "logo": p.get("logo"),
+            "country": p.get("country"), "currency": p.get("currency"), "ipo": p.get("ipo"), "website": web_url(p.get("weburl")) or None,
+            "logo": web_url(p.get("logo")) or None,
             # Finnhub reports market cap and shares outstanding in millions.
             "market_cap": mc * 1_000_000 if mc is not None else None,
             "shares_outstanding": so * 1_000_000 if so is not None else None,

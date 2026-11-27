@@ -244,3 +244,132 @@ def test_watchlist_rows_answer_busy_instead_of_waiting_while_the_lock_is_stuck(m
         r = c.get("/api/watchlist-sets/Main/rows")
         assert r.status_code == 503 and r.json()["busy"] is True
         assert c.get("/api/markets/overview").status_code == 200  # market data only: no exchange lock needed
+
+
+# ---- hardening (PR 30) x backup uploads (PR 19) ---------------------------------------------------------
+
+def test_a_backup_larger_than_the_general_body_limit_can_still_be_uploaded(tmp_path):
+    """Hardening caps request bodies at 1 MB; a real backup is often larger. The restore upload has its own
+    streamed 64 MB limit, which the access middleware must leave to the route."""
+    import gzip
+    import shutil
+    from app.api import auth
+    from app.marketdata.replay.library import BUNDLED_DIR
+    c, app, ex = make_app(tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    src = sorted(f for f in os.listdir(BUNDLED_DIR) if f.endswith(".gz"))[0]
+    shutil.copy(os.path.join(BUNDLED_DIR, src), sessions / src)
+    # pad the session file past the general limit with incompressible bytes inside a valid gzip member
+    with open(sessions / src, "ab") as f:
+        f.write(gzip.compress(os.urandom(auth.MAX_REQUEST_BODY + 200_000), compresslevel=0))
+    data = c.get("/api/data/export").content
+    assert len(data) > auth.MAX_REQUEST_BODY
+    r = c.post("/api/data/restore/preview", content=data, headers={"content-type": "application/zip"})
+    assert r.status_code != 413, r.text
+    assert r.status_code == 200, r.text
+    # the general limit still holds everywhere else, and the upload limit by declared length
+    big = b"x" * (auth.MAX_REQUEST_BODY + 1)
+    assert c.post("/api/watchlist-sets", content=big, headers={"content-type": "application/json"}).status_code == 413
+    huge = {"content-type": "application/zip", "content-length": str(auth.UPLOAD_LIMITS["/api/data/restore/preview"] + 1)}
+    assert c.post("/api/data/restore/preview", content=b"", headers=huge).status_code == 413
+
+
+# ---- cash-account fix (PR 28) x crypto (PR 14) x lots (PR 13) -------------------------------------------
+
+def test_a_cash_account_crypto_purchase_is_priced_with_its_fee_and_resting_buys_reserve_it():
+    import pytest
+    from app.exchange import OrderRejected
+    ex, feed, clock, c, coin = _crypto()  # cash account with 10,000; coin at 40,000.00 ask
+    a = ex.accounts[c]
+    fee_rate = ex.crypto_fee_rate(a)
+    # a resting limit buy reserves its cost and its fee
+    ex.submit(c, {"symbol": coin, "side": "buy", "qty": "0.2", "type": "limit", "limit_price": "39000.00", "tif": "gtc"})
+    reserved = D("0.2") * D("39000.00") * (1 + fee_rate / 100)
+    left = a.cash - reserved
+    with pytest.raises(OrderRejected):  # a second purchase may spend only what is left
+        ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": int(left / D("100.00")) + 1, "type": "limit",
+                      "limit_price": "100.00", "tif": "gtc"})
+    ex.submit(c, {"symbol": "ABC", "side": "buy", "qty": int(left / D("100.00")) - 1, "type": "limit",
+                  "limit_price": "100.00", "tif": "gtc"})
+    from test_crypto import set_coin
+    for px in ("39000.00", "30000.00"):
+        clock.advance(60)
+        set_coin(feed, px)
+        feed.set_quote("ABC", D("90.00"), D("90.01"), D("90.00"))
+        ex.tick()
+        assert a.cash >= 0
+
+
+def test_a_cash_account_lot_sale_of_crypto_never_goes_short_or_below_zero():
+    ex, feed, clock, c, coin = _crypto()
+    _buy_lots(ex, feed, clock, c, coin, ["40000.00", "41000.00"], qty="0.05")
+    a = ex.accounts[c]
+    [o] = ex.submit(c, {"symbol": coin, "side": "sell", "qty": "0.05", "lots": [{"lot_id": "L2", "qty": "0.05"}]})
+    assert o.status == "filled" and [l.id for l in a.lots[coin]] == ["L1"]
+    assert a.position(coin) == D("0.05") and a.cash >= 0
+
+
+# ---- backup (PR 19) x hardening reset validation (PR 30) ------------------------------------------------
+
+def test_an_invalid_reset_takes_no_backup_and_a_valid_one_takes_it_before_changing_anything(tmp_path):
+    import pytest
+    c, app, ex = make_app(tmp_path)
+    aid = list(ex.accounts)[0]
+    calls = []
+    ex.before_destructive = lambda kind: calls.append((kind, json.dumps(ex.accounts[aid].to_plain(), sort_keys=True)))
+    before = json.dumps(ex.accounts[aid].to_plain(), sort_keys=True)
+    with pytest.raises(ValueError):
+        ex.reset_account(aid, "1e999999")
+    assert calls == [] and json.dumps(ex.accounts[aid].to_plain(), sort_keys=True) == before
+    ex.reset_account(aid, "5000")
+    assert [k for k, _ in calls] == ["pre-reset"] and calls[0][1] == before
+
+
+# ---- deterministic engine: same-tick fill order must not depend on the hash seed -------------------------
+
+_SCENARIO = r'''
+import json, sys
+sys.path[:0] = ["tests", "."]
+from helpers import D, T0, make_exchange, move
+from app.core import calendar as cal
+from app.options import chain
+from app.options.symbology import build
+ex, feed, clock = make_exchange(ABC="100.00")
+a = ex.create_account("m", "margin", D("1000000")).id
+c = ex.create_account("c", "cash", D("50000")).id
+expiry = chain.expirations(cal.ny_date(T0))[0]
+opts = [build("ABC", expiry, k, D(s)) for k in "CP" for s in (90, 95, 100, 105, 110)]
+for sym in opts:
+    feed.set_quote(sym, D("2.00"), D("2.10"), D("2.05"))
+ex.tick()
+for i, sym in enumerate(opts):
+    ex.submit(a, {"symbol": sym, "side": "buy", "qty": 1 + i % 3, "type": "limit", "limit_price": "1.50", "tif": "gtc"})
+    ex.submit(c, {"symbol": sym, "side": "buy", "qty": 1, "type": "limit", "limit_price": "1.40", "tif": "gtc"})
+for acct in (a, c):
+    for q in (10, 20, 30):
+        ex.submit(acct, {"symbol": "ABC", "side": "buy", "qty": q, "type": "limit", "limit_price": "99.00", "tif": "gtc"})
+for sym in opts:  # every option becomes marketable in the same tick
+    feed.set_quote(sym, D("1.00"), D("1.05"), D("1.02"))
+move(ex, feed, clock, "ABC", "98.00")
+lot = ex.accounts[a].lots["ABC"][1]  # lot ids are per account, across symbols
+ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": str(lot.qty), "lots": [{"lot_id": lot.id, "qty": str(lot.qty)}]})
+clock.advance(10 * 86400)  # past the expiry: settlements in one tick
+move(ex, feed, clock, "ABC", "104.00")
+out = [(f.account_id, f.symbol, str(f.qty), str(f.price), f.kind) for acct in ex.accounts.values() for f in acct.fills]
+print(json.dumps(out))
+'''
+
+
+def test_same_tick_fills_and_expiry_settlements_do_not_depend_on_the_hash_seed():
+    import subprocess
+    import sys
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    runs = []
+    for seed in ("0", "1", "4242"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        r = subprocess.run([sys.executable, "-c", _SCENARIO], cwd=here, env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stderr[-2000:]
+        runs.append(json.loads(r.stdout.strip().splitlines()[-1]))
+    assert len(runs[0]) > 20, "the scenario did not produce the fills it was written for"
+    assert runs[0] == runs[1] == runs[2]

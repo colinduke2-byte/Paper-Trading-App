@@ -9,6 +9,7 @@ import threading
 import time as _time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from dataclasses import replace as dc_replace
 from itertools import count
 from typing import Optional
 
@@ -38,6 +39,9 @@ MAX_LINKED = 5  # orders in one one-cancels-other or one-triggers-other request
 MAX_GTD_DAYS = 366
 MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be larger than this
 MAX_ORDER_LOTS = 100  # tax lots one closing order may name
+MAX_ACCOUNTS = 1000     # entity limits: each one keeps the state file and every tick bounded
+MAX_OPEN_ORDERS = 1000  # working orders per account
+MAX_WATCHLISTS = 50
 CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its intrinsic value, not exercised
 RUNNING_GAP = 120  # seconds: a longer gap between two ticks means the simulator was not running (or was paused)
 CLOSE_WAIT = 120  # seconds to wait for the provider's daily close before settling at an approximate price
@@ -239,6 +243,8 @@ class Exchange:
     # ---- accounts --------------------------------------------------------
     def create_account(self, name: str, type: str = "margin", starting_cash=Decimal("100000")) -> Account:
         starting_cash = _starting_cash(starting_cash)
+        if len(self.accounts) >= MAX_ACCOUNTS:
+            raise ValueError(f"there are already {MAX_ACCOUNTS} accounts; delete one first")
         name = (name or "").strip()[:40] or "Paper account"
         acct = Account(f"A{next(self._acct_seq):04d}", name, type, starting_cash, self.now())
         self.accounts[acct.id] = acct
@@ -249,17 +255,19 @@ class Exchange:
         """Start the account again with fresh cash. Its rule settings and tax-lot method are kept; positions,
         orders, history and the trade journal are cleared."""
         old = self.account(account_id)
-        if self.before_destructive:
-            self.before_destructive("pre-reset")
+        # Validate and build the new account first: a bad value must leave the old state untouched.
         cash = _starting_cash(starting_cash) if starting_cash is not None else old.starting_cash
+        new = Account(old.id, old.name, old.type, cash, self.now())
+        new.settings = dict(old.settings)  # a reset keeps the account's rule settings
+        new.lot_method = old.lot_method  # ... and its tax-lot method
+        new.to_plain()  # the account must be saveable, or the next start-up could not load the state file
+        if self.before_destructive:  # backup (PR 19): only once the reset is known to be valid
+            self.before_destructive("pre-reset")
         for o in self.engine.active_orders():
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
         self.engine.reindex()
-        new = Account(old.id, old.name, old.type, cash, self.now())
-        new.settings = dict(old.settings)  # a reset keeps the account's rule settings
-        new.lot_method = old.lot_method  # ... and its tax-lot method
         self._day_start_wanted.pop(old.id, None)
         self.accounts[old.id] = new
         self.dirty = True
@@ -868,18 +876,16 @@ class Exchange:
         scenario is checked with no multi-leg order filled, with all of them filled and
         with each one filled alone.
 
-        A cash account cannot borrow, so it gets one more scenario: buys and sells all fill,
-        but the money from the sells has not arrived. That stops a resting purchase from
-        spending the cash that secures a resting short put. (A sale that must fill before
-        the order it triggers is the exception: its money is there by then.)
-
         Crypto is never bought with borrowed money: when the request being checked is a crypto
         purchase (or `crypto_check` is set), a margin account must also keep cash at or above zero
         once all its open purchases have filled. Other requests are not held to that, so a resting
         crypto purchase does not change what a stock order may do (the fill-time cap in _handle
         keeps crypto fills within cash whatever fills first). `buy_cash` on the result is the cash
         left when every open purchase fills: what a new crypto purchase may spend.
+        Cash accounts use `_cash_worst` instead, a reservation that holds for every subset of fills.
         """
+        if account.type == "cash":
+            return self._cash_worst(account, new_orders)
         crypto_check = crypto_check or any(is_crypto(o.symbol) and o.side == m.BUY and not o.legs for o in new_orders)
         live = [o for o in self.engine.orders.values() if o.account_id == account.id
                 and (o.status in (m.WORKING, m.PARTIAL) or (o.status == m.HELD and o.role == m.TRIGGERED))]
@@ -887,11 +893,10 @@ class Exchange:
         singles = [o for o in live if not o.legs]
         combos = [o for o in live if o.legs]
         by_id = {o.id: o for o in singles}
-        triggering = {o.parent_id for o in singles if o.status == m.HELD}
         combo_sets = [[]] + ([combos] if combos else []) + ([[c] for c in combos] if len(combos) > 1 else [])
         base = account.positions()
         result, buy_cash = None, None
-        for side in (None, m.BUY, m.SELL) + (("both",) if account.type == "cash" else ()):
+        for side in (None, m.BUY, m.SELL):
             for combo_set in combo_sets:
                 pos, cash, seen, applied = dict(base), account.cash, {}, set()
 
@@ -909,11 +914,10 @@ class Exchange:
                     crypto = is_crypto(o.symbol)
                     px = self._estimate_price(o) if crypto else None
                     cash -= self._fee(o.symbol, qty, px, account)
-                    if sign > 0 or side != "both" or o.id in triggering:
-                        cash -= sign * cents(qty * (px or self._estimate_price(o)) * multiplier(o.symbol))
+                    cash -= sign * cents(qty * (px or self._estimate_price(o)) * multiplier(o.symbol))
 
                 for o in singles if side is not None else ():
-                    if (o.side != side and side != "both") or o.id in applied:
+                    if o.side != side or o.id in applied:
                         continue
                     if o.status == m.HELD:  # it can only fill after its entry has filled completely
                         parent = by_id.get(o.parent_id)
@@ -929,16 +933,181 @@ class Exchange:
                 w = Exchange._Worst(ev.ok, ev.reason, ev.excess, ev.requirement, cash)
                 if side == m.BUY and not combo_set:
                     buy_cash = cash if buy_cash is None else min(buy_cash, cash)
-                if crypto_check and side in (m.BUY, "both") and cash < 0 and account.type == "margin":
+                if crypto_check and side == m.BUY and cash < 0 and account.type == "margin":
                     w = Exchange._Worst(False, f"crypto is not bought on margin: this order and your open purchases "
                                                f"need {_amt(account.cash - cash)} but cash is {_amt(account.cash)}",
                                         ev.excess, ev.requirement, cash)
-                if result is None or (result.ok and not w.ok) or (w.ok == result.ok and (
-                        w.excess < result.excess if account.type == "margin"
-                        else w.cash_after - w.requirement < result.cash_after - result.requirement)):
+                if result is None or (result.ok and not w.ok) or (w.ok == result.ok and w.excess < result.excess):
                     result = w
         result.buy_cash = account.cash if buy_cash is None else buy_cash
         return result
+
+    def _cash_worst(self, account: Account, new_orders: list, exclude=frozenset()) -> "_Worst":
+        """The pre-trade check of a cash account: a reservation that holds whichever open orders fill.
+
+        A cash account cannot borrow, so nothing is counted on that is not certain. Every open order
+        is counted as if it fills completely: a buy reserves its full cost and fees, a sale counts
+        as gone the shares or contracts it sells. Nothing an unfilled order would bring in is
+        available to any other order: not the money from a sale, not the premium of a write, not
+        the shares a buy would add, not the cash a buy-back would free. An order's own proceeds or
+        premium, and the cash its own buy-back frees, only offset what that same order needs (its
+        fees, its cost, or the cash that secures the put it writes), never more. Because each
+        order then adds a reservation of zero or more, every subset of fills is covered, whatever
+        fills and in whichever order.
+
+        Orders that can only fill together are one unit, valued at their worst: a one-cancels-other
+        group can fill at most the size of its largest order, at the price of its most expensive
+        member; an order with held children (bracket or one-triggers-other) is counted with and
+        without its children, and its own proceeds may pay for its children but for nothing else.
+        A multi-leg order is all-or-none. An open order that cannot be priced right now cannot fill
+        either, so only what it sells is counted; it is priced again before it can fill. Orders in
+        `exclude` (and their held children) are left out.
+        """
+        new_ids = {o.id for o in new_orders}
+        live = [o for o in self.engine.orders.values() if o.account_id == account.id and o.active
+                and o.id not in exclude and o.parent_id not in exclude]
+        live += [o for o in new_orders if o.id not in self.engine.orders]
+        live.sort(key=lambda o: (o.id in new_ids, o.created_at, o.id))
+        base = account.positions()
+        close_left = {s: max(q, ZERO) for s, q in base.items()}  # units a sale closes rather than opens
+        release_left = {s: max(-q, ZERO) for s, q in base.items()}  # short units a buy-back closes
+
+        def price(o):
+            try:
+                px = self._estimate_price(o)
+            except OrderRejected:
+                if o.id in new_ids:
+                    raise
+                return None  # cannot fill until it has a price; checked again before then
+            if o.type in m.CLOSE_TYPES and o.limit_price is None and (aq := self._auction_price(o.symbol)) is not None \
+                    and aq.ask > 0 and aq.bid > 0:
+                # It fills at the last regular-session price, which need not be the current one.
+                alt = self.engine._walk(aq, o.side, o.remaining)
+                px = max(px, alt) if o.side == m.BUY else min(px, alt)
+            return px
+
+        def put_cash(symbol):
+            c = parse_option(symbol)
+            return c.strike * 100 if c is not None and c.kind == "P" else None
+
+        freed_calls: dict = {}  # call symbol -> contracts the unit being valued buys back
+
+        def one(symbol, side, qty, px, credit_write=True):
+            """(net cash, requirement this order adds, requirement it frees) of trading qty."""
+            mult, k = multiplier(symbol), put_cash(symbol)
+            # A crypto fee (PR 14) is a share of the trade value; an unpriced order cannot fill until priced.
+            fee = (self._fee(symbol, qty, px, account) if px is not None else ZERO) if is_crypto(symbol) \
+                else self._fee(symbol, qty)
+            if side == m.BUY:
+                freed = min(qty, release_left.get(symbol, ZERO))
+                release_left[symbol] = release_left.get(symbol, ZERO) - freed
+                if freed > 0 and k is None and parse_option(symbol) is not None:
+                    freed_calls[symbol] = freed_calls.get(symbol, ZERO) + freed
+                cost = cents(qty * px * mult) if px is not None else ZERO
+                return -cost - fee, ZERO, cents(freed * k) if k is not None else ZERO
+            closing = min(qty, close_left.get(symbol, ZERO))
+            close_left[symbol] = close_left.get(symbol, ZERO) - closing
+            proceeds = cents(qty * px * mult) if px is not None else ZERO
+            adds = cents((qty - closing) * k) if k is not None and credit_write else ZERO
+            return proceeds - fee, adds, ZERO
+
+        def value(net, adds, freed):
+            return min(adds, net + freed)  # what it may take from the account; its own money offsets only itself
+
+        groups: dict = {}  # top-level units: one-cancels-other groups, single orders, multi-leg orders
+        children: dict = {}  # parent id -> {group key: [held children]}
+        by_id = {o.id: o for o in live}
+        for o in live:
+            parent = by_id.get(o.parent_id) if o.parent_id is not None else None
+            if parent is not None:
+                if o.role != m.TRIGGERED:  # an exit is re-sized to what its entry fills when it is released
+                    o = dc_replace(o, qty=parent.qty, filled_qty=ZERO)
+                children.setdefault(o.parent_id, {}).setdefault(o.oco_group or o.id, []).append(o)
+            else:
+                groups.setdefault(o.oco_group or o.id, []).append(o)
+
+        def group_effect(members):
+            """((net cash, adds, frees), {symbol: units sold}) of a one-cancels-other group, or of one order."""
+            cap = max(o.remaining for o in members)
+            sold: dict = {}
+            for o in members:
+                if o.side == m.SELL:
+                    sold[o.symbol] = min(cap, sold.get(o.symbol, ZERO) + o.remaining)
+            if len(members) == 1:
+                o = members[0]
+                return one(o.symbol, o.side, o.remaining, price(o)), sold
+            # Fills on one take the same quantity off the others, so the group fills at most `cap`. Per
+            # symbol, count that much of its most expensive member there; different symbols are added
+            # up. A write in a group does not offset itself.
+            per_symbol: dict = {}
+            for o in members:
+                n = min(cap, sum((x.remaining for x in members if x.symbol == o.symbol), ZERO))
+                net, adds, freed = one(o.symbol, o.side, n, price(o), credit_write=False)
+                if o.symbol not in per_symbol or net + freed < sum(per_symbol[o.symbol][::2]):
+                    per_symbol[o.symbol] = (net, adds, freed)
+            return tuple(sum((v[i] for v in per_symbol.values()), ZERO) for i in range(3)), sold
+
+        def own_cover(deltas, freed=None):
+            """A unit that fills as a whole may cover the calls it writes with the shares it buys itself,
+            and sell the shares behind the short calls it buys back itself (`freed`)."""
+            out = dict(deltas)
+            for symbol, n in sorted((freed or {}).items()):
+                u = parse_option(symbol).underlying
+                if out.get(u, ZERO) < 0:
+                    out[u] += min(-out[u], n * 100)
+            for symbol in sorted(out):
+                c = parse_option(symbol)
+                if c is not None and c.kind == "C" and out[symbol] < 0 and out.get(c.underlying, ZERO) >= 100:
+                    covered = min(-out[symbol], out[c.underlying] // 100)
+                    out[symbol] += covered
+                    out[c.underlying] -= covered * 100
+            return out
+
+        cash = account.cash
+        pos = dict(base)
+        for key, members in groups.items():
+            if len(members) == 1 and members[0].legs:
+                o = members[0]
+                net, adds, freed = ZERO, ZERO, ZERO
+                try:
+                    net = -self._multileg_cost(o)
+                except OrderRejected:
+                    if o.id in new_ids:
+                        raise
+                net -= self._multileg_fee(o)
+                freed_calls.clear()
+                for l in o.legs:
+                    _, a_, f_ = one(l["symbol"], l["side"], o.qty * l["ratio"], None)
+                    adds, freed = adds + a_, freed + f_
+                for symbol, d in own_cover(self._leg_deltas(o), freed_calls).items():
+                    pos[symbol] = pos.get(symbol, ZERO) + min(d, ZERO)
+                cash += value(net, adds, freed)
+                continue
+            freed_calls.clear()
+            (net, adds, freed), sold = group_effect(members)
+            kids = [children.get(x.id, {}) for x in members]
+            if not any(kids):
+                cash += value(net, adds, freed)
+                for symbol, n in sold.items():
+                    pos[symbol] = pos.get(symbol, ZERO) - n
+                continue
+            # An order with held children (never part of a standalone one-cancels-other group): its children
+            # can only fill once it has, so its own proceeds and shares may serve them, and nothing else.
+            parent = members[0]
+            parent_freed = dict(freed_calls) if len(members) == 1 else {}  # what the parent alone buys back
+            deltas = {parent.symbol: parent.remaining if parent.side == m.BUY else -parent.remaining}
+            k_net, k_freed = ZERO, ZERO
+            for kid_group in kids[0].values():
+                (c_net, _, c_freed), c_sold = group_effect(kid_group)
+                k_net, k_freed = k_net + c_net, k_freed + c_freed
+                for symbol, n in c_sold.items():
+                    deltas[symbol] = deltas.get(symbol, ZERO) - n
+            cash += min(value(net, adds, freed), value(net + k_net, adds, freed + k_freed))
+            for symbol, d in own_cover(deltas, parent_freed).items():
+                pos[symbol] = pos.get(symbol, ZERO) + min(d, ZERO)
+        pos = {s: q for s, q in pos.items() if q != 0}
+        ev = margin.evaluate("cash", cash, pos, self._marks(pos))
+        return Exchange._Worst(ev.ok, ev.reason, ev.excess, ev.requirement, cash)
 
     def _shortfall(self, account: Account, worst: "_Worst", entry: Optional[Order] = None,
                    what: str = "this order") -> str:
@@ -979,7 +1148,7 @@ class Exchange:
             text += f" ({_usd(free - have)} is reserved by {whose})"
         return text
 
-    def _not_riskier(self, account: Account, deltas: dict, cash_delta: Decimal) -> bool:
+    def _not_riskier(self, account: Account, deltas: dict, cash_delta: Decimal, exclude: Optional[str] = None) -> bool:
         """True when applying these position changes (and paying cash_delta) adds no risk.
 
         Closing a position is normally always allowed, but not when it is what covers
@@ -990,7 +1159,7 @@ class Exchange:
         """
         before = account.positions()
         for x in self.engine.orders.values():
-            if x.account_id == account.id and x.status in (m.WORKING, m.PARTIAL):
+            if x.account_id == account.id and x.status in (m.WORKING, m.PARTIAL) and x.id != exclude:
                 pending = self._leg_deltas(x) if x.legs else {x.symbol: x.remaining if x.side == m.BUY else -x.remaining}
                 for symbol, delta in pending.items():
                     if delta < 0:
@@ -1015,27 +1184,30 @@ class Exchange:
         spare_before, spare_after = account.cash - ev_before.requirement, account.cash + cash_delta - ev_after.requirement
         return spare_after >= 0 or spare_after >= spare_before
 
-    def _closes(self, account: Account, symbol: str, side: str, qty: Decimal) -> bool:
+    def _closes(self, account: Account, symbol: str, side: str, qty: Decimal, exclude: Optional[str] = None) -> bool:
         """True when trading qty of symbol only reduces the position held, open orders included."""
         pos = account.position(symbol)
         if pos == 0 or (pos > 0) == (side == m.BUY):
             return False
         same_side = sum((x.remaining for x in self.engine.orders.values()
                          if x.account_id == account.id and x.symbol == symbol and x.side == side
-                         and x.status in (m.WORKING, m.PARTIAL)), ZERO)
+                         and x.status in (m.WORKING, m.PARTIAL) and x.id != exclude), ZERO)
         return same_side + qty <= abs(pos)
 
-    def _reduces_risk(self, account: Account, o: Order) -> bool:
-        """True when the order only closes part of an existing position and uncovers nothing."""
+    def _reduces_risk(self, account: Account, o: Order, exclude: Optional[str] = None) -> bool:
+        """True when the order only closes part of an existing position and uncovers nothing.
+
+        `exclude` names an open order to leave out of the other open orders (the order itself, when
+        it is being changed); `o.qty` is then what is still to fill."""
         if o.legs:
             return (all(self._closes(account, l["symbol"], l["side"], o.qty * l["ratio"]) for l in o.legs)
                     and self._not_riskier(account, self._leg_deltas(o), -self._multileg_cost(o) - self._multileg_fee(o)))
-        if not self._closes(account, o.symbol, o.side, o.qty):
+        if not self._closes(account, o.symbol, o.side, o.qty, exclude):
             return False
         sign = 1 if o.side == m.BUY else -1
         px = self._estimate_price(o)
         paid = sign * cents(o.qty * px * multiplier(o.symbol)) + self._fee(o.symbol, o.qty, px, account)
-        return self._not_riskier(account, {o.symbol: sign * o.qty}, -paid)
+        return self._not_riskier(account, {o.symbol: sign * o.qty}, -paid, exclude)
 
     def _risk_check(self, account: Account, orders: list) -> "_Worst":
         """Pre-trade check for one request (a single order, a linked set or a multi-leg order).
@@ -1045,7 +1217,16 @@ class Exchange:
         """
         entry = orders[0]
         children = [o for o in orders[1:] if o.parent_id == entry.id]
-        if children or len(orders) == 1:  # single, bracket or one-triggers-other
+        if account.type == "cash":
+            # Only a sale that closes part of a holding and uncovers nothing skips the check. A buy,
+            # even one that closes a short option, must be paid for (the cash it frees counts for it),
+            # and the children of a linked order are counted with it.
+            counted = orders
+            standalone = len(orders) == 1 or not children  # one order, or a one-cancels-other group
+            closing = standalone and all(
+                not (o.side == m.BUY if not o.legs else any(l["side"] == m.BUY for l in o.legs))
+                and self._reduces_risk(account, o) for o in orders)
+        elif children or len(orders) == 1:  # single, bracket or one-triggers-other
             counted = [entry] + [c for c in children if c.role == m.TRIGGERED]
             closing = len(counted) == 1 and self._reduces_risk(account, entry)
         else:  # one-cancels-other
@@ -1159,6 +1340,8 @@ class Exchange:
                 if o.account_id == account_id and o.client_id == str(req["client_id"])[:64]:
                     return [o] + [c for c in self.engine.orders.values()
                                   if c.id != o.id and (c.parent_id == o.id or c.oco_group == o.id)]
+        if sum(1 for o in self.engine.active_orders() if o.account_id == account_id) >= MAX_OPEN_ORDERS:
+            raise OrderRejected(f"this account already has {MAX_OPEN_ORDERS} working orders; cancel some first")
         orders = self._validate(a, req)
         entry = orders[0]
         worst = self._risk_check(a, orders)
@@ -1248,12 +1431,20 @@ class Exchange:
         self._handle(self.engine.replace(order_id, self.now(), qty, limit, stop))
         # Held bracket and exit children are re-sized to what their entry filled when they are
         # released, so editing them cannot add risk; a held triggered order keeps its own size.
-        if (o.status != m.HELD or o.role == m.TRIGGERED) and not (after := self._worst_case(a, [])).ok \
-                and not self._reduces_risk_after(a, o):
+        if a.type == "cash":
+            # Every open order of a cash account is reserved for, held children included. Only a sale
+            # that still just closes part of a holding, and uncovers nothing, skips the check.
+            closing = o.side == m.SELL and o.status != m.HELD and self._reduces_risk(
+                a, dc_replace(o, qty=o.remaining, filled_qty=ZERO), exclude=o.id)
+            checked = True
+        else:
+            closing = self._reduces_risk_after(a, o)
+            checked = o.status != m.HELD or o.role == m.TRIGGERED
+        if checked and not (after := self._worst_case(a, [])).ok and not closing:
             o.qty, o.limit_price, o.stop_price = old
             raise OrderRejected(self._shortfall(a, after, o, "the change"))
         if o.status != m.HELD:  # pattern day trader and settled-cash rules, as on submit
-            rule = self.lifecycle.pre_trade(a, o, None if self._reduces_risk_after(a, o) else self._worst_case(a, []))
+            rule = self.lifecycle.pre_trade(a, o, None if closing else self._worst_case(a, []))
             if rule:
                 o.qty, o.limit_price, o.stop_price = old
                 raise OrderRejected(rule)
@@ -1462,6 +1653,8 @@ class Exchange:
         """
         due = [o for o in self.engine.orders.values() if o.type in m.AUCTION_TYPES and o.status == m.WORKING
                and (o.auction_at is None or o.auction_at <= now)]
+        if any(o.type in m.CLOSE_TYPES for o in due):  # the closing auction fills before the feed moves on
+            self._enforce_cash_orders(now, accounts={o.account_id for o in due})
         self._due_open = set()
         for o in due:
             which = "open" if o.type in m.OPEN_TYPES else "close"
@@ -1479,6 +1672,7 @@ class Exchange:
 
     def _orders_after_feed(self, quotes: list, now: float, sess: str) -> None:
         """Run the opening auction on the first quotes of the session, then re-price multi-leg orders."""
+        self._enforce_cash_orders(now, sess if not self._due_open else None)
         if self._due_open:
             due, self._due_open = self._due_open, set()
             self._handle(self.engine.on_auction("open", self.quote, now, only=due))
@@ -1610,7 +1804,7 @@ class Exchange:
             if q.symbol in active_symbols:
                 self._handle(self.engine.on_quote(q, now, "regular" if is_crypto(q.symbol) else sess))
         changed = {q.symbol for q in quotes}
-        for sym in active_symbols:
+        for sym in sorted(active_symbols):  # a set's order changes with the hash seed; fills must not
             c = parse_option(sym)
             if c and c.underlying in changed and c.expiry_ts > now:
                 self._handle(self.engine.on_quote(self.quote(sym), now, sess))
@@ -1818,6 +2012,7 @@ class Exchange:
             c = parse_option(o.symbol)
             if c is not None and c.expiry_ts <= now:
                 self._handle(self.engine.cancel(o.id, now, "option expired", status=m.EXPIRED))
+        settled = set()
         for a in self.accounts.values():
             expiring = []
             for sym, qty in a.positions().items():
@@ -1861,6 +2056,10 @@ class Exchange:
                         # broker would close them just before the last bell.
                         settle = min(n, (max(a.cash, ZERO) // (c.strike * 100)) if buys_stock
                                      else (max(a.position(c.underlying), ZERO) // 100))
+                        if long:
+                            # Exercising a long option is a choice, so it may only use what nothing
+                            # else needs. An assignment is an obligation and uses whatever is there.
+                            settle = min(settle, self._free_to_exercise(a, sym, c, buys_stock))
                     if settle > 0:
                         book(sym, m.SELL if long else m.BUY, settle, ZERO, kind)
                         book(c.underlying, m.BUY if buys_stock else m.SELL, settle * 100, c.strike, kind)
@@ -1871,7 +2070,90 @@ class Exchange:
                 if not exact:
                     self.lifecycle._log(a, now, "expiration", f"{describe(sym)} was settled at an {note}.")
                 self._expiry_waiting.discard((a.id, sym))
+                settled.add(a.id)
                 self.dirty = True
+        if settled:
+            self._enforce_cash_orders(now, accounts=settled, expired=frozenset(settled))
+
+    def _free_to_exercise(self, a: Account, sym: str, c, buys_stock: bool) -> Decimal:
+        """How many contracts of a long option a cash account can exercise without using cash or
+        shares that something else relies on.
+
+        A call is paid for only with cash that is spare in every scenario of the pre-trade check:
+        not the cash that secures short puts and not the cash reserved for open buy orders. A put
+        delivers only shares that cover no other short call and that no open order is selling.
+        """
+        if buys_stock:
+            worst = self._worst_case(a, [])  # a cash account: open orders that cannot be priced are left out
+            spare = worst.cash_after - worst.requirement if worst.ok else ZERO
+            return max(spare, ZERO) // (c.strike * 100)
+        shares = a.position(c.underlying)
+        for other, held in a.positions().items():
+            oc = parse_option(other)
+            if oc is not None and other != sym and held < 0 and oc.kind == "C" and oc.underlying == c.underlying:
+                shares += held * 100
+        for o in self.engine.orders.values():
+            if o.account_id == a.id and o.active:
+                selling = self._leg_deltas(o) if o.legs else {o.symbol: -o.remaining if o.side == m.SELL else ZERO}
+                shares += min(selling.get(c.underlying, ZERO), ZERO)
+        return max(shares, ZERO) // 100
+
+    CANT_PAY = "The account can no longer pay for this order at the current price"
+    CANT_COVER = "The account no longer has the cash or shares this order needs if it fills"
+    USED_AT_EXPIRY = "The cash or shares reserved for this order were used to settle an option at expiry"
+
+    def _enforce_cash_orders(self, now: float, sess: Optional[str] = None, accounts=None,
+                             expired: frozenset = frozenset()) -> None:
+        """Cancel the open orders a cash account can no longer cover, before they can fill.
+
+        The pre-trade check reserves for an order when it is entered. Later events can use what
+        was reserved or move the price: an option settles at expiry, or a stop or other market-type
+        buy would now fill well above the price it was reserved at. A cash account must never go
+        below zero or short, so whenever its open orders no longer pass the check (`_cash_worst`),
+        the fewest orders needed are canceled: orders are set aside newest first until the rest
+        pass, then each one set aside is put back, oldest first, if the rest still pass without it.
+        The check holds for every subset of fills, so what is left is safe whatever fills.
+
+        With `sess`, accounts none of whose orders can trade in that session are skipped (they are
+        checked on the first tick on which they can). `accounts` limits the check to those accounts;
+        `expired` names the accounts in which an option has just been settled. The matching engine
+        itself knows nothing of cash.
+        """
+        open_by_account: dict = {}
+        for o in self.engine.orders.values():
+            if o.status in (m.WORKING, m.PARTIAL):
+                open_by_account.setdefault(o.account_id, []).append(o)
+        for account_id, orders in open_by_account.items():
+            a = self.accounts.get(account_id)
+            if a is None or a.type != "cash" or (accounts is not None and account_id not in accounts):
+                continue
+            if sess is not None and not any(self.engine._eligible(o, sess) for o in orders):
+                continue
+            passes = lambda out: self._cash_worst(a, [], exclude=frozenset(x.id for x in out)).ok
+            if passes(()):
+                continue
+            newest_first = sorted(orders, key=lambda o: (o.created_at, o.id), reverse=True)
+            out = []
+            for o in newest_first:
+                out.append(o)
+                if passes(out):
+                    break
+            else:
+                # Not even without every open order: the account itself is short (after an assignment,
+                # for example). Only sales that close part of a holding and uncover nothing may stay.
+                out = [o for o in orders if o.legs or o.side == m.BUY or not self._reduces_risk(
+                    a, dc_replace(o, qty=o.remaining, filled_qty=ZERO), exclude=o.id)]
+            if passes(out):
+                for o in sorted(out, key=lambda o: (o.created_at, o.id)):  # keep what is not needed, oldest first
+                    rest = [x for x in out if x is not o]
+                    if passes(rest):
+                        out = rest
+            for o in sorted(out, key=lambda o: (o.created_at, o.id)):
+                if not o.active:
+                    continue  # already ended with its entry or its group
+                cause = self.USED_AT_EXPIRY if account_id in expired else (
+                    self.CANT_PAY if o.legs or o.side == m.BUY else self.CANT_COVER)
+                self._handle(self.engine.cancel(o.id, now, cause))  # the order event also raises a notification
 
     # ---- alerts and watchlists ----------------------------------------------
     @property
