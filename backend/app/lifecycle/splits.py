@@ -28,8 +28,14 @@ Options on the split underlying
     rounded to the cent), so account value at that mark is unchanged. Adjusted contracts
     are valued by the model after the split; rounding each new mark to the cent can move
     their value by up to half a cent per share.
+
+    A cash account cannot borrow, so its long contracts are settled first (they bring cash
+    in), and if buying back its short contracts would still leave cash below zero (a
+    covered call worth more than the cash there is), just enough of the shares that
+    covered it are sold at the split-adjusted price to pay for it, booked as a
+    `split_settlement` fill. Account value at those prices is unchanged.
 """
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from ..core.models import BUY, SELL, Fill
 from ..core.money import ZERO, cents
@@ -122,12 +128,19 @@ def option_adjustable(action, symbol: str) -> bool:
     return milli == milli.to_integral_value() and int(milli) % n == 0
 
 
-def split_options(account, action, marks: dict, ts: float, next_fill_id) -> list:
-    """Adjust or cash settle options on the split underlying. Returns notes (dicts)."""
+def split_options(account, action, marks: dict, ts: float, next_fill_id, stock_price: Decimal | None = None) -> list:
+    """Adjust or cash settle options on the split underlying. Returns notes (dicts).
+
+    `stock_price` is the split-adjusted price of the underlying; a cash account sells shares
+    at it when settling its short contracts would otherwise leave cash below zero."""
     held = [s for s in account.lots if (c := parse(s)) is not None and c.underlying == action.symbol]
     notes = []
-    # 1. Contracts with no exact adjusted equivalent are cash settled at the pre-split mark.
-    for sym in [s for s in held if not option_adjustable(action, s)]:
+    # 1. Contracts with no exact adjusted equivalent are cash settled at the pre-split mark,
+    #    In a cash account long ones go first, so that their proceeds are there for the buy-backs.
+    settling = [s for s in held if not option_adjustable(action, s)]
+    if account.type == "cash":
+        settling.sort(key=lambda s: (account.position(s) < 0, s))
+    for sym in settling:
         qty = account.position(sym)
         if qty == 0:
             continue
@@ -138,6 +151,18 @@ def split_options(account, action, marks: dict, ts: float, next_fill_id) -> list
         notes.append({"symbol": sym, "kind": "settled", "qty": qty, "price": mark, "fill": f,
                       "message": f"{_cap(action.describe())}: {qty.normalize():f} {sym} cash settled at the "
                                  f"pre-split mark of {mark.normalize():f} (no standard adjusted contract exists)"})
+    shares = account.position(action.symbol)
+    if account.type == "cash" and account.cash < 0 and shares > 0 and stock_price and stock_price > 0:
+        whole = shares == shares.to_integral_value()
+        need = (-account.cash / stock_price).quantize(Decimal(1) if whole else FOUR, ROUND_CEILING)
+        sell = min(need, shares)
+        f = Fill(id=next_fill_id(), order_id=None, account_id=account.id, symbol=action.symbol, side=SELL,
+                 qty=sell, price=stock_price, ts=ts, kind="split_settlement")
+        account.apply_fill(f, 1)
+        notes.append({"symbol": action.symbol, "kind": "settled", "qty": -sell, "price": stock_price, "fill": f,
+                      "message": f"{_cap(action.describe())}: sold {sell.normalize():f} {action.symbol} at the "
+                                 f"split-adjusted price of {stock_price.normalize():f} to pay for buying back the "
+                                 "short options it covered (a cash account cannot borrow)"})
     # 2. Whole-number forward splits: N contracts at strike / N. Two phases so a new symbol
     #    can never collide with a contract that has not been moved yet.
     n = action.whole_forward_factor

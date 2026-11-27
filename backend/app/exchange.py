@@ -1384,7 +1384,7 @@ class Exchange:
             if q.symbol in active_symbols:
                 self._handle(self.engine.on_quote(q, now, sess))
         changed = {q.symbol for q in quotes}
-        for sym in active_symbols:
+        for sym in sorted(active_symbols):  # a set's order changes with the hash seed; fills must not
             c = parse_option(sym)
             if c and c.underlying in changed and c.expiry_ts > now:
                 self._handle(self.engine.on_quote(self.quote(sym), now, sess))

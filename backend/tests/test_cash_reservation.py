@@ -320,3 +320,77 @@ def test_reason_names_expiry_only_when_an_option_settled():
     [stop] = ex.submit(a, stp("ABC", "buy", 100, "101"))
     move(ex, feed, clock, "ABC", "120")
     assert stop.reason == "The account can no longer pay for this order at the current price"
+
+
+# ---- 10. a reverse split never settles a covered call with cash the account does not have ---------------
+def test_reverse_split_sells_covering_shares_rather_than_go_below_zero():
+    from datetime import timedelta
+    from app.lifecycle.actions import split
+    ex, feed, clock = make_exchange()
+    C80 = opt("C", 80, FAR)
+    a = acct(ex, "cash", "30100")
+    ex.submit(a, mkt("ABC", "buy", 300))
+    ex.submit(a, mkt(C80, "sell", 2))  # covered by 200 of the 300 shares
+    move(ex, feed, clock, "ABC", "115")  # the calls are now worth more than the cash there is
+    acc = ex.account(a)
+    pos = {s: n for s, n in acc.positions().items() if n}
+    before = margin.equity(acc.cash, pos, ex._marks(pos))
+    assert acc.cash < 2 * 100 * ex.mark(C80)
+    day = ex.lifecycle.today() + timedelta(days=1)
+    feed.schedule(split("ABC", day, 1, 10))
+    move(ex, feed, clock, "ABC", "115", seconds=86400)
+    sound(ex, a)
+    assert C80 not in acc.positions() and 0 < acc.position("ABC") < 30  # some of the 30 new shares were sold
+    assert any(e["type"] == "lifecycle" and e["kind"] == "split" and "to pay for buying back the short options"
+               in e["message"] for e in ex.drain_events())
+    pos = {s: n for s, n in acc.positions().items() if n}
+    assert abs(margin.equity(acc.cash, pos, ex._marks(pos)) - before) < 200  # value moves only with the quotes
+    assert sum(acc.ledger.balances.values()) == 0
+
+
+def test_margin_account_split_settlement_is_unchanged():
+    from datetime import timedelta
+    from app.lifecycle.actions import split
+    ex, feed, clock = make_exchange()
+    C80 = opt("C", 80, FAR)
+    a = acct(ex, "margin", "30100")
+    ex.submit(a, mkt("ABC", "buy", 300))
+    ex.submit(a, mkt(C80, "sell", 2))
+    move(ex, feed, clock, "ABC", "115")
+    day = ex.lifecycle.today() + timedelta(days=1)
+    feed.schedule(split("ABC", day, 1, 10))
+    move(ex, feed, clock, "ABC", "115", seconds=86400)
+    acc = ex.account(a)
+    assert acc.position("ABC") == 30 and acc.cash < 0  # a margin account may borrow; nothing is sold
+
+
+def _split_property(steps, later, cash, ratio):
+    """Trading, a split (forward, reverse or 3-for-2) and more trading never break a cash account."""
+    from datetime import timedelta
+    from app.lifecycle.actions import split
+    from test_orders_review import play
+    ex, feed, clock = make_exchange()
+    a = acct(ex, "cash", str(cash))
+    play(ex, feed, clock, a, steps)
+    day = ex.lifecycle.today() + timedelta(days=1)
+    feed.schedule(split("ABC", day, *ratio))
+    move(ex, feed, clock, "ABC", ex.quote("ABC").last, seconds=86400)
+    sound(ex, a)
+    play(ex, feed, clock, a, [s for s in later if s[0] != "move"])
+    sound(ex, a)
+    led = ex.account(a).ledger
+    assert sum(led.balances.values()) == 0
+
+
+def _seeded_split_property(seed_value):
+    from hypothesis import given, seed, settings, strategies as st
+    from test_orders_review import FAR_SYMS, cash_script
+    return seed(seed_value)(settings(max_examples=150, deadline=None, database=None)(given(
+        cash_script(), cash_script(FAR_SYMS, most=4), st.integers(1000, 60000),
+        st.sampled_from([(1, 10), (1, 4), (1, 3), (3, 2), (2, 1), (4, 1)]))(_split_property)))
+
+
+# The seeds the review reported finding 10 with (its own generator; these drive this one).
+test_split_never_breaks_a_cash_account_seed_7919 = _seeded_split_property(7919)
+test_split_never_breaks_a_cash_account_seed_4421 = _seeded_split_property(4421)
+test_split_never_breaks_a_cash_account_seed_56901 = _seeded_split_property(56901)
