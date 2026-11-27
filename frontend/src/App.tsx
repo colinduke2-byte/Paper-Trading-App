@@ -75,10 +75,21 @@ function accountStats(summary: any) {
   );
 }
 
+/** `cur` if the active feed knows it, else the first watchlist symbol (or the first listed symbol). */
+async function validSymbol(cur: string, watch: string[]): Promise<string> {
+  const known: any[] = cur ? await api(`/symbols/lookup?symbols=${encodeURIComponent(cur)}`).catch(() => []) : [];
+  if (known.length) return cur;
+  if (watch[0]) return watch[0];
+  const first: any[] = await api("/symbols?limit=1").catch(() => []);
+  return first[0]?.symbol || cur;
+}
+
 export default function App() {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [accountId, setAccountId] = useState<string>(() => store("pd.account") || "");
   const [symbol, setSymbol] = useState<string>(() => store("pd.symbol") || "MKTX");
+  // The remembered symbol may belong to the other feed (a fictional one on real data): check it before use.
+  const [symbolChecked, setSymbolChecked] = useState(false);
   const [watch, setWatch] = useState<string[]>([]);
   const [quotes, setQuotes] = useState<Record<string, any>>({});
   const [summary, setSummary] = useState<any>(null);
@@ -133,8 +144,12 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const list = await loadAccounts(); // the Watchlists panel loads the lists and reports the visible one
+        // The Watchlists panel loads the lists and reports the visible one; here they only pick a valid symbol.
+        const [list, wl] = await Promise.all([loadAccounts(), api("/watchlists")]);
         if (!list.find((a: any) => a.id === accountId)) setAccountId(list[0]?.id || "");
+        const main: string[] = (wl.Main || Object.values(wl)[0] || []) as string[];
+        setSymbol(await validSymbol(symbol, main));
+        setSymbolChecked(true);
       } catch (e: any) {
         setFatal("PaperDesk can't reach its server. Check that PaperDesk is still running on your computer (the window where you started it). This page tries again every few seconds.");
       }
@@ -219,11 +234,11 @@ export default function App() {
   useEffect(() => { if (status && acctMode === null) setAcctMode(modeKey(status)); }, [status]);
   useModeSwitch(status, async () => {
     const key = modeKey(status) || "live";
-    const [list, wl, syms] = await Promise.all([loadAccounts(), api("/watchlists"), api("/symbols")]).catch(() => [[], {}, []]);
+    const [list, wl] = await Promise.all([loadAccounts(), api("/watchlists")]).catch(() => [[], {}]);
     setAccountId((cur) => (list.find((a: any) => a.id === cur) ? cur : list[0]?.id || ""));
     setAcctMode(key);
     const main: string[] = (wl.Main || Object.values(wl)[0] || []) as string[];
-    setSymbol((cur) => (syms.some((x: any) => x.symbol === cur) ? cur : main[0] || syms[0]?.symbol || cur));
+    setSymbol(await validSymbol(symbol, main));
     setRefreshKey((k) => k + 1);
   });
 
@@ -246,7 +261,8 @@ export default function App() {
       if (a) setAlertBuilder({ editing: a }); else notify("That alert has been deleted.", true);
     }).catch((e) => notify(`Could not load the alert: ${e.message}`, true));
 
-  const [info] = usePoll<any>(`/fundamentals/${symbol}`, 30000, [modeKey(status)]);
+  const checkedSymbol = symbolChecked ? symbol : ""; // nothing is fetched for a symbol until it is known to exist
+  const [info] = usePoll<any>(checkedSymbol ? `/fundamentals/${checkedSymbol}` : null, 30000, [modeKey(status)]);
   const ticketPos = positions.find((p) => p.symbol === seed.symbol);
   const stockPos = positions.find((p) => p.symbol === symbol);
   const openForSymbol = orders.filter((o) => o.symbol === symbol && ["working", "partially_filled"].includes(o.status));
@@ -352,7 +368,7 @@ export default function App() {
     </div>
   );
   const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
-  const mainView = (
+  const mainView = !checkedSymbol ? <div className="view" /> : (
     <div className="view">
       {shown === "About" && <CryptoAbout info={info} />}
       {shown === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol}
@@ -378,7 +394,7 @@ export default function App() {
       onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
   ));
   // Under an option ticket the depth ladder is the underlying stock's, so it says so.
-  const depth = <DepthTape symbol={underlyingOf(symbol)} note={isOption(seed.symbol) ? `${underlyingOf(seed.symbol)} stock, not the option` : undefined} />;
+  const depth = checkedSymbol ? <DepthTape symbol={underlyingOf(checkedSymbol)} note={isOption(seed.symbol) ? `${underlyingOf(seed.symbol)} stock, not the option` : undefined} /> : null;
   const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
   const lostBar = conn.stale ? (
     <div className="lost-bar" role="alert">

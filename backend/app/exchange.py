@@ -209,8 +209,15 @@ class Exchange:
         if u is None:
             return None
         now = self.now()
-        return optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), now,
-                                     self.feed.event_variance(c.underlying, c.expiry_ts, now))
+        oq = optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), now,
+                                   self.feed.event_variance(c.underlying, c.expiry_ts, now))
+        oq.stale = u.stale  # a model price from a stale underlying is stale too
+        return oq
+
+    @staticmethod
+    def _tradable(q: Optional[Quote]) -> Optional[Quote]:
+        """The quote an order may fill against now: None when there is none or it is stale (the order rests)."""
+        return None if q is None or q.stale else q
 
     def quote_source(self, symbol: str) -> str:
         """Where quote(symbol) comes from: the feed's name, or "model" for a modelled option price."""
@@ -222,7 +229,10 @@ class Exchange:
         q = self.quote(symbol)
         if q is None:
             return ZERO
-        return q.last if self.is_stock(symbol) else cents(q.mid)
+        if self.is_stock(symbol):
+            return q.last
+        # An option quote with no ask (a live feed with an empty book) is marked at its last trade, not at 0.
+        return cents(q.mid) if q.ask > 0 else q.last
 
     def price(self, symbol: str) -> Optional[Decimal]:
         """The mark, or None when there is no price (never a zero standing in for a missing price)."""
@@ -353,8 +363,42 @@ class Exchange:
                 if q and q.prev_close:
                     row["day_pnl"] = cents(qty * (q.last - q.prev_close))
                 row["delta"] = float(qty)
-            rows.append(row)
+            rows.append(self._annotate_position(row, sym, mark))
         return rows
+
+    def _annotate_position(self, row: dict, sym: str, mark: Optional[Decimal]) -> dict:
+        """Price source, price note and corporate action notices of a position row (only when there is one).
+        mark is None (or not positive) when the position has no price."""
+        mark = mark if mark is not None else ZERO
+        src = self.quote_source(sym)
+        if src != self.feed.name or mark <= 0:
+            row["price_source"] = src if mark > 0 else None
+        note = self._position_note(sym, src, mark)
+        if note:
+            row["price_note"] = note
+        q = self.quote(sym)
+        if q is not None and getattr(q, "stale", False):
+            row["stale"] = True
+        notices = self.lifecycle.position_notices(sym)
+        if notices:
+            row["notices"] = notices
+        return row
+
+    def _position_note(self, sym: str, src: str, mark: Decimal) -> Optional[str]:
+        """Why a position's mark is not a current market price, or None."""
+        if mark <= 0:
+            return f"Not valued: {self.feed.no_price_reason(sym)}"
+        c = parse_option(sym)
+        if c is not None:
+            if self.feed.simulated or src != "model":
+                return None
+            listing = self.feed.option_listing(c.underlying, fetch=False)  # never block a tick on the network
+            if listing is not None and c.strike not in listing.get(c.expiry, ()):
+                return (f"{self.feed.name.capitalize()} no longer lists this contract (expired, delisted or adjusted); "
+                        f"it is valued by the option model, not market data. It can still be closed.")
+            return "No option quote from the data provider; valued by the option model, not market data."
+        n = self.feed.quote_note(sym)
+        return n["note"] if n and n.get("stale") else None
 
     def orders(self, account_id: str, status: str = "all") -> list:
         self.account(account_id)
@@ -425,10 +469,25 @@ class Exchange:
                 raise OrderRejected(f"unknown symbol {symbol or '(blank)'}")
             if contract.expiry_ts <= self.now():
                 raise OrderRejected("this option has expired")
-            # A position held at an unlisted strike (an option adjusted by a split) can still be closed.
-            if contract.strike <= 0 or ((contract.strike * 2) % 1 != 0 and account.position(symbol) == 0):
+            # A position held at an unlisted strike or expiry (an option adjusted by a split, a contract the
+            # provider no longer lists) can still be closed.
+            held = account.position(symbol) != 0
+            if contract.strike <= 0:
                 raise OrderRejected("strike is not listed")
-            if contract.expiry not in optchain.expirations(cal.ny_date(self.now())) and account.position(symbol) == 0:
+            listing = self.feed.option_listing(contract.underlying)
+            if listing is not None:  # a live feed: its real contracts, not the model calendar
+                strikes = listing.get(contract.expiry)
+                if strikes is None and not held:
+                    raise OrderRejected(f"expiry is not listed: {self.feed.name.capitalize()} lists no "
+                                        f"{contract.underlying} options expiring {contract.expiry.isoformat()}")
+                if strikes is not None and contract.strike not in strikes and not held:
+                    raise OrderRejected(f"strike is not listed: {self.feed.name.capitalize()} lists no "
+                                        f"{contract.strike.normalize():f} strike for {contract.underlying} on "
+                                        f"{contract.expiry.isoformat()}")
+                return contract
+            if (contract.strike * 2) % 1 != 0 and not held:
+                raise OrderRejected("strike is not listed")
+            if contract.expiry not in optchain.expirations(cal.ny_date(self.now())) and not held:
                 raise OrderRejected("expiry is not listed")
             return contract
         if is_crypto(symbol) and self.feed.symbols()[symbol].get("tradable") is False:
@@ -841,18 +900,41 @@ class Exchange:
                 have += f" and open orders already sell {selling.normalize():f}"
             raise OrderRejected(f"crypto cannot be sold short: {have}")
 
-    def _estimate_price(self, o: Order) -> Decimal:
+    def _estimate_price(self, o: Order, strict: bool = True) -> Decimal:
+        """Price used for the risk check. `strict` (a new order) rejects when there is nothing to price
+        against, naming the cause; for orders already working the best available reference is used."""
         q = self.quote(o.symbol)
-        if q is None or q.ask <= 0:
-            raise OrderRejected(f"no quote available for {o.symbol}")
+        if q is None or q.last <= 0:
+            if not strict:
+                return o.limit_price or o.stop_price or self.mark(o.symbol)
+            raise OrderRejected(self.feed.no_price_reason(o.symbol))
+        if q.stale and strict and o.type == m.MARKET and self.session() == "regular":
+            n = self.feed.quote_note(o.symbol)
+            raise OrderRejected(f"The quote for {describe(o.symbol)} is stale, so a market order has no current price "
+                                f"to fill at. Use a limit order, or wait for a new quote."
+                                + (f" {n['note']}" if n and n.get("note") else ""))
         if o.limit_price is not None:
             if o.side == m.BUY:
                 return o.limit_price
             return max(o.limit_price, q.bid)
-        px = self.engine._walk(q, o.side, o.remaining)
+        top = q.ask if o.side == m.BUY else q.bid
+        if top <= 0 and q.provider_book:  # a simulated or model quote with a zero bid still walks its book
+            if strict and o.type == m.MARKET and self.session() == "regular":
+                raise OrderRejected(self._one_sided_reason(o.symbol, o.side))
+            px = q.last  # a stop is priced at the last trade until it triggers; it waits for a real quote to fill
+        else:
+            px = self.engine._walk(q, o.side, o.remaining)
         if o.stop_price is not None:
             return max(px, o.stop_price) if o.side == m.BUY else min(px, o.stop_price)
         return px
+
+    def _one_sided_reason(self, symbol: str, side: str) -> str:
+        want = "ask" if side == m.BUY else "bid"
+        verb = "buy" if side == m.BUY else "sell"
+        n = self.feed.quote_note(symbol)
+        tail = f" {n['note']}" if n and n.get("note") else ""
+        return (f"No {want} for {describe(symbol)} right now, so a market {verb} has no price to fill at. "
+                f"Use a limit order, or wait for {'a' if want == 'bid' else 'an'} {want}.{tail}")
 
     def _fee(self, symbol: str, qty: Decimal, price: Optional[Decimal] = None, account: Optional[Account] = None) -> Decimal:
         """Commission on a fill. Crypto pays a percentage of the trade value, rounded to the cent."""
@@ -911,10 +993,11 @@ class Exchange:
                         seen[(o.oco_group, o.symbol)], qty = qty, qty - prior
                     sign = 1 if o.side == m.BUY else -1
                     pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * qty
+                    strict = o.id not in self.engine.orders  # a new order; working ones never fail here
                     crypto = is_crypto(o.symbol)
-                    px = self._estimate_price(o) if crypto else None
+                    px = self._estimate_price(o, strict) if crypto else None
                     cash -= self._fee(o.symbol, qty, px, account)
-                    cash -= sign * cents(qty * (px or self._estimate_price(o)) * multiplier(o.symbol))
+                    cash -= sign * cents(qty * (px or self._estimate_price(o, strict)) * multiplier(o.symbol))
 
                 for o in singles if side is not None else ():
                     if o.side != side or o.id in applied:
@@ -1296,6 +1379,15 @@ class Exchange:
             warnings.append("This order writes (sells to open) option contracts.")
         if entry.type == m.MARKET:
             warnings.append("Market orders fill at the available price, which can differ from the estimate.")
+        q = self.quote(entry.symbol)
+        if q is not None and q.provider_book and entry.type in (m.MARKET, m.STOP, m.TRAILING_STOP) and \
+                (q.ask if entry.side == m.BUY else q.bid) <= 0:
+            want = "ask" if entry.side == m.BUY else "bid"
+            warnings.append(f"There is no {want} for {describe(entry.symbol)} right now; the order cannot fill until "
+                            f"there is one, and the estimate uses the last price.")
+        n = self.feed.quote_note(entry.symbol)
+        if n and n.get("stale") and n.get("note"):
+            warnings.append(n["note"])
         if entry.type in m.AUCTION_TYPES:
             which, word = ("open", "opening") if entry.type in m.OPEN_TYPES else ("close", "closing")
             warnings.append(f"This order waits for the next market {which} and trades once, at the {word} price."
@@ -1357,15 +1449,16 @@ class Exchange:
     def _place(self, orders: list) -> None:
         entry = orders[0]
         now = self.now()
-        sess, q = self.session_for(entry.symbol, now), self.quote(entry.symbol)
+        sess, q = self.session_for(entry.symbol, now), self._tradable(self.quote(entry.symbol))  # a stale quote fills nothing
         if entry.legs:
-            events = self.engine.submit_multileg(entry, self._leg_quotes(entry.legs), now, sess)
+            events = self.engine.submit_multileg(entry, self._leg_quotes(entry.legs, tradable=True), now, sess)
         elif len(orders) == 1:
             events = self.engine.submit(entry, q, now, sess)
         elif orders[1].parent_id == entry.id:  # bracket or one-triggers-other
             events = self.engine.submit_linked(entry, orders[1:], q, now, sess, oco=orders[1].oco_group == entry.id)
         else:  # standalone one-cancels-other
-            events = self.engine.submit_oco(orders, {o.symbol: self.quote(o.symbol) for o in orders}, now, sess)
+            events = self.engine.submit_oco(orders, {o.symbol: self._tradable(self.quote(o.symbol)) for o in orders},
+                                            now, sess)
         self._handle(events)
 
     def cancel(self, account_id: str, order_id: str) -> Order:
@@ -1519,7 +1612,9 @@ class Exchange:
                      qty=qty, type=m.MULTILEG, limit_price=limit, tif=tif, legs=legs, expire_at=expire_at,
                      good_till=good_till, client_id=str(req["client_id"])[:64] if req.get("client_id") else None)
 
-    def _leg_quotes(self, legs: list) -> dict:
+    def _leg_quotes(self, legs: list, tradable: bool = False) -> dict:
+        if tradable:  # for matching: a stale leg quote counts as none, so the order waits
+            return {l["symbol"]: self._tradable(self.quote(l["symbol"])) for l in legs}
         return {l["symbol"]: self.quote(l["symbol"]) for l in legs}
 
     @staticmethod
@@ -1685,7 +1780,7 @@ class Exchange:
             if any(c is not None and c.expiry_ts <= now for c in (parse_option(l["symbol"]) for l in o.legs)):
                 self._handle(self.engine.cancel(o.id, now, "option expired", status=m.EXPIRED))
             elif o.symbol in changed:
-                self._handle(self.engine.on_multileg(o.id, self._leg_quotes(o.legs), now, sess))
+                self._handle(self.engine.on_multileg(o.id, self._leg_quotes(o.legs, tradable=True), now, sess))
 
     # ---- event handling ----------------------------------------------------
     def _names_lots(self, fill) -> Optional[Order]:
@@ -1801,13 +1896,13 @@ class Exchange:
         self._orders_after_feed(quotes, now, sess)
         active_symbols = {o.symbol for o in self.engine.orders.values() if o.status in (m.WORKING, m.PARTIAL)}
         for q in quotes:
-            if q.symbol in active_symbols:
+            if q.symbol in active_symbols and not q.stale:  # never fill against a stale quote
                 self._handle(self.engine.on_quote(q, now, "regular" if is_crypto(q.symbol) else sess))
         changed = {q.symbol for q in quotes}
         for sym in sorted(active_symbols):  # a set's order changes with the hash seed; fills must not
             c = parse_option(sym)
-            if c and c.underlying in changed and c.expiry_ts > now:
-                self._handle(self.engine.on_quote(self.quote(sym), now, sess))
+            if c and c.underlying in changed and c.expiry_ts > now and (oq := self._tradable(self.quote(sym))):
+                self._handle(self.engine.on_quote(oq, now, sess))
         self._process_expirations(now, prev_tick)
         self._settle_day_start(now)
         self.lifecycle.after_step(now)  # margin calls and liquidation

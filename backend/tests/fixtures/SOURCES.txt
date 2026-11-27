@@ -31,3 +31,11 @@ alpaca_crypto/bars.json              docs.alpaca.markets/us/reference/cryptobars
 alpaca_crypto/asset_btc.json         docs.alpaca.markets/us/docs/crypto-trading.md (sample crypto asset object, verbatim)
 alpaca_crypto/stream.json            docs.alpaca.markets/us/docs/real-time-crypto-pricing-data.md and
                                      streaming-market-data.md (each message verbatim; grouped into one file by kind)
+alpaca/corporate_actions_examples.json
+                                 docs.alpaca.markets/us/reference/corporateactions-1.md (page updated 2026-05-27,
+                                 read 2026-11-24): the `example` block of every record schema, verbatim, assembled
+                                 into the corporate_actions_resp shape (partial_calls and reorganizations have no
+                                 example on the page and are absent). Tests edit symbols and dates of copies only.
+Tests in test_provider_actions.py also build responses from the files above at run time (option contracts
+from the option_contracts.json row, 1-minute and daily bars from the stock_bars.json row, snapshots from
+stock_snapshots.json) by changing symbols, dates and prices only; the field names and shapes are the documented ones.

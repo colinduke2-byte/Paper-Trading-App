@@ -54,7 +54,52 @@ def quote_row(ex: Exchange, symbol: str) -> Optional[dict]:
     if q.prev_close:
         row["change"] = float(q.last - q.prev_close)
         row["change_pct"] = float((q.last - q.prev_close) / q.prev_close * 100)
+    note = ex.feed.quote_note(symbol) if ex.is_stock(symbol) else None
+    if note:  # a live feed explains a one-sided book or a price that is not from today
+        row.update(stale=note["stale"], note=note["note"])
     return row
+
+
+def symbol_rows(ex: Exchange, q: str, limit: int, asset_class: str = "") -> list:
+    info = ex.feed.symbols()
+    if asset_class:
+        info = {s: i for s, i in info.items() if ex.asset_class(s) == asset_class}
+    row = lambda s: {"symbol": s, "name": info[s]["name"], "sector": info[s].get("sector", ""),
+                     "type": info[s].get("type", "stock"), "asset_class": ex.asset_class(s)}
+    q = q.upper().strip()
+    if not q:
+        # Called without the exchange lock: watchlists, positions and orders only order the list, so a
+        # change while they are read just drops that ordering (alphabetical instead); nothing is written.
+        try:
+            first = [s for wl in list(ex.watchlists.values()) for s in list(wl)]
+            for a in list(ex.accounts.values()):
+                first += [(parse_option(s).underlying if parse_option(s) else s) for s in list(a.lots)]
+            first += [o.symbol for o in ex.engine.active_orders()]
+        except RuntimeError:  # a dict or list changed size while it was read
+            first = []
+        picked = [s for s in dict.fromkeys(first) if s in info][:limit]
+        seen = set(picked)
+        rest = sorted(s for s in info if s not in seen)[:max(limit - len(picked), 0)]
+        return [row(s) for s in picked + rest]
+    # exact symbol, then symbols starting with q, then symbols containing it, then company names
+    ranked = []
+    for s, i in info.items():
+        name = (i.get("name") or "").upper()
+        if s == q:
+            rank = 0
+        elif s.startswith(q):
+            rank = 1
+        elif q in s:
+            rank = 2
+        elif name.startswith(q):
+            rank = 3
+        elif q in name:
+            rank = 4
+        else:
+            continue
+        ranked.append((rank, len(s), s))
+    ranked.sort()
+    return [row(s) for _, _, s in ranked[:limit]]
 
 
 def order_row(o) -> dict:
@@ -207,7 +252,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 "mode": ctx.mode, "replay": rp.status() if rp is not None else None, "ui_stale": ui_stale,
                 # Alpaca was configured but failed at start-up, so the live exchange runs on simulated data
                 "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None),
-                "storage": storage_brief(ctx.live)}
+                "storage": storage_brief(ctx.live),
+                "day_roll_waiting": ex.lifecycle.waiting}  # set while the start of a day waits for corporate actions
 
     def messages(ex: Exchange) -> list:
         """One tick message per WebSocket client, built while the caller holds the exchange lock."""
@@ -374,13 +420,13 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     @app.get("/api/symbols")
     @unlocked(MARKET_DATA)
-    def symbols(q: str = "", asset_class: str = ""):
+    def symbols(q: str = "", limit: int = Query(50, ge=1, le=500), asset_class: str = ""):
+        """Search every symbol; return at most `limit` rows. An empty query gives a short useful list
+        (watchlists, positions and open orders first, then the rest alphabetically), not every listing.
+        `asset_class` (stock, crypto) narrows it (PR 14). Runs without the exchange lock (symbol search must
+        answer while it is busy); see symbol_rows."""
         ex = ctx.ex
-        q = q.upper().strip()
-        rows = [{"symbol": s, "name": i["name"], "sector": i["sector"], "type": i.get("type", "stock"),
-                 "asset_class": ex.asset_class(s)} for s, i in ex.feed.symbols().items()
-                if (not q or q in s or q in i["name"].upper()) and (not asset_class or ex.asset_class(s) == asset_class)]
-        return sorted(rows, key=lambda r: (not r["symbol"].startswith(q), r["symbol"]))
+        return symbol_rows(ex, q, limit, asset_class)
 
     @app.get("/api/quotes")
     @unlocked(MARKET_DATA)

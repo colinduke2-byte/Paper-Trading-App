@@ -298,6 +298,8 @@ class SyntheticFeed(MarketDataProvider):
             for s, raw in data["quotes"].items():
                 kw = {k: (Decimal(v) if k not in ("symbol", "ts", "trade") and v is not None else v) for k, v in raw.items()}
                 kw["trade"] = False
+                kw.pop("stale", None)  # never saved as stale; and not a Decimal field
+                kw.pop("provider_book", None)  # simulated quotes never carry a provider's book
                 quotes[s] = Quote(**kw)
             if set(quotes) != set(self.info):
                 # A market saved before the crypto pairs existed: keep the freshly made coins.

@@ -42,6 +42,13 @@ class Quote:
     high: Optional[Decimal] = None
     low: Optional[Decimal] = None
     prev_close: Optional[Decimal] = None
+    # True when the feed says this quote is too old to trade against (thresholds per session state are the
+    # feed's; see docs/DATA_PROVIDERS.md, "Quote age"). Simulated feeds never set it.
+    stale: bool = False
+    # True when bid and ask are a data provider's real book, so an empty side (0) means nobody is quoting
+    # it: market and triggered stop orders on that side wait instead of walking a modelled book. Set only by
+    # live provider adapters; simulated and option-model quotes leave it False (they fill as they always did).
+    provider_book: bool = False
 
     @property
     def mid(self) -> Decimal:

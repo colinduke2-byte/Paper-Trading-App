@@ -63,7 +63,9 @@ export function PositionsTable({ positions, onSelect, onClose, onCloseStrategy }
   const row = (x: any, cls = "") => (
     <tr key={x.symbol} className={cls}>
       <td><button className="link" onClick={() => onSelect(x.underlying || x.symbol)}>{x.description}</button>
-        {x.asset_class === "crypto" && <span className="tag" title="Crypto: fully paid, trades 24/7">Crypto</span>}</td>
+        {x.asset_class === "crypto" && <span className="tag" title="Crypto: fully paid, trades 24/7">Crypto</span>}
+        {x.notices?.length ? <span className="tag" title={x.notices.map((n: any) => n.message).join("\n")}> corporate action</span> : null}
+        {x.price_note ? <span className="tag" title={x.price_note}>{x.price_source === "model" ? " model price" : " price note"}</span> : null}</td>
       <td className={"num " + tone(x.qty)}>{qty(x.qty)}</td>
       <td className="num">{price(x.avg_cost)}</td>
       <td className="num" title={x.price_unavailable ? "No price has arrived for this position yet" : undefined}>{x.mark == null ? "–" : price(x.mark)}</td>

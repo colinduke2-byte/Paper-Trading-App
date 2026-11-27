@@ -344,6 +344,9 @@ def test_no_route_asks_the_data_provider_while_holding_the_lock():
     ex = Exchange(feed, SimClock(ts(t)), session_mode="us")
     aid = ex.create_account("Margin", "margin").id
     feed.apply_snapshots(json.loads(raw("alpaca/stock_snapshots.json"), parse_float=D))
+    # The saved snapshot's quote is from 2022, which counts as stale (market orders are refused): a fresh one
+    feed._on_stream([{"T": "q", "S": "AAPL", "bp": D("172.60"), "bs": 1, "ap": D("172.70"), "as": 1, "t": t},
+                     {"T": "t", "S": "AAPL", "p": D("172.65"), "s": 100, "t": t}])
     ex.tick()
     app = create_app(ex, run_loop=False)
     c = TestClient(app, raise_server_exceptions=False)
