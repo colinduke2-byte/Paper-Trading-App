@@ -378,7 +378,8 @@ class LifecycleManager:
             res = splits.split_stock(a, act, price, now)
             if res:
                 self._event(a, "split", res["message"])
-            for note in splits.split_options(a, act, marks, now, self.next_fill_id):
+            adjusted = price * Decimal(act.old) / Decimal(act.new) if price else None
+            for note in splits.split_options(a, act, marks, now, self.next_fill_id, adjusted):
                 if "fill" in note:
                     self.on_fill(a, note["fill"])
                     self.ex.events.append({"type": "fill", "account_id": a.id, "fill": note["fill"]})
