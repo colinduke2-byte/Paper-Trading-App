@@ -62,21 +62,40 @@ def order_row(o) -> dict:
     return row
 
 
+def create_default_accounts(ex: Exchange) -> None:
+    ex.create_account("Margin account", "margin", Decimal("100000"))
+    ex.create_account("Cash account", "cash", Decimal("25000"))
+
+
 def default_exchange() -> Exchange:
     from ..core import envfile
     from ..marketdata.config import attach, select_feed
+    from ..storage.lock import DataDirLock
     envfile.load_settings()  # the .env file first, so every setting below honours it
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
+    lock = DataDirLock(data_dir).acquire()  # raises DataDirLocked when another server uses this folder
     # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
     sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
     ex = Exchange(sel.feed, data_dir=sel.data_dir, session_mode=sel.session_mode)
+    ex.data_lock = lock
     attach(sel, ex)
-    if not ex.load() or not ex.accounts:
-        ex.create_account("Margin account", "margin", Decimal("100000"))
-        ex.create_account("Cash account", "cash", Decimal("25000"))
+    loaded = ex.load()
+    recovering = ex.store is not None and ex.store.blocked  # damaged or newer state: wait for the user's choice
+    if not recovering and (not loaded or not ex.accounts):
+        create_default_accounts(ex)
     if not ex.watchlists:
         ex.watchlists = {"Main": sel.watchlist or ["MKTX", "TECX", "NVLX", "ORBT", "PXLR", "AUTO", "FNBK", "ENRG", "RETL", "STRM"]}
     return ex
+
+
+def storage_brief(live: Exchange) -> Optional[dict]:
+    """Save health of the live data folder, for every status message (details: /api/data/status)."""
+    st = live.store
+    if st is None:
+        return None
+    r = st.recovery
+    return {"last_save": st.last_save, "saving_failed": st.error is not None, "error": st.error,
+            "recovery": {"kind": r["kind"], "reason": r["reason"]} if r else None}
 
 
 class AppContext:
@@ -177,7 +196,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 "paper": True, **plain(ex.feed.status_info()), "price_note": price_source(ex.feed)["price_note"],
                 "mode": ctx.mode, "replay": rp.status() if rp is not None else None, "ui_stale": ui_stale,
                 # Alpaca was configured but failed at start-up, so the live exchange runs on simulated data
-                "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None)}
+                "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None),
+                "storage": storage_brief(ctx.live)}
 
     def messages(ex: Exchange) -> list:
         """One tick message per WebSocket client, built while the caller holds the exchange lock."""
@@ -236,7 +256,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             idle = work["saving"] is None or work["saving"].done()
             # The last statement that can fail: once save_plan() has reset `dirty`, the plan must reach
             # the caller, or the changes it holds are not written until the next change.
-            files = ex.save_plan() if idle else []  # still dirty next turn when the last write is not done
+            files = ex.save_plan() if idle else None  # still dirty next turn when the last write is not done
         finally:
             ctx.lock.release()
         wait, took = got - asked, time.monotonic() - got
@@ -299,6 +319,9 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         for pool in (work["tick"], work["save"]):  # let a turn or a write that has started finish
             await running.run_in_executor(None, pool.shutdown)
         await running.run_in_executor(None, shutdown_save)
+        lock = getattr(ctx.live, "data_lock", None)  # the data-directory lock (storage.lock), released last
+        if lock is not None:
+            lock.release()
 
     app = FastAPI(title="PaperDesk", lifespan=lifespan)
     ctx.app = app
@@ -651,5 +674,11 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
 def app_factory() -> FastAPI:
     from ..core import envfile
+    from ..storage.lock import DataDirLocked
     envfile.load_settings()  # before anything reads a setting (data folder, seed, feed, access, UI folder)
-    return create_app()
+    try:
+        return create_app()
+    except DataDirLocked as e:
+        import sys
+        print(f"PaperDesk did not start: {e}", file=sys.stderr)
+        raise SystemExit(1) from None

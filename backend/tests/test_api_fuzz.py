@@ -110,12 +110,23 @@ def baselines(aid, oid, jid, calls):
         ("DELETE", "/api/alert-rules/ALID"): None,
         ("POST", "/api/notifications/read"): {"account_id": aid, "ids": ["n1"], "read": True},
         ("DELETE", "/api/notifications"): None,
+        # data and backups (routes_data.py); this exchange has no data folder, so most answer 409
+        ("POST", "/api/data/backups"): None,
+        ("DELETE", "/api/data/backups/BKNAME"): None,
+        ("POST", "/api/data/restore/preview"): {"backup": "paperdesk-manual-20261124T000000Z.zip"},
+        ("POST", "/api/data/restore/apply"): {"token": "t"},
+        ("POST", "/api/data/accounts/import/preview"): {"format": "paperdesk-account", "format_version": 1},
+        ("POST", "/api/data/accounts/import/apply"): {"token": "t", "name": "n"},
+        ("POST", "/api/data/recovery/restore"): {"backup": "paperdesk-manual-20261124T000000Z.zip"},
+        ("POST", "/api/data/recovery/fresh"): None,
+        ("POST", "/api/data/recovery/quit"): None,
     }
 
 
 def _template(path, aid, oid, jid):
     return path.replace(aid, "{aid}").replace(oid, "{oid}").replace(jid, "{jid}").replace("/Fuzz", "/{name}") \
-        .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym}")
+        .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym}") \
+        .replace("/backups/BKNAME", "/backups/{name}")
 
 
 def variants(body):

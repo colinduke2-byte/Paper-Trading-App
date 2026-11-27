@@ -37,7 +37,12 @@ http://127.0.0.1:8000. The first start creates a virtual environment and install
 `backend/pyproject.toml`; later starts reuse it until `pyproject.toml` changes.
 
 The first start creates two accounts (a 100,000 margin account and a 25,000 cash account). State is saved in
-`backend/data/` and survives restarts.
+`backend/data/` and survives restarts. PaperDesk backs it up every hour (keeping 24
+hourly and 14 daily backups) and before every reset, delete or restore; **Data** in the top bar shows the save
+status and lets you download a backup of everything, restore one (with a preview of what changes) and move one
+account to another installation. If the saved state cannot be read, nothing is overwritten: the app offers to
+restore the latest backup, start fresh or quit. Only one server can use a data folder at a time. Details:
+[docs/STATE_FORMAT.md](docs/STATE_FORMAT.md).
 
 > **By default there is no login.** Anyone who can reach the port can trade and delete your paper accounts,
 > so PaperDesk listens on `127.0.0.1` only. To use it from your phone, turn on LAN mode (below), which adds a
@@ -47,6 +52,7 @@ The first start creates two accounts (a 100,000 margin account and a 25,000 cash
 |---|---|---|
 | `PAPERDESK_SESSIONS` | `always` (`us` with real data) | `always`: the simulated market never closes. `us`: follow US market hours and holidays |
 | `PAPERDESK_DATA` | `backend/data` | Where state is saved. Set it in the environment: the server ignores it in `.env` |
+| `PAPERDESK_BACKUP_INTERVAL` | `3600` | Seconds between automatic backups; `0` turns them off (`PAPERDESK_BACKUP_KEEP_HOURLY` 24, `PAPERDESK_BACKUP_KEEP_DAILY` 14) |
 | `PAPERDESK_SEED` | `7` | Seed for the simulated price history. Set it in the environment, not `.env` |
 | `PORT` | `8000` | Port (`run.sh`, `run.bat`, Docker). In `.env` it is read by Docker only |
 | `HOST` | `127.0.0.1` | Bind address (`run.sh`, `run.bat`; `0.0.0.0` in LAN mode). A network address is refused without LAN mode. Only the Docker image sets `0.0.0.0`, inside the container |

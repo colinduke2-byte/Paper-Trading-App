@@ -10,6 +10,7 @@ import { Ticket, TicketSeed } from "./Ticket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
+import { DataDialog, SaveNotice } from "./DataBackups";
 import { HelpDialog } from "./Help";
 import { api, dateTime, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
 import { useSignOutAction } from "./Login";
@@ -37,6 +38,7 @@ export default function App() {
   const [dialog, setDialog] = useState<null | "new" | "reset" | "delete">(null);
   const [replayPicker, setReplayPicker] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dataOpen, setDataOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const small = useSmallScreen();
   const [screen, setScreen] = useState<Screen>("Chart"); // the view shown on a small screen
@@ -199,6 +201,7 @@ export default function App() {
     ...(accounts.length > 1 && accountId ? [{ label: "Delete account", title: "Delete this paper account and its history", onClick: () => setDialog("delete") }] : []),
     ...(status?.replay ? [] : [{ label: "Replay", title: "Practise on a recorded trading session", onClick: () => setReplayPicker(true) }]),
     ...(accountId ? [{ label: "Settings", title: "Account rules: settlement, day trading, interest, margin calls", onClick: () => setSettingsOpen(true) }] : []),
+    { label: "Data", title: "Data and backups: save status, backups, restore, account export and import", onClick: () => setDataOpen(true) },
     { label: "Keyboard shortcuts", title: "Keyboard shortcuts (?)", onClick: () => window.dispatchEvent(new Event(SHORTCUTS_EVENT)) },
     { label: "Help", title: "How PaperDesk works", onClick: () => setHelpOpen(true) },
     ...(signOut ? [{ label: signOut.label, onClick: signOut.onClick }] : []),
@@ -223,6 +226,7 @@ export default function App() {
       {status?.ui_stale && <div className="notice wide" role="status">This page was built from older sources than the ones in frontend/src. Run "npm run build" in the frontend folder and reload to see the current version.</div>}
     </>
   ) : null;
+  const saveNotice = <SaveNotice storage={status?.storage} />;
   const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
   const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
   const mainTabs = (
@@ -268,6 +272,10 @@ export default function App() {
           onClose={() => setAlertBuilder(null)} onSaved={(m) => { setAlertBuilder(null); notify(m); setRefreshKey((k) => k + 1); }} />
       )}
       {replayPicker && <ReplayPicker onClose={() => setReplayPicker(false)} onStarted={(st, msg) => { setReplayPicker(false); setStatus(st); notify(msg); }} />}
+      {dataOpen && (
+        <DataDialog accountId={accountId} onClose={() => setDataOpen(false)} notify={notify}
+          onRestored={async () => { const list = await loadAccounts(); if (!list.find((a: any) => a.id === accountId)) setAccountId(list[0]?.id || ""); setRefreshKey((k) => k + 1); }} />
+      )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {settingsOpen && accountId && (
         <SettingsDialog accountId={accountId} summary={summary} onClose={() => setSettingsOpen(false)} onSaved={(m) => notify(m)} />
@@ -283,7 +291,7 @@ export default function App() {
     return (
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
-        notice={status?.live_unavailable && marginNotice ? <div className="m-notices">{feedNotice}{marginNotice}</div> : status?.live_unavailable ? feedNotice : marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        notice={(status?.live_unavailable || status?.storage?.saving_failed) ? <div className="m-notices">{status?.storage?.saving_failed && saveNotice}{status?.live_unavailable && feedNotice}{marginNotice}</div> : marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
         ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
         replayBar={status?.replay ? replayBar : null} mode={mode}>
         {overlays}
@@ -311,6 +319,7 @@ export default function App() {
         </div>
       </header>
       {replayBar}
+      {saveNotice}
       {feedNotice}
       {marginNotice}
       <main key={mode}>

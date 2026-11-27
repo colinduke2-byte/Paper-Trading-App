@@ -151,9 +151,18 @@ UNLOCKED_READS = {
     "/api/research/news", "/api/research/economic-calendar", "/api/research/earnings-calendar",
     "/api/research/statements/{symbol}",
     "/api/chartstate", "/api/chartstate/drawings/{sym}",  # chart settings: their own file and lock, no exchange state
+    # backups (PR 19): file I/O must not run under the lock; they take ctx.locked() only to serialise
+    "/api/data/status", "/api/data/backups", "/api/data/backups/{name}", "/api/data/export",
+    "/api/data/accounts/{aid}/export", "/api/data/recovery",
 }
 SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_every_changing_route_answers_busy...
     ("POST", "/api/replay/start"), ("POST", "/api/replay/step"), ("POST", "/api/replay/seek"), ("POST", "/api/replay/exit"),
+    # backups and restore: serialise or replace state under ctx.locked() in DataService, write files outside it.
+    # Proven by test_data_routes_answer_busy_and_never_block_the_event_loop_while_the_lock_is_stuck.
+    ("POST", "/api/data/backups"), ("DELETE", "/api/data/backups/{name}"), ("POST", "/api/data/restore/preview"),
+    ("POST", "/api/data/restore/apply"), ("POST", "/api/data/accounts/import/preview"),
+    ("POST", "/api/data/accounts/import/apply"), ("POST", "/api/data/recovery/restore"),
+    ("POST", "/api/data/recovery/fresh"), ("POST", "/api/data/recovery/quit"),
 }
 NO_EXCHANGE_STATE = {  # the session store and the chart-state file have their own locks
     ("POST", "/api/auth/login"), ("POST", "/api/auth/logout"),
@@ -217,6 +226,9 @@ def test_every_changing_route_answers_busy_while_the_lock_is_stuck(monkeypatch, 
                           params={"account_id": sandbox})
             if path == "/api/replay/start":  # refused before it needs the lock; checked without a replay below
                 assert r.status_code == 409
+                continue
+            if path.startswith("/api/data/"):  # refused during a replay; checked without one in the data test
+                assert r.status_code in (404, 409, 503), f"{method} {path} answered {r.status_code}"
                 continue
             assert r.status_code == 503 and r.json()["busy"] is True and r.headers["retry-after"] == "1", \
                 f"{method} {path} answered {r.status_code} {r.text[:200]} while the lock was held"
@@ -614,34 +626,39 @@ def test_a_turn_that_fails_after_the_replay_advanced_does_not_run_the_replay_fas
 
 
 def test_snapshot_is_taken_in_memory_and_an_older_one_never_overwrites_a_newer_one(tmp_path):
+    # Merged with PR 19: a plan is a storage.store.SavePlan (state document + segment lines), not file texts.
     ex, feed, clock = make_exchange(str(tmp_path))
     a = ex.create_account("t", "margin", D("100000"))
     first = ex.save_plan(force=True)
     assert not os.path.exists(tmp_path / "state.json"), "save_plan() must not touch the disk"
-    assert [name for name, _, _ in first] == ["state.json"] and not ex.dirty
-    # the snapshot is text: later changes to live state cannot leak into it
+    assert first.state is not None and not ex.dirty
+    # the snapshot is bytes: later changes to live state cannot leak into it
     ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 10})
-    assert json.loads(first[0][1])["orders"] == [] and ex.dirty
+    written = first.state + b"".join(line for seg in first.segments for line in seg.lines)
+    assert b"ABC" not in written
+    assert ex.dirty
     second = ex.save_plan()
-    ex.write_plan(second)
-    ex.write_plan(first)  # a slow writer arriving late
-    saved = json.loads((tmp_path / "state.json").read_text())
-    assert len(saved["orders"]) == 1 and len(saved["accounts"][0]["fills"]) == 1
-    assert ex.save_plan() == []  # nothing changed, nothing to write
-    ex.save(force=True)
-    assert json.loads((tmp_path / "state.json").read_text()) == saved
+    assert ex.write_plan(second)
+    assert ex.write_plan(first)  # a slow writer arriving late: skipped
+    back = Exchange(feed, clock, data_dir=str(tmp_path))
+    assert back.load()
+    assert len(back.engine.orders) == 1 and len(back.accounts[a.id].fills) == 1
+    assert ex.save_plan() is None  # nothing changed, nothing to write
+    assert ex.save(force=True)
+    again = Exchange(feed, clock, data_dir=str(tmp_path))
+    assert again.load() and again.to_document()["orders"] == back.to_document()["orders"]
 
 
 def test_a_failed_write_leaves_the_exchange_dirty_so_the_next_save_retries(tmp_path, monkeypatch):
+    from app.storage import fsutil
     ex, feed, clock = make_exchange(str(tmp_path))
     ex.create_account("t", "margin", D("100000"))
     files = ex.save_plan()
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(lambda path, text: (_ for _ in ()).throw(OSError("disk full"))))
-    with pytest.raises(OSError):
-        ex.write_plan(files)
-    assert ex.dirty
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", lambda path, data: (_ for _ in ()).throw(OSError("disk full")))
+    assert ex.write_plan(files) is False  # PR 19: a failed write answers False and shows in the save status
+    assert ex.dirty and ex.store.status()["saving_failed"]
     monkeypatch.undo()
-    ex.save()
+    assert ex.save(force=True)
     assert json.loads((tmp_path / "state.json").read_text())["accounts"]
 
 
@@ -650,12 +667,12 @@ def test_load_changes_nothing_when_the_file_is_unusable(tmp_path):
     a = ex.create_account("t", "margin", D("100000"))
     ex.save(force=True)
     data = json.loads((tmp_path / "state.json").read_text())
-    del data["seq"]["expiry"]
+    data["accounts"][0]["starting_cash"] = "lots"  # PR 19 migrates a missing counter; this cannot be repaired
     (tmp_path / "state.json").write_text(json.dumps(data))
     ex2, _, _ = make_exchange(str(tmp_path))
     keep = ex2.create_account("mine", "cash", D("5"))
-    with pytest.raises(KeyError):
-        ex2.load()
+    assert ex2.load() is False  # PR 19: a damaged file puts the store in recovery instead of raising
+    assert ex2.store.blocked
     assert list(ex2.accounts) == [keep.id] and a.id == keep.id  # still the account it had, not half of the file
 
 
@@ -799,23 +816,23 @@ def test_a_rolled_back_request_keeps_a_failed_write_mark():
 
 
 def test_a_failed_market_snapshot_write_is_retried_on_the_next_turn(tmp_path, monkeypatch):
+    from app.storage import fsutil
     ex = Exchange(SyntheticFeed(seed=3, now=T0), SimClock(T0), data_dir=str(tmp_path))
     ex.create_account("t", "margin", D("1000"))
     ex.tick()
     plan = ex.save_plan(force=True)
-    assert "market.json" in [name for name, _, _ in plan]
-    real = Exchange._write_text
+    assert plan.market is not None
+    real = fsutil.atomic_write_bytes
 
-    def full(path, text):
+    def full(path, data):
         raise OSError("disk full")
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(full))
-    with pytest.raises(OSError):
-        ex.write_plan(plan)
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(real))
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", full)
+    assert ex.write_plan(plan) is False
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", real)
     assert ex.dirty
-    again = ex.save_plan()  # no simulated time has passed
-    assert {name for name, _, _ in again} == {"state.json", "market.json"}
-    ex.write_plan(again)
+    again = ex.save_plan(force=True)  # no simulated time has passed; forced past the back-off of the failed save
+    assert again.state is not None and again.market is not None
+    assert ex.write_plan(again)
     assert os.path.exists(os.path.join(str(tmp_path), "market.json"))
 
 

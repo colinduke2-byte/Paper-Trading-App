@@ -1,0 +1,43 @@
+/* Data and backups dialog and the recovery screen (DataBackups.tsx). */
+.data-modal { width: 560px; max-width: calc(100vw - 24px); max-height: 90vh; overflow-y: auto; }
+.data-modal h4 { font-size: 12px; margin: 6px 0 4px; color: var(--text); }
+.data-modal p { overflow-wrap: anywhere; }
+.data-modal .small, .recovery .small { font-size: 11px; }
+.data-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+a.button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px; padding: 5px 10px; background: transparent; font-size: 12px; }
+a.button.sm { padding: 3px 8px; font-size: 11.5px; }
+a.button:hover { border-color: var(--accent); }
+a.button.disabled { opacity: .5; pointer-events: none; }
+.data-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.data-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.data-when { display: flex; flex-direction: column; min-width: 0; }
+.data-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+.data-preview { border: 1px solid var(--line); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--panel2); }
+.data-changes { margin: 0; padding-left: 18px; }
+.data-changes li[data-change=removed] { color: #ff9c99; }
+.data-changes li[data-change=added] { color: var(--up); }
+.data-status p { margin: 0 0 4px; }
+
+.recovery { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 560px); justify-content: center; align-content: center;
+  padding: 16px; background: var(--bg); box-sizing: border-box; }
+.recovery-card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px;
+  display: flex; flex-direction: column; gap: 12px; overflow-wrap: anywhere; }
+.recovery-card h1 { font-size: 20px; margin: 0; }
+.recovery-card p { margin: 0; }
+.recovery-choices { display: flex; flex-direction: column; gap: 8px; }
+.recovery-choices button { min-height: 44px; font-size: 15px; }
+.recovery .danger { border-color: #6b2a28; color: #ff9c99; }
+
+/* Phones: 40+ px touch targets and 16 px text in fields (the dialog also sits inside .m-shell, which adds 44 px). */
+@media (max-width: 899px) {
+  .data-modal { max-height: none; }
+  .data-modal button, .data-modal a.button, .recovery button { min-height: 44px; }
+  .data-modal input { font-size: 16px; }
+  .data-buttons { width: 100%; }
+  .data-buttons > * { flex: 1; }
+  .data-actions > * { flex: 1 1 140px; }
+}
+.notice-stack { display: flex; flex-direction: column; }
+.m-shell > .notice-stack { grid-area: notice; }
+.m-shell > .notice-stack > .notice.wide { margin: 6px 8px 0; }
