@@ -8,12 +8,13 @@ news, financial statements and economic and earnings calendars; a live hub witho
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import Query
+from fastapi import Depends, HTTPException, Query, Request
 
 from ..core import calendar as cal
 from ..marketdata.config import wanted_symbols
 from ..marketdata.research import ResearchHub, envelope
 from ..core.errors import NotFound
+from .hardening import ClientRate
 
 MAX_CALENDAR_DAYS = 400
 
@@ -74,41 +75,57 @@ def register(app, ctx):
 
     hub()  # make a live stream follow open browser tabs from the start
 
+    rate = ClientRate()
+
+    def budget(request: Request) -> None:
+        """Requests that can reach a real provider are rate limited per client: each distinct request can cost
+        provider calls, and a GET can be triggered by any page the browser opens while the loopback bypass is on.
+        Simulated research (no provider) is not limited."""
+        h = hub()
+        if getattr(h, "alpaca", None) or getattr(h, "finnhub", None):
+            wait = rate.allow(request.client.host if request.client else "")
+            if wait:
+                secs = max(1, round(wait))
+                raise HTTPException(429, f"Too many research requests; try again in {secs} seconds.",
+                                    headers={"Retry-After": str(secs)})
+
+    limited = [Depends(budget)]
+
     @app.get("/api/research/sources")
     def sources():
         return hub().sources()
 
-    @app.get("/api/research/news")
+    @app.get("/api/research/news", dependencies=limited)
     def market_news(limit: int = Query(30, ge=1, le=100), category: Optional[str] = None):
         return ctx.plain(optional("market_news", "market news")(limit, category))
 
-    @app.get("/api/research/economic-calendar")
+    @app.get("/api/research/economic-calendar", dependencies=limited)
     def economic_calendar(start: Optional[str] = None, end: Optional[str] = None):
         s, e = window(start, end, 14, 45)
         return ctx.plain(optional("economic_calendar", "an economic calendar")(s, e))
 
-    @app.get("/api/research/earnings-calendar")
+    @app.get("/api/research/earnings-calendar", dependencies=limited)
     def earnings_calendar(start: Optional[str] = None, end: Optional[str] = None):
         s, e = window(start, end, 14, 75)
         return ctx.plain(optional("earnings_calendar", "a market-wide earnings calendar")(s, e))
 
-    @app.get("/api/research/statements/{symbol}")
+    @app.get("/api/research/statements/{symbol}", dependencies=limited)
     def statements(symbol: str):
         return ctx.plain(optional("statements", "financial statements")(symbol_of(symbol)))
 
-    @app.get("/api/research/news/{symbol}")
+    @app.get("/api/research/news/{symbol}", dependencies=limited)
     def news(symbol: str, limit: int = Query(20, ge=1, le=50)):
         return ctx.plain(hub().news(symbol_of(symbol), limit))
 
-    @app.get("/api/research/calendar/{symbol}")
+    @app.get("/api/research/calendar/{symbol}", dependencies=limited)
     def calendar(symbol: str):
         return ctx.plain(hub().calendar(symbol_of(symbol)))
 
-    @app.get("/api/research/corporate-actions/{symbol}")
+    @app.get("/api/research/corporate-actions/{symbol}", dependencies=limited)
     def corporate_actions(symbol: str, start: Optional[str] = None, end: Optional[str] = None,
                           types: Optional[str] = None):
         return ctx.plain(hub().corporate_actions(symbol_of(symbol), parse_day(start, "start"), parse_day(end, "end"), types))
 
-    @app.get("/api/research/fundamentals/{symbol}")
+    @app.get("/api/research/fundamentals/{symbol}", dependencies=limited)
     def fundamentals(symbol: str):
         return ctx.plain(hub().fundamentals(symbol_of(symbol)))

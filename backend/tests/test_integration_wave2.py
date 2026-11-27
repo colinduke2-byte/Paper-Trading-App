@@ -373,3 +373,27 @@ def test_same_tick_fills_and_expiry_settlements_do_not_depend_on_the_hash_seed()
         runs.append(json.loads(r.stdout.strip().splitlines()[-1]))
     assert len(runs[0]) > 20, "the scenario did not produce the fills it was written for"
     assert runs[0] == runs[1] == runs[2]
+
+
+# ---- cash-account fix (PR 28): a one-cancels-other pair on two symbols ------------------------------------
+
+def test_a_cash_account_oco_sale_does_not_pay_for_its_other_member():
+    """Found by the property test on main: an OCO of a stop buy (triggered at once) and a limit sale of another
+    contract passed the check because the sale's 800 counted against the buy's 608; cash ended at -163.30."""
+    from decimal import Decimal as Dec
+    from test_orders_review import acct, at_expiry, NEAR, FAR, make_exchange as mk, move as mv
+    ex, feed, clock = mk()
+    a = acct(ex, "cash", "1000")
+    mv(ex, feed, clock, "ABC", Dec("94.23"))
+    ex.submit(a, {"symbol": "ABC261211C00090000", "side": "buy", "qty": 1})
+    at_expiry(ex, feed, clock, Dec("100.07"), NEAR)
+    cash = ex.account(a).cash
+    assert Dec("0") < cash < Dec("600")
+    import pytest
+    from app.exchange import OrderRejected
+    with pytest.raises(OrderRejected):
+        ex.submit(a, {"oco": [{"symbol": "ABC261211C00095000", "side": "buy", "qty": 1, "tif": "gtc", "type": "stop", "stop_price": "6"},
+                              {"symbol": "ABC261211C00090000", "side": "sell", "qty": 1, "tif": "gtc", "type": "limit", "limit_price": "8"}]})
+    assert ex.account(a).cash == cash
+    at_expiry(ex, feed, clock, Dec("60.00"), FAR)
+    assert ex.account(a).cash >= 0

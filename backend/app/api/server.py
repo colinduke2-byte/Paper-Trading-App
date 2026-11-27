@@ -23,7 +23,7 @@ from ..options import chain as optchain
 from ..core.assets import asset_class
 from ..options.symbology import describe, parse as parse_option
 from ..core.errors import NotFound
-from . import ui_build
+from . import hardening, ui_build
 from . import locking
 from .locking import unlocked
 
@@ -121,6 +121,10 @@ def default_exchange() -> Exchange:
     envfile.load_settings()  # the .env file first, so every setting below honours it
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
     lock = DataDirLock(data_dir).acquire()  # raises DataDirLocked when another server uses this folder
+    hardening.private_dir(data_dir)
+    from ..marketdata.config import project_root
+    for warning in hardening.permission_warnings([data_dir, str(project_root() / ".env")]):
+        print(f"warning: {warning}")
     # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
     # PAPERDESK_CLOCK_START (tests and demos, simulated prices only): run the clock from another time,
     # for example a weekend, at normal speed.
@@ -266,8 +270,10 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                        "quotes": {s: r for s in list(sub["symbols"]) if (r := quote_row(ex, s))}}
                 acct = sub.get("account")
                 if isinstance(acct, str) and acct in ex.accounts:
-                    msg["account"] = plain(ex.summary(acct))
-                    msg["positions"] = plain(ex.positions(acct))
+                    summary = ex.safe_summary(acct)  # an account that cannot be valued is sent flagged
+                    msg["account"] = plain(summary)
+                    if not summary.get("broken"):
+                        msg["positions"] = plain(ex.positions(acct))
                 msg["events"] = [plain(e) for e in events if e.get("account_id") in (None, acct)]
             except Exception as e:  # one client's fault must not cost the others their message
                 metrics["errors"] += 1
@@ -280,9 +286,11 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         """Send what messages() built. Never called with the exchange lock held."""
         for ws, msg in out:
             try:
-                await ws.send_json(msg)
-            except Exception:
+                await asyncio.wait_for(ws.send_json(msg), timeout=hardening.WS_SEND_TIMEOUT)
+            except Exception:  # gone, or too slow to keep up: drop it so it cannot hold up the others
                 clients.pop(ws, None)
+                with contextlib.suppress(Exception):
+                    await ws.close(code=hardening.WS_CLOSE_POLICY)
 
     # The tick runs on its own thread, so the event loop never waits for the exchange lock, and state
     # files are written by a second thread, so no thread writes to disk while holding it.
@@ -576,7 +584,8 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     @app.get("/api/accounts")
     def accounts():
         ex = ctx.ex
-        return [plain(ex.summary(a)) for a in ex.accounts]
+        # An account that cannot be valued is listed flagged ("broken": true) instead of failing the whole list.
+        return [plain(ex.safe_summary(a)) for a in list(ex.accounts)]
 
     @app.post("/api/accounts")
     def create_account(body: dict = Body(...)):
@@ -703,17 +712,27 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     # ---- streaming --------------------------------------------------------------
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
+        addr = ws.client.host if ws.client else ""
+        if len(clients) >= hardening.MAX_WS_CONNECTIONS or \
+                sum(1 for s in list(clients.values()) if s.get("addr") == addr) >= hardening.MAX_WS_PER_ADDRESS:
+            await ws.close(code=hardening.WS_CLOSE_POLICY, reason="too many open streams")  # refuses the handshake
+            return
         await ws.accept()
-        clients[ws] = {"symbols": [], "account": None}
+        sub = {"symbols": [], "account": None, "addr": addr}
+        clients[ws] = sub
         try:
             while True:
-                msg = await ws.receive_json()
-                if isinstance(msg, dict):
-                    if isinstance(msg.get("symbols"), list):
-                        clients[ws]["symbols"] = [str(s).upper()[:32] for s in msg["symbols"][:300]]
-                    if "account" in msg:  # an id string; anything else would break the broadcast for everyone
-                        clients[ws]["account"] = msg["account"] if isinstance(msg["account"], str) else None
+                message = await ws.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+                try:  # size, JSON shape and field types are checked; a bad message closes this stream only
+                    hardening.ws_update(message.get("text"), sub)
+                except hardening.BadMessage as e:
+                    await ws.close(code=e.code, reason=str(e))
+                    break
         except (WebSocketDisconnect, Exception):
+            pass
+        finally:
             clients.pop(ws, None)
 
     # ---- extension routes ----------------------------------------------------------

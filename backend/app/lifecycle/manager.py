@@ -274,9 +274,11 @@ class LifecycleManager:
                 break  # wait for the feed; a later tick retries from the same day
             acts, notices = fetched
             for a in list(self.ex.accounts.values()):
-                self._accrue(a, d)
-                if nxt.month != d.month:
-                    self._post_accruals(a, now, d)
+                def accrue(a=a, d=d, nxt=nxt):
+                    self._accrue(a, d)
+                    if nxt.month != d.month:
+                        self._post_accruals(a, now, d)
+                self.ex.isolated(a, accrue, "interest accrual")  # one bad account must not stop the day roll
             acts = [x for x in acts if not is_crypto(x.symbol)]  # crypto has no corporate actions here (PR 14)
             self._start_of_day(nxt, sorted(acts, key=lambda x: (x.kind != SPLIT, x.ex_date, x.symbol)), now)
             self._snapshot_held(nxt, now)
@@ -786,55 +788,59 @@ class LifecycleManager:
     # ---- margin calls ----------------------------------------------------------------------
     def after_step(self, now: float) -> None:
         for a in list(self.ex.accounts.values()):
-            if a.type != "margin" or (not a.lots and a.life.margin_call_since is None):
-                continue
-            pos, marks, eq, maint = self._state(a)
-            life = a.life
-            if life.margin_call_since is not None:
-                self._count_grace(a, now)
-            missing = self._missing_prices(pos, marks)
-            if missing:  # cannot value the account: no call is started, cleared or enforced
-                if life.prices_missing != missing:
-                    life.prices_missing = missing
-                    self._event(a, "prices_unavailable", f"Margin checks paused: no price for {', '.join(missing)}.")
-                continue
-            life.prices_missing = []
-            checks, liq_holds = self._holds(pos, a)
-            if checks:  # a known split is not applied yet: the numbers would be wrong, so do not act on them
-                key = "; ".join(checks)
-                if self._paused.get(a.id) != key:
-                    self._paused[a.id] = key
-                    self._event(a, "margin_paused", f"Margin checks paused: {key}.")
-                continue
-            self._paused.pop(a.id, None)
-            if pos and eq < maint:
-                life.margin_call_ok_since = None
-                if life.margin_call_since is None:
-                    life.margin_call_since, life.margin_call_deficit = now, maint - eq
-                    life.margin_call_counted, life.margin_call_last = 0.0, now
-                    grace = cfg.number(a.settings, "margin_call_grace_hours").normalize()
-                    tail = (f" Positions will be liquidated if it is not met within {grace:f} hours of open "
-                            f"market time while PaperDesk is running."
-                            if a.settings["margin_call_liquidation"] else "")
-                    self._log(a, now, "margin_call",
-                              f"Margin call: equity {_fmt(eq)} is below the {_fmt(maint)} maintenance requirement "
-                              f"(deficit {_fmt(maint - eq)}).{tail}")
-                elif (a.settings["margin_call_liquidation"] and self.ex.session(now) == "regular"
-                      and life.margin_call_counted >= self._grace_seconds(a)):
-                    if liq_holds:
-                        if not life.liquidation_paused:
-                            life.liquidation_paused = True
-                            self._log(a, now, "liquidation", "Margin call liquidation paused: "
-                                      + "; ".join(liq_holds) + ". Close or adjust the position yourself if needed.")
-                    else:
-                        self.liquidate(a, now)
-            elif life.margin_call_since is not None:
-                if not pos or eq >= maint * (1 + CLEAR_BUFFER):
-                    self._clear_call(a, now, eq, maint)
-                elif life.margin_call_ok_since is None:
-                    life.margin_call_ok_since = now
-                elif now - life.margin_call_ok_since >= CLEAR_SECONDS:
-                    self._clear_call(a, now, eq, maint)
+            # One account that cannot be valued must not stop margin checks for the others.
+            self.ex.isolated(a, lambda: self._margin_step(a, now), "the margin check")
+
+    def _margin_step(self, a, now: float) -> None:
+        if a.type != "margin" or (not a.lots and a.life.margin_call_since is None):
+            return
+        pos, marks, eq, maint = self._state(a)
+        life = a.life
+        if life.margin_call_since is not None:
+            self._count_grace(a, now)
+        missing = self._missing_prices(pos, marks)
+        if missing:  # cannot value the account: no call is started, cleared or enforced
+            if life.prices_missing != missing:
+                life.prices_missing = missing
+                self._event(a, "prices_unavailable", f"Margin checks paused: no price for {', '.join(missing)}.")
+            return
+        life.prices_missing = []
+        checks, liq_holds = self._holds(pos, a)
+        if checks:  # a known split is not applied yet: the numbers would be wrong, so do not act on them
+            key = "; ".join(checks)
+            if self._paused.get(a.id) != key:
+                self._paused[a.id] = key
+                self._event(a, "margin_paused", f"Margin checks paused: {key}.")
+            return
+        self._paused.pop(a.id, None)
+        if pos and eq < maint:
+            life.margin_call_ok_since = None
+            if life.margin_call_since is None:
+                life.margin_call_since, life.margin_call_deficit = now, maint - eq
+                life.margin_call_counted, life.margin_call_last = 0.0, now
+                grace = cfg.number(a.settings, "margin_call_grace_hours").normalize()
+                tail = (f" Positions will be liquidated if it is not met within {grace:f} hours of open "
+                        f"market time while PaperDesk is running."
+                        if a.settings["margin_call_liquidation"] else "")
+                self._log(a, now, "margin_call",
+                          f"Margin call: equity {_fmt(eq)} is below the {_fmt(maint)} maintenance requirement "
+                          f"(deficit {_fmt(maint - eq)}).{tail}")
+            elif (a.settings["margin_call_liquidation"] and self.ex.session(now) == "regular"
+                  and life.margin_call_counted >= self._grace_seconds(a)):
+                if liq_holds:
+                    if not life.liquidation_paused:
+                        life.liquidation_paused = True
+                        self._log(a, now, "liquidation", "Margin call liquidation paused: "
+                                  + "; ".join(liq_holds) + ". Close or adjust the position yourself if needed.")
+                else:
+                    self.liquidate(a, now)
+        elif life.margin_call_since is not None:
+            if not pos or eq >= maint * (1 + CLEAR_BUFFER):
+                self._clear_call(a, now, eq, maint)
+            elif life.margin_call_ok_since is None:
+                life.margin_call_ok_since = now
+            elif now - life.margin_call_ok_since >= CLEAR_SECONDS:
+                self._clear_call(a, now, eq, maint)
 
     @staticmethod
     def _grace_seconds(a) -> float:
