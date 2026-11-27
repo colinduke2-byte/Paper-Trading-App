@@ -238,13 +238,17 @@ def validate_account(a, path: str) -> None:
         _type(ls, list, f"{path}.lots.{s}")
         for i, l in enumerate(ls):
             p = f"{path}.lots.{s}[{i}]"
-            if not (isinstance(l, list) and len(l) == 5):
-                _fail(p, "should be [qty, price, time, cost, fill id]")
+            if not (isinstance(l, list) and len(l) in (5, 6)):  # the lot id (PR 13) is the sixth field
+                _fail(p, "should be [qty, price, time, cost, fill id, lot id]")
             _num(l[0], p + "[0]")
             _num(l[1], p + "[1]")
             _type(l[2], (int, float), p + "[2]")
             _num(l[3], p + "[3]")
             _type(l[4], str, p + "[4]")
+            if len(l) == 6:
+                _type(l[5], str, p + "[5]")
+    if "lot_seq" in a and (isinstance(a["lot_seq"], bool) or not isinstance(a["lot_seq"], int) or a["lot_seq"] < 1):
+        _fail(f"{path}.lot_seq", "should be a whole number of at least 1")
     _type(a.get("fills"), list, f"{path}.fills")
     for i, f in enumerate(a["fills"]):
         p = f"{path}.fills[{i}]"

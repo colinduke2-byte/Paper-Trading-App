@@ -85,3 +85,55 @@ def test_data_routes_answer_busy_and_never_block_the_event_loop_while_the_lock_i
     assert json.dumps([a.to_plain() for a in ex.accounts.values()], sort_keys=True) == before
     # and once the lock is free the same token restores
     assert c.post("/api/data/restore/apply", json={"token": token}).status_code == 200
+
+
+# ---- tax lots (PR 13) x storage format v2 (PR 19) x rollback (PR 29) -----------------------------------
+
+def _lots_view(ex, aid):
+    a = ex.accounts[aid]
+    return {s: [(str(l.qty), str(l.price), l.id) for l in ls] for s, ls in a.lots.items()}, a.lot_seq
+
+
+def test_lot_ids_and_a_resting_lot_order_survive_a_segment_save_and_reload(tmp_path):
+    """The v2 schema validator must accept the lot id field; before the fix every account holding a
+    position loaded as damaged and the data folder went into recovery."""
+    from helpers import make_exchange, move
+    ex, feed, clock = make_exchange(str(tmp_path))
+    a = ex.create_account("t", "margin", D("100000")).id
+    for _ in range(3):
+        ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 10})
+        move(ex, feed, clock, "ABC", "100.00")
+    ex.submit(a, {"symbol": "ABC", "side": "sell", "qty": 4, "type": "limit", "limit_price": "500", "tif": "gtc",
+                  "lots": [{"lot_id": "L2", "qty": 4}]})
+    assert ex.save(force=True)
+    ex.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1})  # appended to the segments by the next save
+    assert ex.save()
+    back = Exchange(feed, clock, data_dir=str(tmp_path))
+    assert back.load(), back.store.recovery
+    assert _lots_view(back, a) == _lots_view(ex, a)
+    [rest] = [o for o in back.engine.orders.values() if o.active]
+    assert [(l["lot_id"], str(l["qty"])) for l in rest.lots] == [("L2", "4")]
+    # the next lot after a reload gets a fresh id, never one in use
+    back.submit(a, {"symbol": "ABC", "side": "buy", "qty": 1})
+    ids = [l.id for l in back.accounts[a].lots["ABC"]]
+    assert len(ids) == len(set(ids))
+
+
+def test_a_rolled_back_fill_does_not_use_up_a_lot_id(monkeypatch):
+    from helpers import make_exchange
+    import pytest
+    ex, feed, clock = make_exchange()
+    acct = ex.create_account("t", "margin", D("100000"))
+    ex.submit(acct.id, {"symbol": "ABC", "side": "buy", "qty": 1})
+    before = _lots_view(ex, acct.id)
+    real = ex.lifecycle.on_fill
+
+    def fault(*args, **kw):
+        raise RuntimeError("fault after the fill was booked")
+    monkeypatch.setattr(ex.lifecycle, "on_fill", fault)
+    with pytest.raises(RuntimeError):
+        ex.submit(acct.id, {"symbol": "ABC", "side": "buy", "qty": 1})
+    monkeypatch.setattr(ex.lifecycle, "on_fill", real)
+    assert _lots_view(ex, acct.id) == before
+    ex.submit(acct.id, {"symbol": "ABC", "side": "buy", "qty": 1})
+    assert [l.id for l in ex.accounts[acct.id].lots["ABC"]] == ["L1", "L2"]

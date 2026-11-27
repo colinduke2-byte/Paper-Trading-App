@@ -3,11 +3,16 @@ import { ColorType, LineSeries, createChart } from "lightweight-charts";
 import { usePoll } from "./Market";
 import { api, dateTime, money, qty, signed, store, tone, usd } from "./util";
 import "./reports.css";
+import { TaxYear, WashDetail } from "./TaxYear";
 
-const VIEWS = ["Overview", "Gains", "Statements", "Journal", "Export"] as const;
+const VIEWS = ["Overview", "Gains", "Tax year", "Statements", "Journal", "Export"] as const;
 type View = (typeof VIEWS)[number];
 
-const LOT_LABELS: Record<string, string> = { fifo: "First in, first out", lifo: "Last in, first out", highest_cost: "Highest cost first" };
+const LOT_LABELS: Record<string, string> = {
+  fifo: "First in, first out", lifo: "Last in, first out", highest_cost: "Highest cost first",
+  lowest_cost: "Lowest cost first", tax_loss: "Tax-efficient: largest loss first",
+};
+const METHOD_SHORT: Record<string, string> = { ...LOT_LABELS, specific: "Chosen lot" };
 const EXPORTS: [string, string][] = [
   ["fills", "Fills"], ["orders", "Orders"], ["ledger", "Ledger"], ["positions", "Positions"], ["gains", "Realised gains"], ["journal", "Journal"],
 ];
@@ -39,6 +44,7 @@ export function Reports({ accountId, refreshKey, notify, orders }: { accountId: 
       </div>
       {view === "Overview" && <Overview accountId={accountId} refreshKey={refreshKey} />}
       {view === "Gains" && <Gains accountId={accountId} refreshKey={refreshKey} notify={notify} />}
+      {view === "Tax year" && <TaxYear accountId={accountId} refreshKey={refreshKey} />}
       {view === "Statements" && <Statements accountId={accountId} refreshKey={refreshKey} />}
       {view === "Journal" && <Journal accountId={accountId} refreshKey={refreshKey} notify={notify} orders={orders} />}
       {view === "Export" && <Exports accountId={accountId} />}
@@ -243,20 +249,23 @@ function Gains({ accountId, refreshKey, notify }: { accountId: string; refreshKe
         <div><span>Proceeds</span><b>{usd(tt.proceeds)}</b></div>
         <div><span>Cost</span><b>{usd(tt.cost)}</b></div>
         <div><span>Wash-sale flags</span><b className={tt.wash_sale_lots ? "warn" : ""}>{tt.wash_sale_lots}</b></div>
+        <div><span>Wash-sale disallowed (informational)</span><b className={tt.wash_sale_disallowed ? "warn" : ""}>{usd(tt.wash_sale_disallowed)}</b></div>
       </div>
       {data.rows.length === 0 ? <p className="muted pad">No closed lots yet. Each lot appears here when a trade closes it.</p> : (
         <div className="rep-table">
           <table>
-            <thead><tr><th>Lot</th><th>Instrument</th><th>Side</th><th className="num">Qty</th><th>Opened</th><th>Closed</th><th className="num">Proceeds</th>
+            <thead><tr><th>Lot</th><th>Tax lot</th><th>Method</th><th>Instrument</th><th>Side</th><th className="num">Qty</th><th>Opened</th><th>Closed</th><th className="num">Proceeds</th>
               <th className="num">Cost</th><th className="num">Gain</th><th>Term</th><th>Wash sale</th><th>Journal</th></tr></thead>
             <tbody>
               {[...data.rows].reverse().map((r: any) => (
                 <tr key={r.id}>
-                  <td className="muted">{r.id}</td><td>{r.description}</td><td>{r.direction === "long" ? "Long" : "Short"}</td>
+                  <td className="muted">{r.id}</td><td>{r.lot_id || "–"}</td>
+                  <td title={r.lot_fallback ? "The chosen lot was no longer open when this filled, so the account's method chose" : undefined}>
+                    {METHOD_SHORT[r.lot_method] || r.lot_method}{r.lot_fallback ? " (fallback)" : ""}</td><td>{r.description}</td><td>{r.direction === "long" ? "Long" : "Short"}</td>
                   <td className="num">{qty(r.qty)}</td><td>{r.open_date}</td><td>{r.close_date}</td>
                   <td className="num">{money(r.proceeds)}</td><td className="num">{money(r.cost)}</td>
                   <td className={"num " + tone(r.gain)}>{signed(r.gain)}</td><td>{r.term === "long" ? "Long-term" : "Short-term"}</td>
-                  <td>{r.wash_sale ? <span className="flag" title="Loss closed within 30 days of another purchase of the same symbol. Informational only.">Flagged</span> : <span className="muted">–</span>}</td>
+                  <td><WashDetail row={r} /></td>
                   <td><button className="ghost sm" onClick={() => setNoting(noting === r.id ? null : r.id)}>
                     {notes[r.id]?.length ? `Notes (${notes[r.id].length})` : "Add note"}</button></td>
                 </tr>

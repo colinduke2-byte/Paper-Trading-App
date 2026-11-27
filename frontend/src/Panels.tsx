@@ -3,9 +3,10 @@ import { AlertsTab } from "./AlertsTab";
 import { ChangeOrderButton } from "./ChangeOrder";
 import { usePoll } from "./Market";
 import { Reports } from "./Reports";
+import { Lots } from "./Lots";
 import { api, compact, dateTime, isOption, money, numText, ORDER_TYPES, pct, qty, signed, STATUS, TIFS, tone, usd } from "./util";
 
-const TABS = ["Positions", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
+const TABS = ["Positions", "Lots", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
 export function BottomPanel(p: {
   accountId: string; positions: any[]; orders: any[]; refreshKey: number; quotes: Record<string, any>;
@@ -24,6 +25,7 @@ export function BottomPanel(p: {
       </div>
       <div className="scroll">
         {tab === "Positions" && <Positions {...p} />}
+        {tab === "Lots" && <Lots accountId={p.accountId} refreshKey={p.refreshKey} onSell={p.onClose} />}
         {tab === "Orders" && <Orders {...p} />}
         {tab === "Fills" && <Fills {...p} />}
         {tab === "Activity" && <Activity {...p} />}

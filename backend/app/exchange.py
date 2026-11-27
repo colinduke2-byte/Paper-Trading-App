@@ -17,8 +17,8 @@ from .core import calendar as cal
 from .core import models as m
 from .core.clock import Clock
 from .core.models import Fill, Order, Quote, from_plain, to_plain
-from .core.money import CENT, ZERO, D, cents, parse as parse_num
-from .ledger.account import Account
+from .core.money import CENT, ZERO, D, cents, parse as parse_num, px4
+from .ledger.account import Account, is_long_term
 from .lifecycle.manager import LifecycleManager
 from .marketdata.feed import MarketDataProvider
 from .matching.engine import FillConfig, MatchingEngine
@@ -34,10 +34,15 @@ MAX_QTY = Decimal(1_000_000)
 MAX_LINKED = 5  # orders in one one-cancels-other or one-triggers-other request
 MAX_GTD_DAYS = 366
 MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be larger than this
+MAX_ORDER_LOTS = 100  # tax lots one closing order may name
 CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its intrinsic value, not exercised
 RUNNING_GAP = 120  # seconds: a longer gap between two ticks means the simulator was not running (or was paused)
 CLOSE_WAIT = 120  # seconds to wait for the provider's daily close before settling at an approximate price
 PROVIDER_CLOSE_WAIT = 1800  # seconds to wait for feed.closing_price to become ready before approximating
+
+
+def tidy_qty(q: Decimal) -> str:
+    return f"{q.normalize():f}"
 
 
 def _in_range(*values) -> None:
@@ -295,7 +300,7 @@ class Exchange:
         A submit can book several fills (every leg of a multi-leg order, a bracket entry) and a replace
         edits several fields; a fault half way must not leave an order without its fill, a fill without
         its ledger posting or half an edit. Restored on failure: the account's ledger, lots, fills, closed
-        trades, lifecycle state and notifications, its open orders (and any order added), the event queue
+        trades, lot id counter, lifecycle state and notifications, its open orders (and any order added), the event queue
         and the fill counter. Order ids used by a failed request are not reused.
         """
         a = self.accounts.get(account_id)
@@ -308,6 +313,7 @@ class Exchange:
         led = a.ledger
         n_txn, balances = len(led.transactions), dict(led.balances)
         lots = {s: [copy.copy(l) for l in ls] for s, ls in a.lots.items()}
+        lot_seq = a.lot_seq  # tax-lot ids (PR 13): a rolled-back fill must not use one up
         n_fills, n_closed, life = len(a.fills), len(a.closed), a.life.copy()
         # `dirty` is not put back: the save thread sets it when a write fails, and a rolled-back request
         # costs one extra save at most.
@@ -328,7 +334,7 @@ class Exchange:
             self.engine.reindex()  # orders open again, in their first order
             del led.transactions[n_txn:]
             led.balances = balances
-            a.lots = lots
+            a.lots, a.lot_seq = lots, lot_seq
             del a.fills[n_fills:], a.closed[n_closed:], self.events[n_events:]
             a.life = life
             notices.logs[account_id], notices.seq = notes, note_seq
@@ -396,6 +402,8 @@ class Exchange:
         if not isinstance(req, dict):
             raise OrderRejected("an order must be a JSON object")
         if req.get("legs") is not None:
+            if req.get("lots") is not None:
+                raise OrderRejected("tax lots can be chosen on single closing orders only, not on multi-leg orders")
             return [self._validate_multileg(account, req)]
         if req.get("oco") is not None:
             return self._validate_oco(account, req)
@@ -465,6 +473,8 @@ class Exchange:
         """One order, plus its bracket children when take_profit or stop_loss is given."""
         if linked and any(req.get(k) is not None for k in ("legs", "oco", "triggers")):
             raise OrderRejected("a linked order cannot itself be multi-leg or linked")
+        if linked and req.get("lots") is not None:
+            raise OrderRejected(f"tax lots can be chosen on single closing orders only, not on {linked} orders")
         try:
             symbol = str(req.get("symbol", "")).upper().strip()
             side, typ = req.get("side"), req.get("type", m.MARKET)
@@ -536,6 +546,10 @@ class Exchange:
                       client_id=client_id, expire_at=expire_at, good_till=good_till,
                       auction_at=self._next_auction(typ) if auction else None)
         orders = [entry]
+        if req.get("lots") is not None:
+            if take_profit is not None or stop_loss is not None:
+                raise OrderRejected("tax lots can be chosen on single closing orders only, not on bracket orders")
+            entry.lots = self.validate_lots(account, symbol, side, qty, req["lots"])
         if take_profit is not None or stop_loss is not None:
             if typ not in (m.MARKET, m.LIMIT) or tif in (m.IOC, m.FOK) or qty != qty.to_integral_value():
                 raise OrderRejected("bracket orders need a whole-share market or limit entry (day, GTC or GTD)")
@@ -557,6 +571,121 @@ class Exchange:
                 c.parent_id = c.oco_group = entry.id
                 c.status = m.HELD
         return orders
+
+    # ---- tax lots ----------------------------------------------------------
+    def reserved_lots(self, account_id: str, exclude: Optional[str] = None) -> dict:
+        """Lot id -> quantity still to be closed by the account's open orders that named it."""
+        out: dict = {}
+        for o in self.engine.orders.values():
+            if o.account_id != account_id or not o.lots or o.id == exclude:
+                continue
+            wants = [(e["lot_id"], D(e["qty"]) - D(e.get("filled", "0"))) for e in o.lots]
+            wants = [(lid, w) for lid, w in wants if w > 0]
+            if not wants:
+                continue
+            if not o.active:
+                # The engine marks an order filled before its fills are booked: within one batch of
+                # events its lots stay reserved for the fills still to come.
+                if o.status != m.FILLED:
+                    continue
+                acct = self.accounts.get(account_id)
+                pending = o.filled_qty - sum((f.qty for f in (acct.fills if acct else ()) if f.order_id == o.id), ZERO)
+                if pending <= 0:
+                    continue
+                capped = []
+                for lid, w in wants:
+                    capped.append((lid, min(w, pending)))
+                    pending -= min(w, pending)
+                wants = capped
+            for lid, w in wants:
+                if w > 0:
+                    out[lid] = out.get(lid, ZERO) + w
+        return out
+
+    def _cancel_broken_lot_orders(self, account: Account, now: float) -> None:
+        """Cancel open orders whose named lots no longer hold what they still need to close.
+
+        Lots named by an order are skipped by other trades while unnamed lots remain, but a larger
+        sale, an assignment or an exercise can still close them. The order is then canceled rather
+        than left to close lots nobody chose (or to open a short position).
+        """
+        held = {l.id: abs(l.qty) for ls in account.lots.values() for l in ls}
+        # Several orders can each name part of one lot, so what they still need is counted together:
+        # the oldest orders keep their claim and the newest ones that no longer fit are canceled.
+        claimed: dict = {}
+        mine = [o for o in self.engine.orders.values() if o.account_id == account.id and o.lots and o.active]
+        for o in sorted(mine, key=lambda o: (o.created_at, o.id)):
+            need: dict = {}
+            for e in o.lots:
+                need[e["lot_id"]] = need.get(e["lot_id"], ZERO) + max(D(e["qty"]) - D(e.get("filled", "0")), ZERO)
+            short = [lid for lid, q in need.items() if q > 0 and claimed.get(lid, ZERO) + q > held.get(lid, ZERO)]
+            if short:
+                self._handle(self.engine.cancel(o.id, now, f"Canceled: lot {', '.join(short)} named by this order "
+                                                           f"was closed by another trade"))
+            else:
+                for lid, q in need.items():
+                    claimed[lid] = claimed.get(lid, ZERO) + q
+
+    def validate_lots(self, account: Account, symbol: str, side: str, qty: Decimal, raw) -> list:
+        """Check a closing order's chosen lots. Returns the plan stored on the order."""
+        if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
+            raise OrderRejected("lots must be a list like [{\"lot_id\": \"L1\", \"qty\": 5}]")
+        if not raw:
+            raise OrderRejected("lots is empty: name at least one lot, or leave lots out to use the account's lot method")
+        if len(raw) > MAX_ORDER_LOTS:
+            raise OrderRejected(f"an order can name at most {MAX_ORDER_LOTS} lots")
+        held = {l.id: l for l in account.lots.get(symbol, ())}
+        reserved = self.reserved_lots(account.id)
+        plan, seen, total = [], set(), ZERO
+        for e in raw:
+            lot_id = str(e.get("lot_id", "")).strip()
+            try:
+                q = parse_num(e.get("qty"))
+            except (ValueError, ArithmeticError):
+                raise OrderRejected(f"lot {lot_id or '(blank)'}: quantity is not a number")
+            if lot_id in seen:
+                raise OrderRejected(f"lot {lot_id} is named twice")
+            seen.add(lot_id)
+            lot = held.get(lot_id)
+            if lot is None:
+                other, _ = account.find_lot(lot_id)
+                raise OrderRejected(f"lot {lot_id or '(blank)'} is not an open lot of {symbol}" +
+                                    (f" (it belongs to {other})" if other else ""))
+            if (lot.qty > 0) == (side == m.BUY):
+                raise OrderRejected(f"lot {lot_id} is a {'long' if lot.qty > 0 else 'short'} lot; "
+                                    f"{'sell' if lot.qty > 0 else 'buy'} to close it")
+            if q <= 0 or q > MAX_QTY or q != q.quantize(Decimal("0.0001")):
+                raise OrderRejected(f"lot {lot_id}: quantity must be positive, at most 1,000,000, with at most "
+                                    f"4 decimal places")
+            free = abs(lot.qty) - reserved.get(lot_id, ZERO)
+            if q > free:
+                taken = reserved.get(lot_id, ZERO)
+                raise OrderRejected(f"lot {lot_id} has {tidy_qty(abs(lot.qty))} open" +
+                                    (f", of which {tidy_qty(taken)} is already named by another open order" if taken else "") +
+                                    f"; {tidy_qty(q)} is more than the {tidy_qty(max(free, ZERO))} available")
+            total += q
+            plan.append({"lot_id": lot_id, "qty": str(q), "filled": "0"})
+        if total != qty:
+            raise OrderRejected(f"the chosen lots add up to {tidy_qty(total)}, but the order is for {tidy_qty(qty)}")
+        return plan
+
+    def lot_preview(self, account: Account, o: Order, price: Decimal) -> list:
+        """The lots a closing order would close if it filled now at `price` (estimates)."""
+        if o.legs:
+            return []
+        plan = [dict(e) for e in o.lots] if o.lots else None
+        picks = account.select_lots(o.symbol, o.side, o.qty, price, self.now(), plan,
+                                    self.reserved_lots(account.id, exclude=o.id))
+        lots, mult, out = account.lots.get(o.symbol, []), multiplier(o.symbol), []
+        for idx, take, method, fallback in picks:
+            lot = lots[idx]
+            cost = lot.cost if take == abs(lot.qty) else cents(lot.cost * take / abs(lot.qty))
+            value = cents(take * price * mult)
+            gain = value - cost if lot.qty > 0 else cost - value
+            out.append({"lot_id": lot.id, "qty": take, "opened_at": lot.ts, "open_price": lot.price,
+                        "cost_basis": cost, "estimated_proceeds": value, "estimated_gain": gain,
+                        "term": "long" if is_long_term(lot, self.now()) else "short", "method": method})
+        return out
 
     def _estimate_price(self, o: Order) -> Decimal:
         q = self.quote(o.symbol)
@@ -837,6 +966,7 @@ class Exchange:
                 "estimated_total": notional + fee if entry.side == m.BUY else notional - fee,
                 "position_before": pos, "position_after": after_pos, "buying_power_before": before["buying_power"],
                 "buying_power_after": bp_after if not closing else None, "closing": closing, "warnings": warnings,
+                "lots": self.lot_preview(a, entry, price),
                 "linked_orders": [{"symbol": o.symbol, "description": describe(o.symbol), "side": o.side, "qty": o.qty,
                                    "type": o.type, "role": o.role} for o in orders[1:]]}
 
@@ -921,6 +1051,8 @@ class Exchange:
             raise OrderRejected("the quantity of a one-cancels-other order cannot be raised")
         if qty is not None and (qty > MAX_QTY or qty != qty.quantize(Decimal("0.0001"))):
             raise ValueError("invalid quantity")
+        if qty is not None and qty != o.qty and o.lots:
+            raise OrderRejected("this order closes chosen tax lots; cancel it and enter a new one to change its quantity")
         old = (o.qty, o.limit_price, o.stop_price)
         self._handle(self.engine.replace(order_id, self.now(), qty, limit, stop))
         # Held bracket and exit children are re-sized to what their entry filled when they are
@@ -1169,19 +1301,62 @@ class Exchange:
                 self._handle(self.engine.on_multileg(o.id, self._leg_quotes(o.legs), now, sess))
 
     # ---- event handling ----------------------------------------------------
+    def _names_lots(self, fill) -> Optional[Order]:
+        order = self.engine.orders.get(fill.order_id)
+        return order if order is not None and order.lots and order.symbol == fill.symbol else None
+
+    def _clip_lot_fill(self, acct: Account, order: Order, fill: Fill) -> list:
+        """Limit a lot order's fill to what its named lots still hold. Returns the lots that fell short.
+
+        The engine has already counted the whole fill on the order; the part the named lots cannot
+        cover is taken off again, so the order never closes a lot it did not name or opens a short.
+        """
+        closing_long = fill.side == m.SELL
+        held = {l.id: abs(l.qty) for l in acct.lots.get(fill.symbol, ()) if (l.qty > 0) == closing_long}
+        can, short = ZERO, []
+        for e in order.lots:
+            want = max(D(e["qty"]) - D(e.get("filled", "0")), ZERO)
+            have = held.get(e["lot_id"], ZERO)
+            can += min(want, have)
+            if want > have:
+                short.append(e["lot_id"])
+        if fill.qty <= can:
+            return []
+        order.filled_qty -= fill.qty - can
+        order.status = m.PARTIAL if order.filled_qty > 0 else m.WORKING
+        fill.qty = can
+        return short or [e["lot_id"] for e in order.lots]
+
     def _handle(self, events: list) -> None:
+        # Within one batch, fills of orders that name lots are booked first, so a plain order filling
+        # in the same step cannot take lots another order named before that order's fill is booked.
+        first = [ev for ev in events if ev[0] == "fill" and self._names_lots(ev[1]) is not None]
+        if first:
+            ids = {id(ev) for ev in first}
+            events = first + [ev for ev in events if id(ev) not in ids]
         for kind, obj in events:
             if kind == "fill":
                 acct = self.accounts.get(obj.account_id)
                 if acct is None:
                     continue
-                obj.fee = self._fee(obj.symbol, obj.qty)
-                acct.apply_fill(obj, multiplier(obj.symbol))
-                self.lifecycle.on_fill(acct, obj)
                 order = self.engine.orders.get(obj.order_id)
-                if order:
-                    order.fees += obj.fee
-                self.events.append({"type": "fill", "account_id": obj.account_id, "fill": obj})
+                lot_order = self._names_lots(obj)
+                cut = self._clip_lot_fill(acct, lot_order, obj) if lot_order is not None else []
+                if obj.qty > 0:
+                    obj.fee = self._fee(obj.symbol, obj.qty)
+                    acct.apply_fill(obj, multiplier(obj.symbol), lot_order.lots if lot_order else None,
+                                    self.reserved_lots(acct.id, exclude=obj.order_id))
+                    self.lifecycle.on_fill(acct, obj)
+                    if order:
+                        order.fees += obj.fee
+                    self.events.append({"type": "fill", "account_id": obj.account_id, "fill": obj})
+                if cut:
+                    booked = [f for f in acct.fills if f.order_id == lot_order.id]
+                    q = sum((f.qty for f in booked), ZERO)
+                    lot_order.avg_fill_price = px4(sum((f.price * f.qty for f in booked), ZERO) / q) if q else None
+                    self._handle(self.engine.cancel(lot_order.id, obj.ts, f"Canceled: lot {', '.join(cut)} named by this "
+                                                                          f"order was closed by another trade"))
+                self._cancel_broken_lot_orders(acct, obj.ts)
             else:
                 self.events.append({"type": "order", "account_id": obj.account_id, "order": obj})
             self.dirty = True
@@ -1431,10 +1606,11 @@ class Exchange:
                 def book(symbol, side, q, price, kind):
                     f = Fill(id=f"X{next(self._expiry_seq):08d}", order_id=None, account_id=a.id, symbol=symbol,
                              side=side, qty=q, price=price, ts=now, kind=kind)
-                    a.apply_fill(f, multiplier(symbol))
+                    a.apply_fill(f, multiplier(symbol), reserved=self.reserved_lots(a.id))
                     a.ledger.transactions[-1].memo += f" (settlement: {note})"
                     self.lifecycle.on_fill(a, f)  # exercise and assignment proceeds settle T+1
                     self.events.append({"type": "fill", "account_id": a.id, "fill": f})
+                    self._cancel_broken_lot_orders(a, now)
 
                 if itm >= CENT:
                     kind = "exercise" if long else "assignment"

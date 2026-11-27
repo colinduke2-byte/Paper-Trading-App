@@ -226,11 +226,12 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
   market-wide news with earnings and economic calendars. With simulated prices all of it is simulated for
   the fictional companies and labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 
-**Centre bottom: your account.** Seven tabs:
+**Centre bottom: your account.** Eight tabs:
 
 | Tab | What it shows |
 |---|---|
 | **Positions** | What you hold: quantity, average cost, mark, market value, day and open P&L, and a **Close…** button that fills the ticket to sell or buy back the whole position |
+| **Lots** | Every open tax lot of every position: lot id (L1, L2, ...), open date, quantity, cost per unit, cost basis, value, unrealised gain, holding period and the date it turns long-term, and any informational wash-sale adjustment. Tick lots and press **Sell selected lots** (**Buy to cover selected lots** for a short) to open the ticket with exactly those lots |
 | **Orders** | Open orders with **Change…** and **Cancel**, and **Cancel all open orders**; tick "Show finished orders" for filled, canceled, rejected and expired ones |
 | **Fills** | Each execution: time, price, fee and kind (trade, exercise, assignment, dividend reinvestment and so on) |
 | **Activity** | The ledger: every cash movement with its realised profit or loss |
@@ -612,8 +613,8 @@ ticket on this branch. The new ticket and strategy builder will update this sect
 
 ## 9. Reports
 
-Open the **Reports** tab in the bottom panel. All figures come from the simulated account. Five views:
-**Overview**, **Gains**, **Statements**, **Journal**, **Export**.
+Open the **Reports** tab in the bottom panel. All figures come from the simulated account. Six views:
+**Overview**, **Gains**, **Tax year**, **Statements**, **Journal**, **Export**.
 
 ### Overview
 
@@ -666,23 +667,41 @@ market value, not adjusted for how much they move with the stock.
 
 ![Gains](img/desktop-reports-gains.png)
 
-The realised gains report lists every closed lot: instrument, long or short, quantity, opened and closed
-dates, proceeds, cost, gain, term and wash-sale flag. The totals at the top are **Realised gain**,
-**Short-term**, **Long-term**, **Proceeds**, **Cost** and **Wash-sale flags**. Gains leave out fees,
-which are reported separately.
+The realised gains report lists every closed lot: tax lot id, the method that chose it ("Chosen lot"
+when the order named it), instrument, long or short, quantity, opened and closed dates, proceeds, cost,
+gain, term and wash-sale detail. The totals at the top are **Realised gain**, **Short-term**,
+**Long-term**, **Proceeds**, **Cost**, **Wash-sale flags** and the **Wash-sale disallowed** amount. Gains
+leave out fees, which are reported separately.
 
 - **Term**: a lot is **long-term** if it was held for more than one year (sold after the one-year
   anniversary of the purchase date, New York time); otherwise **short-term**. Short sales always count
   as short-term.
-- **Tax-lot method** chooses which earlier purchase a sale closes: **First in, first out** (oldest
-  first, the default), **Last in, first out** (newest first), or **Highest cost first** (the lot that
-  gives the smallest gain). A change applies only to trades closed after you make it. For a short
-  position, "highest cost" means the lot sold at the lowest price.
-- **Wash-sale flag**: marks a loss on a lot closed within 30 days before or after another purchase of
-  the same symbol (another short sale for a short lot). It is **informational only**. It does not look
-  for similar securities, does not change your cost basis and does not defer any loss. This is not tax
-  advice and PaperDesk is not a tax tool.
-- **Download CSV** saves the table. **Add note** attaches a journal note to a lot.
+- **Tax-lot method** chooses which earlier purchase a sale closes when the order names no lots: **First
+  in, first out** (oldest first, the default), **Last in, first out** (newest first), **Highest cost
+  first** (the smallest gain), **Lowest cost first** (the largest gain) or **Tax-efficient: largest loss
+  first** (the biggest loss per share at the sale price; a long-term lot first when two are equal). A
+  change applies only to trades closed after you make it. For a short position the costs mirror:
+  "highest cost" means the lot sold at the lowest price.
+- **Choosing lots**: in the order ticket, open **Choose tax lots (optional)** and tick the lots to close
+  (and how much of each), or use **Sell selected lots** on the Lots tab. The lots must belong to the
+  position, add up to the order quantity and not already be named by another open order. Named lots are
+  kept aside from other sales while the order works; if another trade or an assignment closes them
+  first, the order is canceled and says why. Lots can be chosen on single orders, not on brackets,
+  linked groups or multi-leg orders.
+- **Wash sale** (informational): a loss with replacement shares (another purchase of the same symbol,
+  or another short sale for a short lot) within 30 days before or after. Press the amount to see the
+  replacement lot, how much loss is disallowed, and the cost basis and holding period the replacement
+  lot would carry. Replacement shares are matched earliest first and each is used once. PaperDesk never
+  changes your realised gains or cost basis for this; similar securities and other accounts are not
+  considered. This is not tax advice and PaperDesk is not a tax tool.
+- **Download CSV** saves the table, including lot ids and the wash-sale columns. **Add note** attaches a
+  journal note to a lot.
+
+### Tax year
+
+Choose a **Year** to see short-term and long-term totals (lots, proceeds, cost, gain) for lots closed
+that year, the wash-sale disallowed amounts, the **adjusted gain** after those informational adjustments,
+and a list of that year's wash sales with their replacement lots. Informational only, not tax advice.
 
 ### Statements
 
@@ -878,7 +897,7 @@ The bottom bar has four views: **Watchlist**, **Chart**, **Trade** and **Account
 the top right opens a sheet with the account picker, your numbers, and the buttons New account, Reset,
 Replay, Settings, Help and (when you signed in) Sign out. On the **Chart** view, **Buy** and **Sell**
 buttons open the ticket for that symbol. On **Trade**, once you press Review, **Place paper order**
-stays pinned above the tab bar. **Account** shows buying power and the seven tabs (Positions to
+stays pinned above the tab bar. **Account** shows buying power and the eight tabs (Positions to
 Screener). In the option chain, a Calls / Puts / Both switch picks the side to show.
 
 ![Phone: watchlist](img/phone-watchlist.png)
@@ -1168,5 +1187,5 @@ stretched.
 **Trailing stop.** A stop that follows the price.
 **VWAP.** Volume-weighted average price for the day.
 **Volatility.** How much a price swings.
-**Wash sale.** A loss followed or preceded within 30 days by buying the same security. Flagged here for
-information only.
+**Wash sale.** A loss followed or preceded within 30 days by buying the same security. Worked out lot by
+lot here (replacement lot, disallowed loss, adjusted basis) for information only.

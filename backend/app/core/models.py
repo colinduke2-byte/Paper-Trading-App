@@ -82,6 +82,9 @@ class Order:
     # number of units, `side` is always buy and `limit_price` is the signed net price per unit
     # (positive = net debit, negative = net credit, None = at market).
     legs: Optional[list] = None
+    # Closing orders that name their tax lots: [{"lot_id", "qty", "filled"}] (quantities as strings),
+    # closed in this order. None: the account's lot method chooses.
+    lots: Optional[list] = None
 
     @property
     def remaining(self) -> Decimal:

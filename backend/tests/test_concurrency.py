@@ -713,11 +713,11 @@ def test_a_multi_leg_submit_that_fails_on_its_second_leg_leaves_nothing_behind()
     before = book(ex, a)
     apply_fill, n = a.apply_fill, []
 
-    def second_leg_fails(fill, mult):
+    def second_leg_fails(fill, mult, *args, **kw):  # PR 13 passes the named and reserved lots too
         n.append(fill)
         if len(n) == 2:
             raise RuntimeError("fault while booking the second leg")
-        return apply_fill(fill, mult)
+        return apply_fill(fill, mult, *args, **kw)
 
     a.apply_fill = second_leg_fails
     with pytest.raises(RuntimeError):

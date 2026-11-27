@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { api, isOption, money, numText, ORDER_TYPES, qty as fmtQty, TIFS, usd } from "./util";
+import { LotChoice, LotChoiceItem } from "./Lots";
+import { sumQty } from "./lotmath";
 
 // note: shown under the limit price while it is still the seeded one (why the ticket chose that price).
-export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; stop_price?: number; nonce?: number; note?: string };
+// lots: tax lots to close (Lots tab, "Sell selected lots").
+export type TicketSeed = { symbol: string; side?: string; qty?: number; type?: string; limit_price?: number; stop_price?: number; nonce?: number; note?: string; lots?: LotChoiceItem[] };
 
 export function Ticket({ seed, accountId, quote, description, position, onPlaced }: {
   seed: TicketSeed; accountId: string; quote: any; description: string; position: any; onPlaced: (msg: string) => void;
@@ -22,6 +25,7 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
   const [preview, setPreview] = useState<any>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [lots, setLots] = useState<LotChoiceItem[] | null>(null); // chosen tax lots (Lots.tsx); null: the account's method
   const option = isOption(seed.symbol);
 
   useEffect(() => {
@@ -30,7 +34,7 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
     setType(seed.type || "market");
     setLimit(seed.limit_price != null ? String(seed.limit_price) : "");
     setStop(seed.stop_price != null ? String(seed.stop_price) : ""); setTrail(""); setTp(""); setSl(""); setBracket(false); setExt(false); setTif("day");
-    setPreview(null); setError("");
+    setPreview(null); setError(""); setLots(seed.lots?.length ? seed.lots : null);
   }, [seed.symbol, seed.nonce]);
 
   const hasLimit = type === "limit" || type === "stop_limit";
@@ -47,6 +51,7 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
     extended_hours: ext && type === "limit",
     take_profit: bracket && canBracket && tp ? numText(tp) : null,
     stop_loss: bracket && canBracket && sl ? numText(sl) : null,
+    ...(lots && !bracket ? { lots: lots.map((l) => ({ ...l, qty: numText(String(l.qty)) })) } : {}),
   });
 
   const edit = (fn: () => void) => { fn(); setPreview(null); setError(""); };
@@ -71,7 +76,7 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
       onPlaced(o.status === "filled"
         ? `Filled: ${o.side} ${fmtQty(o.filled_qty)} ${description} at ${money(o.avg_fill_price, o.avg_fill_price < 1 ? 4 : 2)}`
         : `Order placed: ${o.side} ${fmtQty(o.qty)} ${description} (${o.status.replace("_", " ")})`);
-      setPreview(null);
+      setPreview(null); setLots(null);
       if (!option) setQty("");
     } catch (e: any) { setError(e.message); }
     setBusy(false);
@@ -98,6 +103,8 @@ export function Ticket({ seed, accountId, quote, description, position, onPlaced
       <label>{option ? "Contracts" : "Shares"}
         <input inputMode="decimal" value={qty} placeholder="0" onChange={(e) => edit(() => setQty(e.target.value))} />
       </label>
+      {position && <LotChoice accountId={accountId} symbol={seed.symbol} side={side} position={position} orderQty={qty} value={lots} preview={preview}
+        onChange={(v) => edit(() => { setLots(v); if (v) setQty(sumQty(v.map((x) => x.qty))); })} />}
       <label>Order type
         <select value={type} onChange={(e) => edit(() => { setType(e.target.value); if (e.target.value !== "market" && e.target.value !== "limit" && (tif === "ioc" || tif === "fok")) setTif("day"); })}>
           {Object.entries(ORDER_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}

@@ -146,9 +146,16 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   and short borrow fees with their rates.
 - **Corporate actions:** splits (lots, options and open orders adjusted or canceled, cash in lieu) and
   dividends, for the simulated feed. Real-provider actions are shown in Research but not applied.
-- **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO or highest-cost
-  matching, realised gains report with holding period and an informational wash-sale flag, monthly statements,
-  CSV export, trade journal, performance statistics (Reports tab).
+- **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO, highest-cost,
+  lowest-cost or tax-efficient (largest loss first) matching, realised gains report with holding period and
+  informational wash-sale detail, tax-year summary, monthly statements, CSV export, trade journal, performance
+  statistics (Reports tab).
+- **Tax lots:** the Lots tab lists every open lot (open date, cost, value, unrealised gain, holding period and the
+  date it turns long-term). Tick lots and press "Sell selected lots" to open the order ticket with them, or choose
+  lots in the ticket's "Choose tax lots" section; the API takes `"lots": [{"lot_id": "L3", "qty": 5}]` on a closing
+  order. Named lots are reserved while the order works; if another trade closes them first, the order is canceled.
+  Wash-sale detail (replacement lot, disallowed loss, adjusted basis and holding period) is informational only and
+  not tax advice.
 - **Alerts and notifications:** alerts on price, percent change, volume, indicators (moving-average
   crosses, RSI, MACD on any bar size), option implied volatility and delta, position and account
   gain/loss, account value, buying power and margin excess, reminders, and dividend or split dates of
@@ -223,7 +230,7 @@ sign-in tests (`e2e/tests/auth.spec.ts`, desktop and Pixel 7; `E2E_AUTH_PORT`, `
 | `backend/app/core` | Decimal money helpers, clock, US market calendar, shared records |
 | `backend/app/marketdata` | Provider interface, bar storage, scripted test feed, synthetic feed |
 | `backend/app/matching` | Order matching engine (pure, deterministic) |
-| `backend/app/ledger` | Double-entry ledger and account with FIFO lots |
+| `backend/app/ledger` | Double-entry ledger and account with tax lots (lot ids, lot methods, chosen lots) |
 | `backend/app/risk` | Margin and buying-power rules |
 | `backend/app/options` | Option symbols, Black-Scholes pricing, chain, expiry |
 | `backend/app/exchange.py` | The simulated broker that wires everything together |

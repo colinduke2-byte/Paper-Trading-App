@@ -92,8 +92,10 @@ while writing this list.
 - Dividends and splits are applied **only for the simulated feed**. With real data, the provider's
   dividends and splits appear in Research but are **not applied** to your accounts, and mergers,
   spin-offs, name changes and other corporate actions are not handled at all.
-- The **wash-sale flag is informational**: it does not look at similar securities, does not adjust cost
-  basis and does not defer losses. Nothing in the reports is tax advice.
+- **Wash-sale detail is informational**: it matches losses with replacement lots of the same symbol and shows
+  the disallowed loss and the basis and holding period the replacement would carry, but it never changes
+  realised gains or cost basis, does not look at similar securities or other accounts, and does not rescale
+  carried amounts after a later split. Nothing in the reports is tax advice.
 - There is no way in the screens to delete an account, deposit or withdraw cash.
 - **A corrupt `state.json` is replaced silently** with two fresh default accounts (tested): PaperDesk does
   not keep a backup of the unreadable file. Back up `backend\data` yourself.

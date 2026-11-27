@@ -24,7 +24,8 @@ from .locking import unlocked
 PRICE_HISTORY = "fetches price history from the feed before reading the account under ctx.locked()"
 
 CSV_KINDS = ("fills", "orders", "ledger", "positions", "gains", "journal")
-LOT_METHOD_LABELS = {"fifo": "First in, first out", "lifo": "Last in, first out", "highest_cost": "Highest cost first"}
+LOT_METHOD_LABELS = {"fifo": "First in, first out", "lifo": "Last in, first out", "highest_cost": "Highest cost first",
+                     "lowest_cost": "Lowest cost first", "tax_loss": "Tax-efficient: largest loss first"}
 
 
 def price_history(ex, symbol: str) -> list:
