@@ -137,3 +137,64 @@ def test_a_rolled_back_fill_does_not_use_up_a_lot_id(monkeypatch):
     assert _lots_view(ex, acct.id) == before
     ex.submit(acct.id, {"symbol": "ABC", "side": "buy", "qty": 1})
     assert [l.id for l in ex.accounts[acct.id].lots["ABC"]] == ["L1", "L2"]
+
+
+# ---- tax lots (PR 13) x crypto (PR 14) x cash-account rules ---------------------------------------------
+
+def _crypto(tmp=None, qinc="0.00001"):
+    from test_crypto import COIN, SAT, coin_info, set_coin
+    from app.core.clock import SimClock as _Clock
+    from app.marketdata.feed import SimFeed
+    clock = _Clock(SAT)
+    feed = SimFeed({"ABC": {"symbol": "ABC", "name": "ABC", "sector": "Test", "vol": 0.3}, COIN: coin_info(qinc=qinc)})
+    ex = Exchange(feed, clock, session_mode="us", data_dir=str(tmp) if tmp else None)
+    feed.set_quote("ABC", D("99.99"), D("100.00"), D("100.00"))
+    set_coin(feed, "40000.00")
+    ex.tick()
+    c = ex.create_account("Cash", "cash", D("10000")).id
+    return ex, feed, clock, c, COIN
+
+
+def _buy_lots(ex, feed, clock, c, coin, prices, qty="0.01234"):
+    from test_crypto import set_coin
+    for px in prices:
+        clock.advance(60)
+        set_coin(feed, px)
+        ex.tick()
+        ex.submit(c, {"symbol": coin, "side": "buy", "qty": qty})
+
+
+def test_a_crypto_lot_can_be_named_with_the_coins_own_quantity_step():
+    """Lots allowed at most 4 decimal places; crypto quantities go to the coin's increment (here 0.00001)."""
+    ex, feed, clock, c, coin = _crypto()
+    _buy_lots(ex, feed, clock, c, coin, ["40000.00", "42000.00", "38000.00"])
+    a = ex.accounts[c]
+    assert [l.id for l in a.lots[coin]] == ["L1", "L2", "L3"]
+    [o] = ex.submit(c, {"symbol": coin, "side": "sell", "qty": "0.00617", "lots": [{"lot_id": "L2", "qty": "0.00617"}]})
+    assert o.status == "filled"
+    left = {l.id: l.qty for l in a.lots[coin]}
+    assert left == {"L1": D("0.01234"), "L2": D("0.00617"), "L3": D("0.01234")}
+    assert a.cash >= 0
+
+
+def test_a_crypto_lot_order_respects_the_no_short_rule_with_other_resting_sells():
+    import pytest
+    from app.exchange import OrderRejected
+    ex, feed, clock, c, coin = _crypto()
+    _buy_lots(ex, feed, clock, c, coin, ["40000.00", "42000.00"])
+    ex.submit(c, {"symbol": coin, "side": "sell", "qty": "0.02", "type": "limit", "limit_price": "90000.00", "tif": "gtc"})
+    with pytest.raises(OrderRejected, match="cannot be sold short"):
+        ex.submit(c, {"symbol": coin, "side": "sell", "qty": "0.01", "type": "limit", "limit_price": "90000.00",
+                      "tif": "gtc", "lots": [{"lot_id": "L1", "qty": "0.01"}]})
+
+
+def test_crypto_fractional_lots_and_fees_survive_a_segment_save_and_reload(tmp_path):
+    ex, feed, clock, c, coin = _crypto(tmp_path)
+    _buy_lots(ex, feed, clock, c, coin, ["40000.00", "41000.00"])
+    ex.submit(c, {"symbol": coin, "side": "sell", "qty": "0.00123", "lots": [{"lot_id": "L1", "qty": "0.00123"}]})
+    assert ex.save(force=True)
+    back = Exchange(feed, clock, session_mode="us", data_dir=str(tmp_path))
+    assert back.load(), back.store.recovery
+    a, b = ex.accounts[c], back.accounts[c]
+    assert _lots_view(back, c) == _lots_view(ex, c)
+    assert b.cash == a.cash and sum(f.fee for f in b.fills) == sum(f.fee for f in a.fills) > 0

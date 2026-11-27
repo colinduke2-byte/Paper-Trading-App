@@ -23,7 +23,7 @@ from fastapi import Body, HTTPException, Query
 MAX_BYTES = 256 * 1024
 MAX_SYMBOLS = 500
 MAX_SCOPES = 50
-SYMBOL = re.compile(r"^[A-Z0-9.\-]{1,24}$")
+SYMBOL = re.compile(r"^[A-Z0-9.\-]{1,24}(/USD)?$")  # stocks, options and BASE/USD crypto pairs
 SCOPE = re.compile(r"^(live|replay:[A-Za-z0-9._\-]{1,80})$")
 
 
@@ -109,13 +109,13 @@ def register(app, ctx):
             save(d)
             return out
 
-    @app.get("/api/chartstate/drawings/{sym}")
+    @app.get("/api/chartstate/drawings/{sym:path}")
     def get_drawings(sym: str, scope_: Optional[str] = Query(None, alias="scope")):
         sc = scope(scope_)
         with lock:
             return doc()["scopes"].get(sc, {}).get(symbol(sym))
 
-    @app.put("/api/chartstate/drawings/{sym}")
+    @app.put("/api/chartstate/drawings/{sym:path}")
     def put_drawings(sym: str, body: dict = Body(...), scope_: Optional[str] = Query(None, alias="scope")):
         s, sc, rec = symbol(sym), scope(scope_), record(body)
         if not isinstance(rec["data"], list):

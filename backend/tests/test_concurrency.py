@@ -138,8 +138,8 @@ def test_a_waiter_that_gives_up_does_not_block_the_queue():
 # Routes that do not run under the lock, each for a stated reason. A new route is locked by default;
 # adding one here is a decision to review (see docs/CONCURRENCY.md, "Adding a route").
 UNLOCKED_READS = {
-    "/api/symbols", "/api/quotes", "/api/bars/{symbol}", "/api/depth/{symbol}", "/api/trades/{symbol}",
-    "/api/fundamentals/{symbol}", "/api/movers", "/api/screener", "/api/options/expirations/{symbol}",
+    "/api/symbols", "/api/quotes", "/api/bars/{symbol:path}", "/api/depth/{symbol:path}", "/api/trades/{symbol:path}",
+    "/api/fundamentals/{symbol:path}", "/api/movers", "/api/screener", "/api/options/expirations/{symbol}",
     "/api/options/chain/{symbol}",  # market data: the feed only, and a live feed asks the provider
     "/api/accounts/{aid}/analytics", "/api/accounts/{aid}/statements/{month}",
     "/api/accounts/{aid}/statements/{month}/html",  # fetch price history, then read the account under ctx.locked()
@@ -150,7 +150,7 @@ UNLOCKED_READS = {
     "/api/research/corporate-actions/{symbol}", "/api/research/fundamentals/{symbol}",
     "/api/research/news", "/api/research/economic-calendar", "/api/research/earnings-calendar",
     "/api/research/statements/{symbol}",
-    "/api/chartstate", "/api/chartstate/drawings/{sym}",  # chart settings: their own file and lock, no exchange state
+    "/api/chartstate", "/api/chartstate/drawings/{sym:path}",  # chart settings: their own file and lock, no exchange state
     # backups (PR 19): file I/O must not run under the lock; they take ctx.locked() only to serialise
     "/api/data/status", "/api/data/backups", "/api/data/backups/{name}", "/api/data/export",
     "/api/data/accounts/{aid}/export", "/api/data/recovery",
@@ -166,7 +166,7 @@ SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_e
 }
 NO_EXCHANGE_STATE = {  # the session store and the chart-state file have their own locks
     ("POST", "/api/auth/login"), ("POST", "/api/auth/logout"),
-    ("PUT", "/api/chartstate/settings"), ("PUT", "/api/chartstate/drawings/{sym}"), ("DELETE", "/api/chartstate"),
+    ("PUT", "/api/chartstate/settings"), ("PUT", "/api/chartstate/drawings/{sym:path}"), ("DELETE", "/api/chartstate"),
 }
 
 
@@ -200,7 +200,7 @@ def test_every_api_route_runs_under_the_lock_unless_listed_here():
 def fill_path(path: str, aid: str) -> str:
     for name, value in (("{aid}", aid), ("{symbol}", "MKTX"), ("{oid}", "O00000001"), ("{month}", "2026-11"),
                         ("{kind}", "fills"), ("{jid}", "J1"), ("{alert_id}", "AL00001"), ("{name}", "Main"),
-                        ("{sym}", "MKTX")):
+                        ("{sym:path}", "MKTX"), ("{symbol:path}", "MKTX"), ("{sym}", "MKTX")):
         path = path.replace(name, value)
     assert "{" not in path, f"give fill_path a value for {path}"
     return path

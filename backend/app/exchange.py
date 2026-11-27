@@ -13,12 +13,15 @@ from itertools import count
 from typing import Optional
 
 from .alerts import Alerting
+from .core import assets
 from .core import calendar as cal
 from .core import models as m
 from .core.clock import Clock
+from .core.assets import is_crypto
 from .core.models import Fill, Order, Quote, from_plain, to_plain
 from .core.money import CENT, ZERO, D, cents, parse as parse_num, px4
 from .ledger.account import Account, is_long_term
+from .lifecycle import settings as life_settings
 from .lifecycle.manager import LifecycleManager
 from .marketdata.feed import MarketDataProvider
 from .matching.engine import FillConfig, MatchingEngine
@@ -39,6 +42,9 @@ CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its int
 RUNNING_GAP = 120  # seconds: a longer gap between two ticks means the simulator was not running (or was paused)
 CLOSE_WAIT = 120  # seconds to wait for the provider's daily close before settling at an approximate price
 PROVIDER_CLOSE_WAIT = 1800  # seconds to wait for feed.closing_price to become ready before approximating
+# Crypto (docs/CRYPTO.md): 24/7, fully paid, a percentage fee on every fill (one rate, no maker/taker split).
+CRYPTO_TYPES = (m.MARKET, m.LIMIT, m.STOP, m.STOP_LIMIT)
+CRYPTO_TIFS = (m.DAY, m.GTC, m.IOC)
 
 
 def tidy_qty(q: Decimal) -> str:
@@ -56,9 +62,23 @@ class OrderRejected(ValueError):
     pass
 
 
+class _CryptoTicks:
+    """What the matching engine asks for: a crypto pair's price increment, or None for anything else."""
+
+    def __init__(self, ex: "Exchange"):
+        self.ex = ex
+
+    def get(self, symbol: str, default=None):
+        return self.ex.crypto_spec(symbol).price_increment if is_crypto(symbol) else default
+
+
+def _amt(x: Decimal) -> str:
+    return f"{cents(x):,.2f}"
+
+
 FIELD_LABELS = {"qty": "quantity", "limit_price": "limit price", "stop_price": "stop price",
                 "trail_amount": "trail amount", "trail_percent": "trail percent", "take_profit": "take profit",
-                "stop_loss": "stop loss"}
+                "stop_loss": "stop loss", "notional": "dollar amount"}
 
 
 def _field(req: dict, key: str) -> Optional[Decimal]:
@@ -89,6 +109,7 @@ class Exchange:
         self.data_dir = data_dir
         self.session_mode = session_mode  # 'always' or 'us'
         self.engine = MatchingEngine(fill_config)
+        self.engine.ticks = _CryptoTicks(self)
         self._last_tick = None  # time of the previous tick in this run (None right after a start)
         self._due_open = set()  # on-open orders whose auction is this tick, once the feed has stepped
         self._session_quotes: dict[str, Quote] = {}  # last quote each symbol had in a regular session
@@ -102,6 +123,7 @@ class Exchange:
         self._fill_seq = 1
         self._expiry_seq = count(1)
         self._last_day = None
+        self._last_utc_day = None
         self._last_session = None
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
@@ -128,8 +150,47 @@ class Exchange:
             return "regular"
         return cal.session(self.now() if now is None else now)
 
+    def session_for(self, symbol: str, now: Optional[float] = None) -> str:
+        """The session an order on this symbol trades in: crypto is always open."""
+        return "regular" if is_crypto(symbol) else self.session(now)
+
     def is_stock(self, symbol: str) -> bool:
+        """True for anything the feed lists (stocks, funds and crypto pairs); False for options."""
         return symbol in self.feed.symbols()
+
+    @staticmethod
+    def asset_class(symbol: str) -> str:
+        return assets.asset_class(symbol)
+
+    def crypto_spec(self, symbol: str) -> assets.CryptoSpec:
+        return assets.spec_from_info(symbol, self.feed.symbols().get(symbol))
+
+    def update_settings(self, account_id: str, changes: dict) -> Account:
+        """Apply a settings change. A higher crypto fee is refused while open crypto purchases could then
+        cost more than the cash (the fill-time cap would cut them; better to say so now)."""
+        a = self.account(account_id)
+        old = a.settings
+        new = life_settings.update(old, changes)
+        buys = [o for o in self.engine.orders.values() if o.account_id == a.id and o.active and o.side == m.BUY
+                and is_crypto(o.symbol)]
+        if buys and life_settings.number(new, "crypto_fee_rate") > life_settings.number(old, "crypto_fee_rate"):
+            a.settings = new
+            ok = self._worst_case(a, [], crypto_check=True).ok
+            a.settings = old
+            if not ok:
+                names = ", ".join(f"{o.id} ({o.side} {o.remaining.normalize():f} {o.symbol})" for o in buys)
+                raise ValueError(f"the crypto fee cannot be raised to {life_settings.number(new, 'crypto_fee_rate').normalize():f}% "
+                                 f"while your open crypto purchases would then cost more than your cash: {names}. "
+                                 f"Cancel or reduce them first.")
+        a.settings = new
+        self.dirty = True
+        return a
+
+    @staticmethod
+    def crypto_fee_rate(account: Optional[Account]) -> Decimal:
+        """Percent of the trade value charged on each crypto fill (an account setting)."""
+        settings = account.settings if account is not None else life_settings.defaults()
+        return life_settings.number(settings, "crypto_fee_rate")
 
     def quote(self, symbol: str) -> Optional[Quote]:
         if self.is_stock(symbol):
@@ -249,6 +310,10 @@ class Exchange:
                 "total_pnl": cents(eq - a.starting_cash), "day_pnl": cents(eq - a.day_start_equity),
                 "margin_call": a.margin_call}
         self.lifecycle.extend_summary(a, out)
+        # Crypto is fully paid: the cash on hand (never a loan), net of the fee on the purchase.
+        # (margin: what a new crypto purchase may spend once the open purchases have filled, within the excess)
+        cash_bp = out["buying_power"] if a.type == "cash" else max(min(max(worst.excess, ZERO), worst.buy_cash), ZERO)
+        out["crypto_buying_power"] = (cash_bp / (1 + self.crypto_fee_rate(a) / 100)).quantize(CENT, "ROUND_FLOOR")
         return out
 
     def positions(self, account_id: str) -> list:
@@ -267,7 +332,7 @@ class Exchange:
             row = {"symbol": sym, "description": describe(sym), "qty": qty, "avg_cost": a.avg_cost(sym), "mark": mark,
                    "market_value": mv, "cost_basis": cost, "unrealized_pnl": mv - cost if priced else None,
                    "unrealized_pct": (float((mv - cost) / abs(cost) * 100) if cost else 0.0) if priced else None,
-                   "multiplier": mult, "kind": "option" if mult == 100 else "stock", "day_pnl": None,
+                   "multiplier": mult, "kind": assets.asset_class(sym), "asset_class": assets.asset_class(sym), "day_pnl": None,
                    "price_unavailable": not priced}
             if c:
                 row.update(delta=None, theta=None, underlying=c.underlying, expiry=c.expiry.isoformat())
@@ -358,6 +423,8 @@ class Exchange:
             if contract.expiry not in optchain.expirations(cal.ny_date(self.now())) and account.position(symbol) == 0:
                 raise OrderRejected("expiry is not listed")
             return contract
+        if is_crypto(symbol) and self.feed.symbols()[symbol].get("tradable") is False:
+            raise OrderRejected(f"{symbol} is not tradable right now (the data provider lists it as not tradable)")
         return None
 
     def _good_till(self, req: dict, tif: str) -> tuple:
@@ -479,13 +546,15 @@ class Exchange:
             symbol = str(req.get("symbol", "")).upper().strip()
             side, typ = req.get("side"), req.get("type", m.MARKET)
             tif = req.get("tif", m.DAY)
-            qty = parse_num(req.get("qty"), FIELD_LABELS["qty"])
+            notional = _field(req, "notional")  # crypto only: a dollar amount instead of a quantity
+            qty = (parse_num(req.get("qty"), FIELD_LABELS["qty"]) if req.get("qty") not in (None, "") or notional is None
+                   else None)
             limit, stop = _field(req, "limit_price"), _field(req, "stop_price")
             trail_amt, trail_pct = _field(req, "trail_amount"), _field(req, "trail_percent")
             take_profit, stop_loss = _field(req, "take_profit"), _field(req, "stop_loss")
         except (ValueError, ArithmeticError) as e:
             raise OrderRejected(f"invalid number in order: {e}")
-        _in_range(qty, limit, stop, trail_amt, trail_pct, take_profit, stop_loss)
+        _in_range(qty, notional, limit, stop, trail_amt, trail_pct, take_profit, stop_loss)
         contract = self._check_symbol(account, symbol)
         if side not in (m.BUY, m.SELL):
             raise OrderRejected("side must be buy or sell")
@@ -493,6 +562,12 @@ class Exchange:
             raise OrderRejected(f"unknown order type {typ}")
         if tif not in m.TIFS:
             raise OrderRejected(f"unknown time in force {tif}")
+        crypto = is_crypto(symbol)
+        if crypto:
+            qty = self._crypto_rules(account, req, symbol, side, typ, tif, qty, notional, limit, stop, linked,
+                                     take_profit is not None or stop_loss is not None)
+        elif notional is not None:
+            raise OrderRejected("a dollar amount can only be given for crypto; enter a quantity")
         auction = typ in m.AUCTION_TYPES
         if auction:
             if contract:
@@ -506,20 +581,20 @@ class Exchange:
         if linked and tif in (m.IOC, m.FOK):
             raise OrderRejected(f"{linked} orders cannot be immediate-or-cancel or fill-or-kill")
         expire_at, good_till = self._good_till(req, tif)
-        if qty <= 0 or qty > MAX_QTY:
+        if not crypto and (qty <= 0 or qty > MAX_QTY):
             raise OrderRejected("quantity must be positive and at most 1,000,000")
         if contract and qty != qty.to_integral_value():
             raise OrderRejected("options trade in whole contracts")
-        if qty != qty.quantize(Decimal("0.0001")):
+        if not crypto and qty != qty.quantize(Decimal("0.0001")):
             raise OrderRejected("quantity supports at most 4 decimal places")
-        if qty != qty.to_integral_value() and (typ not in (m.MARKET, m.LIMIT) or tif != m.DAY):
+        if not crypto and qty != qty.to_integral_value() and (typ not in (m.MARKET, m.LIMIT) or tif != m.DAY):
             raise OrderRejected("fractional shares are limited to market and limit day orders")
         for label, v in (("limit price", limit), ("stop price", stop), ("trail amount", trail_amt),
                          ("trail percent", trail_pct), ("take profit", take_profit), ("stop loss", stop_loss)):
             if v is not None and v <= 0:
                 raise OrderRejected(f"{label} must be positive")
         for label, v in (("limit price", limit), ("stop price", stop), ("take profit", take_profit), ("stop loss", stop_loss)):
-            if v is not None and v != v.quantize(CENT if v >= 1 else Decimal("0.0001")):
+            if not crypto and v is not None and v != v.quantize(CENT if v >= 1 else Decimal("0.0001")):
                 raise OrderRejected(f"{label} has too many decimal places")
         if typ in (m.LIMIT, m.STOP_LIMIT, m.LOO, m.LOC) and limit is None:
             raise OrderRejected("limit price is required")
@@ -654,7 +729,12 @@ class Exchange:
             if (lot.qty > 0) == (side == m.BUY):
                 raise OrderRejected(f"lot {lot_id} is a {'long' if lot.qty > 0 else 'short'} lot; "
                                     f"{'sell' if lot.qty > 0 else 'buy'} to close it")
-            if q <= 0 or q > MAX_QTY or q != q.quantize(Decimal("0.0001")):
+            if is_crypto(symbol):  # crypto lots (PR 14) are named in the coin's own quantity step
+                step = self.crypto_spec(symbol).qty_increment
+                if q <= 0 or q > MAX_QTY or not assets.on_step(q, step):
+                    raise OrderRejected(f"lot {lot_id}: quantity must be positive, at most 1,000,000, and a multiple "
+                                        f"of {step.normalize():f}")
+            elif q <= 0 or q > MAX_QTY or q != q.quantize(Decimal("0.0001")):
                 raise OrderRejected(f"lot {lot_id}: quantity must be positive, at most 1,000,000, with at most "
                                     f"4 decimal places")
             free = abs(lot.qty) - reserved.get(lot_id, ZERO)
@@ -687,6 +767,71 @@ class Exchange:
                         "term": "long" if is_long_term(lot, self.now()) else "short", "method": method})
         return out
 
+    def _crypto_rules(self, account: Account, req: dict, symbol: str, side: str, typ: str, tif: str,
+                      qty: Optional[Decimal], notional: Optional[Decimal], limit, stop, linked, bracket: bool) -> Decimal:
+        """Crypto order rules. Returns the quantity (worked out from a dollar amount when one is given)."""
+        if linked or bracket:
+            raise OrderRejected("crypto orders cannot be bracket, one-cancels-other or one-triggers-other orders")
+        if typ in m.AUCTION_TYPES:
+            raise OrderRejected("on-open and on-close orders do not apply to crypto, which trades 24 hours a day")
+        if typ not in CRYPTO_TYPES:
+            raise OrderRejected("crypto orders can be market, limit, stop or stop-limit orders")
+        if typ == m.STOP and side == m.BUY:
+            raise OrderRejected("a crypto stop order to buy needs a limit price (use stop-limit): a market fill above "
+                                "the stop could cost more than your cash")
+        if tif not in CRYPTO_TIFS:
+            raise OrderRejected("crypto orders can be day, good-till-canceled or immediate-or-cancel orders")
+        if req.get("extended_hours"):
+            raise OrderRejected("extended hours do not apply to crypto, which trades 24 hours a day")
+        spec = self.crypto_spec(symbol)
+        for label, v in (("limit price", limit), ("stop price", stop)):
+            if v is not None and v > 0 and not assets.on_step(v, spec.price_increment):
+                raise OrderRejected(f"the {label} for {symbol} must be a multiple of {spec.price_increment.normalize():f}")
+        for label, v in (("limit price", limit), ("stop price", stop)):
+            if v is not None and v <= 0:
+                raise OrderRejected(f"the {label} must be positive")
+        if qty is not None and notional is not None:
+            raise OrderRejected("give a quantity or a dollar amount, not both")
+        if notional is not None:
+            if notional <= 0:
+                raise OrderRejected("the dollar amount must be positive")
+            if notional != notional.quantize(CENT):
+                raise OrderRejected("the dollar amount has more than 2 decimal places")
+            if typ not in (m.MARKET, m.LIMIT):
+                raise OrderRejected("a dollar amount can be given for market and limit orders; enter a quantity for stop orders")
+            q = self.quote(symbol)
+            ref = limit if typ == m.LIMIT and limit is not None else (q.ask if side == m.BUY else q.bid) if q else None
+            if ref is None or ref <= 0:
+                raise OrderRejected(f"no quote available for {symbol}, so the dollar amount cannot be converted")
+            step = spec.qty_increment
+            qty = assets.floor_to(notional / ref, step)
+            if typ == m.MARKET and side == m.BUY:
+                # A market buy walks the book, so size it on the walked price: the spend never exceeds the amount.
+                while qty > 0 and cents(qty * self.engine._walk(q, side, qty)) > notional:
+                    smaller = assets.floor_to(notional / self.engine._walk(q, side, qty), step)
+                    qty = smaller if smaller < qty else qty - step
+        if qty is None or qty <= 0:
+            raise OrderRejected("quantity must be positive")
+        whole = side == m.SELL and qty == account.position(symbol)  # selling all of it is always allowed
+        if not whole and not assets.on_step(qty, spec.qty_increment):
+            raise OrderRejected(f"the quantity of {symbol} must be a multiple of {spec.qty_increment.normalize():f}")
+        if qty < spec.min_order_size and not whole:
+            extra = f" (that amount buys {qty.normalize():f})" if notional is not None else ""
+            raise OrderRejected(f"the minimum order for {symbol} is {spec.min_order_size.normalize():f}{extra}")
+        if side == m.SELL:
+            self._no_crypto_short(account, symbol, qty)
+        return qty
+
+    def _no_crypto_short(self, account: Account, symbol: str, qty: Decimal, ignore: Optional[str] = None) -> None:
+        held = account.position(symbol)
+        selling = sum((o.remaining for o in self.engine.orders.values() if o.account_id == account.id and o.active
+                       and o.symbol == symbol and o.side == m.SELL and o.id != ignore), ZERO)
+        if qty + selling > held:
+            have = f"you hold {held.normalize():f}" if held > 0 else "you hold none"
+            if selling > 0:
+                have += f" and open orders already sell {selling.normalize():f}"
+            raise OrderRejected(f"crypto cannot be sold short: {have}")
+
     def _estimate_price(self, o: Order) -> Decimal:
         q = self.quote(o.symbol)
         if q is None or q.ask <= 0:
@@ -700,14 +845,19 @@ class Exchange:
             return max(px, o.stop_price) if o.side == m.BUY else min(px, o.stop_price)
         return px
 
-    def _fee(self, symbol: str, qty: Decimal) -> Decimal:
+    def _fee(self, symbol: str, qty: Decimal, price: Optional[Decimal] = None, account: Optional[Account] = None) -> Decimal:
+        """Commission on a fill. Crypto pays a percentage of the trade value, rounded to the cent."""
+        if is_crypto(symbol):
+            if price is None:
+                raise ValueError("a crypto fee needs the price")
+            return cents(qty * price * self.crypto_fee_rate(account) / 100)
         return cents(qty * (OPTION_FEE if multiplier(symbol) == 100 else STOCK_FEE))
 
     class _Worst:
         def __init__(self, ok, reason, excess, requirement, cash_after):
             self.ok, self.reason, self.excess, self.requirement, self.cash_after = ok, reason, excess, requirement, cash_after
 
-    def _worst_case(self, account: Account, new_orders: list) -> "_Worst":
+    def _worst_case(self, account: Account, new_orders: list, crypto_check: bool = False) -> "_Worst":
         """Check the account under every scenario: all open buys fill, all open sells fill, neither.
 
         One-cancels-other groups count once per symbol. Held bracket and exit children are
@@ -721,7 +871,15 @@ class Exchange:
         but the money from the sells has not arrived. That stops a resting purchase from
         spending the cash that secures a resting short put. (A sale that must fill before
         the order it triggers is the exception: its money is there by then.)
+
+        Crypto is never bought with borrowed money: when the request being checked is a crypto
+        purchase (or `crypto_check` is set), a margin account must also keep cash at or above zero
+        once all its open purchases have filled. Other requests are not held to that, so a resting
+        crypto purchase does not change what a stock order may do (the fill-time cap in _handle
+        keeps crypto fills within cash whatever fills first). `buy_cash` on the result is the cash
+        left when every open purchase fills: what a new crypto purchase may spend.
         """
+        crypto_check = crypto_check or any(is_crypto(o.symbol) and o.side == m.BUY and not o.legs for o in new_orders)
         live = [o for o in self.engine.orders.values() if o.account_id == account.id
                 and (o.status in (m.WORKING, m.PARTIAL) or (o.status == m.HELD and o.role == m.TRIGGERED))]
         live += [o for o in new_orders if o.id not in self.engine.orders]
@@ -731,7 +889,7 @@ class Exchange:
         triggering = {o.parent_id for o in singles if o.status == m.HELD}
         combo_sets = [[]] + ([combos] if combos else []) + ([[c] for c in combos] if len(combos) > 1 else [])
         base = account.positions()
-        result = None
+        result, buy_cash = None, None
         for side in (None, m.BUY, m.SELL) + (("both",) if account.type == "cash" else ()):
             for combo_set in combo_sets:
                 pos, cash, seen, applied = dict(base), account.cash, {}, set()
@@ -747,9 +905,11 @@ class Exchange:
                         seen[(o.oco_group, o.symbol)], qty = qty, qty - prior
                     sign = 1 if o.side == m.BUY else -1
                     pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * qty
-                    cash -= self._fee(o.symbol, qty)
+                    crypto = is_crypto(o.symbol)
+                    px = self._estimate_price(o) if crypto else None
+                    cash -= self._fee(o.symbol, qty, px, account)
                     if sign > 0 or side != "both" or o.id in triggering:
-                        cash -= sign * cents(qty * self._estimate_price(o) * multiplier(o.symbol))
+                        cash -= sign * cents(qty * (px or self._estimate_price(o)) * multiplier(o.symbol))
 
                 for o in singles if side is not None else ():
                     if (o.side != side and side != "both") or o.id in applied:
@@ -766,10 +926,17 @@ class Exchange:
                 pos = {s: q for s, q in pos.items() if q != 0}
                 ev = margin.evaluate(account.type, cash, pos, self._marks(pos))
                 w = Exchange._Worst(ev.ok, ev.reason, ev.excess, ev.requirement, cash)
+                if side == m.BUY and not combo_set:
+                    buy_cash = cash if buy_cash is None else min(buy_cash, cash)
+                if crypto_check and side in (m.BUY, "both") and cash < 0 and account.type == "margin":
+                    w = Exchange._Worst(False, f"crypto is not bought on margin: this order and your open purchases "
+                                               f"need {_amt(account.cash - cash)} but cash is {_amt(account.cash)}",
+                                        ev.excess, ev.requirement, cash)
                 if result is None or (result.ok and not w.ok) or (w.ok == result.ok and (
                         w.excess < result.excess if account.type == "margin"
                         else w.cash_after - w.requirement < result.cash_after - result.requirement)):
                     result = w
+        result.buy_cash = account.cash if buy_cash is None else buy_cash
         return result
 
     def _shortfall(self, account: Account, worst: "_Worst", entry: Optional[Order] = None,
@@ -865,7 +1032,8 @@ class Exchange:
         if not self._closes(account, o.symbol, o.side, o.qty):
             return False
         sign = 1 if o.side == m.BUY else -1
-        paid = sign * cents(o.qty * self._estimate_price(o) * multiplier(o.symbol)) + self._fee(o.symbol, o.qty)
+        px = self._estimate_price(o)
+        paid = sign * cents(o.qty * px * multiplier(o.symbol)) + self._fee(o.symbol, o.qty, px, account)
         return self._not_riskier(account, {o.symbol: sign * o.qty}, -paid)
 
     def _risk_check(self, account: Account, orders: list) -> "_Worst":
@@ -925,7 +1093,8 @@ class Exchange:
         price = self._estimate_price(entry)
         mult = multiplier(entry.symbol)
         notional = cents(entry.qty * price * mult)
-        fee = self._fee(entry.symbol, entry.qty)
+        fee = self._fee(entry.symbol, entry.qty, price, a)
+        crypto = is_crypto(entry.symbol)
         before = self.summary(account_id)
         worst = self._risk_check(a, orders)
         closing = worst.closing
@@ -952,8 +1121,14 @@ class Exchange:
                                if self.session_mode == "always" else ""))
             if entry.limit_price is not None:
                 warnings.append(f"If the {which}ing price is worse than the limit, the order expires unfilled.")
-        elif self.session() != "regular" and not entry.extended_hours:
+        elif self.session_for(entry.symbol) != "regular" and not entry.extended_hours:
             warnings.append("The market is closed; the order will wait for the regular session.")
+        if crypto:
+            rate = self.crypto_fee_rate(a).normalize()
+            warnings.append(f"Crypto is fully paid (no margin, no short selling). A fee of {rate:f}% of the trade value "
+                            f"is charged on each fill.")
+            if entry.tif == m.DAY:
+                warnings.append("Crypto trades 24 hours a day, 7 days a week; a day order expires at midnight UTC.")
         if entry.good_till:
             warnings.append(f"This order expires at the close on {entry.good_till} if it has not filled.")
         if len(orders) > 1 and orders[1].parent_id != entry.id:
@@ -962,6 +1137,8 @@ class Exchange:
             warnings.append("The triggered orders stay on hold until this order fills.")
         return {"ok": ok, "reason": None if ok else rule or self._shortfall(a, worst, entry), "symbol": entry.symbol,
                 "description": describe(entry.symbol), "side": entry.side, "qty": entry.qty,
+                "asset_class": assets.asset_class(entry.symbol),
+                "fee_rate": self.crypto_fee_rate(a) if crypto else None,
                 "estimated_price": price, "estimated_notional": notional, "estimated_fees": fee,
                 "estimated_total": notional + fee if entry.side == m.BUY else notional - fee,
                 "position_before": pos, "position_after": after_pos, "buying_power_before": before["buying_power"],
@@ -996,7 +1173,7 @@ class Exchange:
     def _place(self, orders: list) -> None:
         entry = orders[0]
         now = self.now()
-        sess, q = self.session(now), self.quote(entry.symbol)
+        sess, q = self.session_for(entry.symbol, now), self.quote(entry.symbol)
         if entry.legs:
             events = self.engine.submit_multileg(entry, self._leg_quotes(entry.legs), now, sess)
         elif len(orders) == 1:
@@ -1049,7 +1226,20 @@ class Exchange:
             # the group's size is what its orders had when it was entered; fills on one have
             # already been taken off the others, and raising one would let the group over-fill
             raise OrderRejected("the quantity of a one-cancels-other order cannot be raised")
-        if qty is not None and (qty > MAX_QTY or qty != qty.quantize(Decimal("0.0001"))):
+        if is_crypto(o.symbol):
+            spec = self.crypto_spec(o.symbol)
+            rest = None if qty is None else qty - o.filled_qty  # what the changed order still has to fill
+            whole = qty is not None and o.side == m.SELL and rest == a.position(o.symbol)
+            if rest is not None and rest > 0 and not whole and (not assets.on_step(rest, spec.qty_increment)
+                                                                or rest < spec.min_order_size):
+                raise OrderRejected(f"what is left to fill of {o.symbol} must be a multiple of "
+                                    f"{spec.qty_increment.normalize():f} and at least {spec.min_order_size.normalize():f}")
+            for label, v in (("limit price", limit), ("stop price", stop)):
+                if v is not None and not assets.on_step(v, spec.price_increment):
+                    raise OrderRejected(f"the {label} for {o.symbol} must be a multiple of {spec.price_increment.normalize():f}")
+            if qty is not None and o.side == m.SELL and qty > o.qty:
+                self._no_crypto_short(a, o.symbol, qty - o.filled_qty, ignore=o.id)
+        elif qty is not None and (qty > MAX_QTY or qty != qty.quantize(Decimal("0.0001"))):
             raise ValueError("invalid quantity")
         if qty is not None and qty != o.qty and o.lots:
             raise OrderRejected("this order closes chosen tax lots; cancel it and enter a new one to change its quantity")
@@ -1102,6 +1292,8 @@ class Exchange:
         legs, underlying, stock_legs = [], None, 0
         for l, ratio in zip(raw, ratios):
             symbol = str(l.get("symbol", "")).upper().strip()
+            if is_crypto(symbol):
+                raise OrderRejected("multi-leg orders are for options and their underlying stock, not crypto")
             contract = self._check_symbol(account, symbol)
             if l.get("side") not in (m.BUY, m.SELL):
                 raise OrderRejected("each leg needs a side: buy or sell")
@@ -1339,11 +1531,13 @@ class Exchange:
                 acct = self.accounts.get(obj.account_id)
                 if acct is None:
                     continue
+                if is_crypto(obj.symbol) and obj.side == m.BUY and obj.kind == "trade" and not self._cap_crypto_buy(acct, obj):
+                    continue
                 order = self.engine.orders.get(obj.order_id)
                 lot_order = self._names_lots(obj)
                 cut = self._clip_lot_fill(acct, lot_order, obj) if lot_order is not None else []
                 if obj.qty > 0:
-                    obj.fee = self._fee(obj.symbol, obj.qty)
+                    obj.fee = self._fee(obj.symbol, obj.qty, obj.price, acct)
                     acct.apply_fill(obj, multiplier(obj.symbol), lot_order.lots if lot_order else None,
                                     self.reserved_lots(acct.id, exclude=obj.order_id))
                     self.lifecycle.on_fill(acct, obj)
@@ -1361,6 +1555,43 @@ class Exchange:
                 self.events.append({"type": "order", "account_id": obj.account_id, "order": obj})
             self.dirty = True
 
+    def _affordable(self, acct: Account, symbol: str, price: Decimal) -> Decimal:
+        """The most of a crypto pair cash can pay for at this price, fee included (never a loan)."""
+        step = self.crypto_spec(symbol).qty_increment
+        cash = max(acct.cash, ZERO)
+        if price <= 0:
+            return ZERO
+        q = assets.floor_to(cash / (price * (1 + self.crypto_fee_rate(acct) / 100)), step)
+        while q > 0 and cents(q * price) + self._fee(symbol, q, price, acct) > cash:
+            q -= step
+        return max(q, ZERO)
+
+    def _cap_crypto_buy(self, acct: Account, fill: Fill) -> bool:
+        """Fill-time guard: a crypto purchase never takes cash below zero, whatever happened since entry.
+
+        A fill larger than the cash affords is cut to what it affords and the rest of the order is canceled.
+        Returns False when nothing at all can be bought (the fill is dropped).
+        """
+        can = self._affordable(acct, fill.symbol, fill.price)
+        if fill.qty <= can:
+            return True
+        order = self.engine.orders.get(fill.order_id)
+        cut = fill.qty - can
+        fill.qty = can
+        if order is not None:
+            order.filled_qty -= cut
+            notional = sum((f.qty * f.price for f in acct.fills if f.order_id == order.id), ZERO) + can * fill.price
+            order.avg_fill_price = (notional / order.filled_qty).quantize(Decimal("1e-9")).normalize() if order.filled_qty else None
+            if order.avg_fill_price is not None and order.avg_fill_price.as_tuple().exponent > 0:
+                order.avg_fill_price = order.avg_fill_price.quantize(Decimal(1))
+            order.status = m.PARTIAL if order.filled_qty > 0 else m.WORKING
+            reason = (f"canceled: the price moved to {fill.price.normalize():f} and cash ({_amt(acct.cash)}) pays for "
+                      f"{'only ' + format(can.normalize(), 'f') if can > 0 else 'none'} of the remaining "
+                      f"{(can + cut).normalize():f} including the fee; crypto is never bought with borrowed money")
+            self.engine.cancel(order.id, fill.ts, reason)
+            self.events.append({"type": "order", "account_id": order.account_id, "order": order})
+        return can > 0
+
     # ---- the heartbeat -----------------------------------------------------
     def tick(self) -> list:
         """Advance the market one step and process everything that depends on it."""
@@ -1376,7 +1607,7 @@ class Exchange:
         active_symbols = {o.symbol for o in self.engine.orders.values() if o.status in (m.WORKING, m.PARTIAL)}
         for q in quotes:
             if q.symbol in active_symbols:
-                self._handle(self.engine.on_quote(q, now, sess))
+                self._handle(self.engine.on_quote(q, now, "regular" if is_crypto(q.symbol) else sess))
         changed = {q.symbol for q in quotes}
         for sym in active_symbols:
             c = parse_option(sym)
@@ -1411,11 +1642,17 @@ class Exchange:
                 self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None))
             self.dirty = True
         self._last_day = day
+        utc_day = int(now // 86400)  # crypto day orders end at the UTC day roll, whatever the stock session does
+        if self.session_mode != "always" and self._last_utc_day is not None and utc_day != self._last_utc_day:
+            self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None and is_crypto(o.symbol)))
+        self._last_utc_day = utc_day
         if self.session_mode != "always" and self._last_session is not None and sess != self._last_session:
             if self._last_session == "regular":
-                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and not o.extended_hours and o.parent_id is None))
+                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and not o.extended_hours and o.parent_id is None
+                                                and not is_crypto(o.symbol)))
             if sess == "closed":
-                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None))
+                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None
+                                                and not is_crypto(o.symbol)))
         self._last_session = sess
 
     # ---- the first tick after a start or a pause ------------------------------------------------

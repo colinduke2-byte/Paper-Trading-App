@@ -7,12 +7,13 @@ import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from
 import { BottomPanel } from "./Panels";
 import { feedBanner, Research } from "./Research";
 import { Ticket, TicketSeed } from "./Ticket";
+import { CryptoAbout, CryptoTicket } from "./CryptoTicket";
 import { MobileShell, Screen, TopAction, useSmallScreen } from "./MobileShell";
 import { jumpKey, modeKey, ReplayBar, ReplayPicker, replayBanner, useModeSwitch } from "./Replay";
 import { SettingsDialog } from "./Settings";
 import { DataDialog, SaveNotice } from "./DataBackups";
 import { HelpDialog } from "./Help";
-import { api, dateTime, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
+import { api, dateTime, isCrypto, isOption, money, pct, sessionOk, signed, signedOut, store, time, tone, numText, underlyingOf, usd, describeOption, marketableLimit } from "./util";
 import { useSignOutAction } from "./Login";
 import { bellLabel, deliver, NotificationBell, NotificationPanel, useNotifications } from "./Notifications";
 import { ALERT_AT_PRICE, AlertBuilder, AlertSeed } from "./AlertsTab";
@@ -229,32 +230,39 @@ export default function App() {
   const saveNotice = <SaveNotice storage={status?.storage} />;
   const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
   const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
+  // A crypto pair has no options, company data or research: it shows Chart and About.
+  const crypto = isCrypto(symbol);
+  const shown = crypto ? (view === "About" ? "About" : "Chart") : view === "About" ? "Chart" : view;
   const mainTabs = (
     <div className="tabs" role="tablist">
-      {["Chart", "Options", "Company", "Research"].map((v) => (
-        <button key={v} role="tab" aria-selected={v === view} className={v === view ? "on" : ""} onClick={() => setView(v)}>{v}</button>
+      {(crypto ? ["Chart", "About"] : ["Chart", "Options", "Company", "Research"]).map((v) => (
+        <button key={v} role="tab" aria-selected={v === shown} className={v === shown ? "on" : ""} onClick={() => setView(v)}>{v}</button>
       ))}
     </div>
   );
   const mode = modeKey(status) || "live"; // remounts the views when switching between live and a replay run
   const mainView = (
     <div className="view">
-      {view === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol}
+      {shown === "About" && <CryptoAbout info={info} />}
+      {shown === "Chart" && <Chart key={jumpKey(status)} symbol={symbol} quote={quotes[symbol]} position={stockPos} orders={openForSymbol}
         accountId={accountId} notify={notify} onOrdersChanged={() => setRefreshKey((k) => k + 1)} scope={status?.replay ? `replay:${status.replay.session_id}` : "live"}
         onTradeAtPrice={(s) => { setSeed({ ...s, nonce: Date.now() }); setScreen("Trade"); }} />}
-      {view === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
-      {view === "Company" && <Company info={info} />}
-      {view === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
+      {shown === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} />}
+      {shown === "Company" && <Company info={info} />}
+      {shown === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
     </div>
   );
   const bottom = accountId && (
     <BottomPanel accountId={accountId} positions={positions} orders={orders} refreshKey={refreshKey} quotes={quotes}
       onSelect={pickSymbol} onClose={closePosition} onChanged={() => setRefreshKey((k) => k + 1)} notify={notify} />
   );
-  const ticketEl = accountId && (
+  const ticketEl = accountId && (isCrypto(seed.symbol) ? (
+    <CryptoTicket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} position={ticketPos} summary={summary}
+      onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
+  ) : (
     <Ticket seed={seed} accountId={accountId} quote={quotes[seed.symbol]} description={ticketDesc} position={ticketPos}
       onPlaced={(m) => { notify(m); setRefreshKey((k) => k + 1); }} />
-  );
+  ));
   const depth = <DepthTape symbol={underlyingOf(symbol)} />;
   const replayBar = <ReplayBar status={status} onStatus={setStatus} notify={notify} />;
   const overlays = (
@@ -291,7 +299,7 @@ export default function App() {
     return (
       <MobileShell screen={screen} setScreen={setScreen} accountId={accountId} account={accounts.find((a) => a.id === accountId)}
         summary={summary} connected={connected} session={session} banner={banner} accountSelect={accountSelect} actions={topActions}
-        notice={(status?.live_unavailable || status?.storage?.saving_failed) ? <div className="m-notices">{status?.storage?.saving_failed && saveNotice}{status?.live_unavailable && feedNotice}{marginNotice}</div> : marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={view}
+        notice={(status?.live_unavailable || status?.storage?.saving_failed) ? <div className="m-notices">{status?.storage?.saving_failed && saveNotice}{status?.live_unavailable && feedNotice}{marginNotice}</div> : marginNotice} watchlist={watchlist} quote={quoteHeader} mainTabs={mainTabs} mainView={mainView} view={shown}
         ticket={ticketEl} depth={depth} bottom={bottom} symbol={symbol} onTrade={startTrade}
         replayBar={status?.replay ? replayBar : null} mode={mode}>
         {overlays}

@@ -32,6 +32,9 @@ SPEC = {
                         "Accrued daily on short stock market value (actual/360), posted monthly.", ("0", "200")),
     "margin_call_liquidation": ("bool", True, "Liquidate on unmet margin calls",
                                 "Sell positions with market orders when a margin call is not met in time.", None),
+    "crypto_fee_rate": ("number", "0.25", "Crypto fee (% of trade value)",
+                        "Charged on every crypto fill, buy or sell, and taken from cash. One rate for every fill: "
+                        "the simulator does not split maker and taker fees.", ("0", "5")),
     "margin_call_grace_hours": ("number", "13", "Margin call grace period (hours of open market)",
                                 "Time to meet a margin call before positions are liquidated. Only time while the "
                                 "market is open and PaperDesk is running counts: 13 hours is two regular trading "

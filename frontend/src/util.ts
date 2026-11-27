@@ -37,7 +37,17 @@ export const signed = (v: any, dp = 2) => (isNum(v) ? (v > 0 ? "+" : "") + money
 
 export const pct = (v: any) => (isNum(v) ? (v > 0 ? "+" : "") + v.toFixed(2) + "%" : "–");
 
-export const qty = (v: any) => (isNum(v) ? v.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "–");
+// Up to 9 decimals: stocks have at most 4, crypto pairs use their own quantity increment.
+export const qty = (v: any) => (isNum(v) ? v.toLocaleString("en-US", { maximumFractionDigits: 9 }) : "–");
+
+// A price with as many decimals as it needs: 2 from $1 up, 4 down to a cent, then up to 8 (small crypto prices).
+export const price = (v: any) => {
+  if (!isNum(v)) return "–";
+  const a = Math.abs(v);
+  if (a >= 1 || a === 0) return money(v, 2);
+  if (a >= 0.01) return money(v, 4);
+  return v.toLocaleString("en-US", { minimumFractionDigits: 6, maximumFractionDigits: 8 });
+};
 
 export function compact(v: any): string {
   if (!isNum(v)) return "–";
@@ -57,6 +67,11 @@ export const dateTime = (ts: number) =>
   new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 
 export const isOption = (s: string) => /^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(s);
+
+// Crypto pairs are written BASE/USD (see backend/app/core/assets.py).
+export const isCrypto = (s: string) => /^[A-Z0-9]{1,15}\/USD$/.test(s || "");
+
+export const ASSET_LABELS: Record<string, string> = { stock: "Stock", option: "Option", crypto: "Crypto" };
 
 export const underlyingOf = (s: string) => (isOption(s) ? s.replace(/\d{6}[CP]\d{8}$/, "") : s);
 

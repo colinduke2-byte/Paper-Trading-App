@@ -25,7 +25,7 @@ FORMAT = "paperdesk-session"
 VERSION = 1
 SUFFIX = ".pdsession.gz"
 QUOTE, TRADE = "Q", "T"
-_SYMBOL = re.compile(r"^[A-Z0-9.\-]{1,12}$")
+_SYMBOL = re.compile(r"^(?:[A-Z0-9.\-]{1,12}|[A-Z0-9]{1,15}/USD)$")  # stocks, funds and BASE/USD crypto pairs
 HEADER_DECIMALS = ("bid", "ask", "bid_size", "ask_size", "last", "open", "high", "low", "volume", "prev_close")
 
 

@@ -130,6 +130,7 @@ shows "connection limit exceeded" and falls back to polling.
 | `PAPERDESK_ALPACA_FEED` | `iex` | `iex` (free, real time), `sip` (paid), `delayed_sip` (15 minutes late; free availability UNVERIFIED). |
 | `PAPERDESK_ALPACA_OPTIONS_FEED` | `indicative` | `indicative` (free) or `opra` (paid). |
 | `PAPERDESK_ALPACA_RPM` | `190` | REST request budget per minute (the free plan allows 200). |
+| `PAPERDESK_ALPACA_CRYPTO_LOC` | `us` | Crypto data location: `us` (Alpaca US), `us-1` (Kraken US) or `eu-1` (Kraken EU). |
 | `FINNHUB_API_KEY` | — | Optional. Earnings calendar and fundamentals. |
 | `PAPERDESK_SESSIONS` | `us` with Alpaca, `always` with synthetic | `us` follows real market hours. |
 | `PAPERDESK_DATA` | `./data` | With Alpaca, state goes to the `alpaca` subfolder, so accounts holding fictional symbols never mix with real ones. |
@@ -179,6 +180,12 @@ falls back to synthetic, with the cause shown.
   shown as funds.
 - **Never trades.** The HTTP layer implements only GET. No order endpoint exists in the code, and a
   test checks for that.
+
+## Crypto
+
+Alpaca's crypto market data (USD pairs, 24/7) is added to the stock feed by `AlpacaCryptoFeed`. The
+verified facts, how it works and what has not been tested against the live service are in
+[CRYPTO.md](CRYPTO.md#alpaca-crypto-data).
 
 ## Research data shapes
 

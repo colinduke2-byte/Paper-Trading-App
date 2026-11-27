@@ -509,7 +509,8 @@ class Alerting:
             cond = s.crossed_up if al["op"] == "crosses_above" else s.crossed_down
             val = s.calc.value
             shown = val if s.indicator != "macd" else val[0] - val[1]
-            extra = f"Close {s.close:.2f}." if s.indicator != "macd" else ""
+            close = f"{s.close:.2f}" if abs(s.close) >= 1 else f"{s.close:.8f}".rstrip("0")  # small crypto prices
+            extra = f"Close {close}." if s.indicator != "macd" else ""
             self._check(al, cond, float(shown), now, extra)
 
     # ---- accounts -------------------------------------------------------------------------------

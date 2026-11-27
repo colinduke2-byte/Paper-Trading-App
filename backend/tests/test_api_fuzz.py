@@ -125,7 +125,7 @@ def baselines(aid, oid, jid, calls):
 
 def _template(path, aid, oid, jid):
     return path.replace(aid, "{aid}").replace(oid, "{oid}").replace(jid, "{jid}").replace("/Fuzz", "/{name}") \
-        .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym}") \
+        .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym:path}") \
         .replace("/backups/BKNAME", "/backups/{name}")
 
 

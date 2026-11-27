@@ -23,6 +23,10 @@ Nothing here is investment advice.
 
 The app also has a **Help** button with the essentials, for use offline.
 
+Crypto pairs quoted in US dollars trade alongside stocks and options, 24 hours a day and fully paid
+(no margin, no short selling, a percentage fee per fill). The simulated coins (SIMCOIN/USD and others)
+are invented; see [docs/CRYPTO.md](docs/CRYPTO.md).
+
 ## Run it
 
 Requires Python 3.11 or newer (Node is not needed).
@@ -54,6 +58,7 @@ restore the latest backup, start fresh or quit. Only one server can use a data f
 | `PAPERDESK_DATA` | `backend/data` | Where state is saved. Set it in the environment: the server ignores it in `.env` |
 | `PAPERDESK_BACKUP_INTERVAL` | `3600` | Seconds between automatic backups; `0` turns them off (`PAPERDESK_BACKUP_KEEP_HOURLY` 24, `PAPERDESK_BACKUP_KEEP_DAILY` 14) |
 | `PAPERDESK_SEED` | `7` | Seed for the simulated price history. Set it in the environment, not `.env` |
+| `PAPERDESK_CLOCK_START` | unset | Simulated prices only: start the clock at this UTC time, e.g. `2026-11-28T15:00:00Z` (tests and demos) |
 | `PORT` | `8000` | Port (`run.sh`, `run.bat`, Docker). In `.env` it is read by Docker only |
 | `HOST` | `127.0.0.1` | Bind address (`run.sh`, `run.bat`; `0.0.0.0` in LAN mode). A network address is refused without LAN mode. Only the Docker image sets `0.0.0.0`, inside the container |
 | `PAPERDESK_LAN` | `0` | `1`: let devices on your network connect (needs `PAPERDESK_PASSCODE`). See LAN mode |

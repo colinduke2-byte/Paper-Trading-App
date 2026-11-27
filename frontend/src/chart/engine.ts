@@ -138,6 +138,10 @@ export function setBars(g: Gen, input: Bar[]) {
   g.raw = raw.map((b) => b.time);
   g.bars = raw.map((b) => ({ ...b, time: b.time + g.shift }));
   g.main.setData(g.bars.map((b) => mainPoint(g, b)) as any);
+  // Small prices (crypto pairs under $1) need more decimals on the price scale.
+  const lastClose = raw.length ? Math.abs(raw[raw.length - 1].close) : 1;
+  const precision = lastClose >= 1 || lastClose === 0 ? 2 : lastClose >= 0.01 ? 4 : 6;
+  g.main.applyOptions({ priceFormat: { type: "price", precision, minMove: Math.pow(10, -precision) } });
   g.volume.setData(g.bars.map(volPoint) as any);
   computeIndicators(g);
   for (const ind of g.inds)

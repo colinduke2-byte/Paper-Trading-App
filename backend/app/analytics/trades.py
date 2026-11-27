@@ -7,6 +7,7 @@ of every row's gain equals the ledger's realised balance exactly.
 from decimal import Decimal
 from typing import Optional
 
+from ..core.assets import asset_class
 from ..core.money import ZERO, D, cents
 from ..options.symbology import describe, multiplier, parse as parse_option
 from . import wash
@@ -37,7 +38,7 @@ def closed_lots(account) -> list:
         out.append({
             "id": c.get("id", f"C{i + 1}"), "symbol": c["symbol"], "description": describe(c["symbol"]),
             "qty": q, "direction": "long" if long else "short",
-            "asset": "option" if parse_option(c["symbol"]) else "stock",
+            "asset": asset_class(c["symbol"]),
             "opened_at": float(c["opened_at"]), "closed_at": float(c["closed_at"]),
             "open_price": D(c["open_price"]), "close_price": D(c["close_price"]),
             "proceeds": proceeds, "cost": cost, "gain": gain,
@@ -180,7 +181,7 @@ def exposure(rows: list, sectors: dict, equity: Decimal) -> dict:
         under = c.underlying if c else r["symbol"]
         sector = sectors.get(under, "Other")
         by_symbol.append({"symbol": r["symbol"], "description": describe(r["symbol"]), "sector": sector,
-                          "asset": "option" if c else "stock", "market_value": mv, "weight": pct(mv)})
+                          "asset": asset_class(r["symbol"]), "market_value": mv, "weight": pct(mv)})
         s = by_sector.setdefault(sector, {"sector": sector, "long": ZERO, "short": ZERO})
         s["long" if mv > 0 else "short"] += mv
     sectors_out = []
