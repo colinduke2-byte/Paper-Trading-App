@@ -938,7 +938,17 @@ def test_a_long_seek_holds_the_lock_only_in_short_slices(tmp_path, monkeypatch):
     assert rp.guard is ctx.lock
     tick = rp.ex.tick
     rp.ex.tick = lambda: (time.sleep(0.0001), tick())[1]  # a market slow enough that the seek takes a while
-    ctx.lock.longest = (0.0, None)
+    # Every hold is recorded with its holder. The bound applies to the seek's own slices ("replay command"): a CI
+    # runner that stalls during one of the requests below (seen on macOS: an order held the lock 0.61 s) says
+    # nothing about the seek; the requests must still all succeed while it runs.
+    holds = []
+    real_release = type(ctx.lock).release
+
+    def release(lock):
+        if lock is ctx.lock and lock._depth == 1 and lock.owned():
+            holds.append((time.monotonic() - lock.since, lock.label))
+        real_release(lock)
+    monkeypatch.setattr(type(ctx.lock), "release", release)
     t, out = in_thread(lambda: c.post("/api/replay/seek", json={"offset": 3600}))
     served = 0
     while t.is_alive():  # other requests are answered while the seek runs
@@ -948,7 +958,9 @@ def test_a_long_seek_holds_the_lock_only_in_short_slices(tmp_path, monkeypatch):
     t.join(30)
     assert out["value"].status_code == 200 and rp.now() == rp.start + 3600
     assert served >= 3, "the seek shut every other request out"
-    assert ctx.lock.longest[0] < 0.5, ctx.lock.longest
+    seek = [h for h, label in holds if label == "replay command"]
+    assert len(seek) > 1, "the seek ran in one piece"
+    assert max(seek) < 0.5, (max(seek), sorted(holds, reverse=True)[:3])
     assert problems(ctx.ex) == []
 
 
