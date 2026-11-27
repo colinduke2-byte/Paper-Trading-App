@@ -519,8 +519,8 @@ class Alerting:
             for aid in tuple(ids):
                 self.delete(aid)
             return
-        s = self.ex.summary(account_id)
-        if s.get("prices_unavailable"):
+        s = self.ex.safe_summary(account_id)  # an account that cannot be valued is skipped, not raised into the tick
+        if s.get("broken") or s.get("prices_unavailable"):
             return  # no reliable value while a held symbol has no price
         values = {"equity": s["equity"], "buying_power": s["buying_power"], "margin_excess": s["excess_liquidity"],
                   "unrealized_pnl": s["unrealized_pnl"], "day_pnl": s["day_pnl"]}

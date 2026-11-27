@@ -105,6 +105,7 @@ class Exchange:
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
         self.dirty = False
+        self.faults: dict = {}  # account id -> why it cannot be valued right now (see isolated())
         self._io_lock = threading.Lock()  # serialises file writes; never taken before the exchange lock is released
         self._snapshot_seq = 0  # numbers snapshots so a late writer cannot overwrite a newer file
         self._written: dict[str, int] = {}
@@ -191,7 +192,13 @@ class Exchange:
         orders, history and the trade journal are cleared."""
         old = self.account(account_id)
         # Validate and build the new account first: a bad value must leave the old state untouched.
-        cash = _starting_cash(starting_cash) if starting_cash is not None else old.starting_cash
+        if starting_cash is not None:
+            cash = _starting_cash(starting_cash)
+        else:
+            try:  # an impossible saved value (an old state file) needs new cash, not a copy of itself
+                cash = _starting_cash(old.starting_cash)
+            except (ValueError, ArithmeticError):
+                raise ValueError("this account's starting cash is not valid; give a new starting cash to reset it") from None
         new = Account(old.id, old.name, old.type, cash, self.now())
         new.settings = dict(old.settings)  # a reset keeps the account's rule settings
         new.lot_method = old.lot_method  # ... and its tax-lot method
@@ -203,6 +210,7 @@ class Exchange:
         self.engine.reindex()
         self._day_start_wanted.pop(old.id, None)
         self.accounts[old.id] = new
+        self.faults.pop(old.id, None)
         self.dirty = True
         return new
 
@@ -213,6 +221,7 @@ class Exchange:
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
         self.engine.reindex()
         del self.accounts[account_id]
+        self.faults.pop(account_id, None)
         self.dirty = True
 
     def account(self, account_id: str) -> Account:
@@ -220,6 +229,33 @@ class Exchange:
             return self.accounts[account_id]
         except KeyError:
             raise NotFound(f"no such account {account_id}")
+
+    def isolated(self, account, fn, what: str):
+        """Run fn(); if it fails, record a fault on this account and return None instead of raising.
+
+        One damaged account (an impossible number from an old state file, say) must not stop the tick,
+        the stream or the account list for every other account. The fault is shown in the account list
+        so the user can reset or delete that account.
+        """
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - any failure of one account is contained
+            reason = f"{what} failed: {type(e).__name__}"
+            if self.faults.get(account.id) != reason:
+                print(f"account {account.id}: {reason}: {e!r}"[:300])
+            self.faults[account.id] = reason
+            return None
+
+    def safe_summary(self, account_id: str) -> dict:
+        """summary(), or a flagged row for an account that cannot be valued."""
+        a = self.account(account_id)
+        out = self.isolated(a, lambda: self.summary(account_id), "valuing the account")
+        if out is not None:
+            self.faults.pop(account_id, None)
+            return out
+        return {"id": a.id, "name": a.name, "type": a.type, "broken": True,
+                "error": "This account cannot be valued (" + self.faults.get(a.id, "unknown error")
+                         + "). Reset it with a new starting cash or delete it."}
 
     def summary(self, account_id: str) -> dict:
         a = self.account(account_id)
@@ -1403,9 +1439,9 @@ class Exchange:
         self.alerting.on_tick(quotes, now)
         if now - self._last_equity_sample >= 60:
             self._last_equity_sample = now
-            for a in self.accounts.values():
-                s = self.summary(a.id)
-                if s["prices_unavailable"]:  # a position cannot be valued: a sample now would value it at zero
+            for a in list(self.accounts.values()):
+                s = self.isolated(a, lambda: self.summary(a.id), "valuing the account")
+                if s is None or s["prices_unavailable"]:  # a position cannot be valued: a sample now would value it at zero
                     continue
                 eq = s["equity"]
                 a.equity_history.append([int(now), str(eq)])

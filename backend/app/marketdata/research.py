@@ -30,6 +30,23 @@ CA_TYPES = {
     "rights_distributions": "rights_distribution", "partial_calls": "partial_call",
     "reorganizations": "reorganization", "capital_gains_distributions": "capital_gains_distribution",
 }
+CA_RECORD_TYPES = frozenset(CA_TYPES.values())
+
+
+def clean_types(types: Optional[str]) -> Optional[str]:
+    """A comma-separated list of corporate-action record types, checked against the known set and written in
+    one canonical order, so equal requests share one cache entry and free text never reaches the provider or
+    the cache key. None means all types."""
+    if types is None or not str(types).strip():
+        return None
+    parts = sorted({t.strip().lower() for t in str(types)[:2000].split(",") if t.strip()})
+    bad = [t for t in parts if t not in CA_RECORD_TYPES]
+    if bad:
+        shown = ", ".join(t[:40] for t in bad[:3])
+        raise ValueError(f"unknown corporate action type {shown}; choose from {', '.join(sorted(CA_RECORD_TYPES))}")
+    return ",".join(parts)
+
+
 _NUMERIC = {"rate", "old_rate", "new_rate", "source_rate", "cash_rate", "acquirer_rate", "acquiree_rate",
             "alternate_rate", "price", "dividend_rate", "long_term_rate", "short_term_rate"}
 
@@ -150,6 +167,7 @@ class ResearchHub:
 
     def corporate_actions(self, symbol: str, start: Optional[date] = None, end: Optional[date] = None,
                           types: Optional[str] = None) -> dict:
+        types = clean_types(types)  # refused with a clear message whether or not a provider is configured
         if not self.alpaca:
             return self._none("corporate actions", "Set APCA_API_KEY_ID and APCA_API_SECRET_KEY.")
         t = self.today()
