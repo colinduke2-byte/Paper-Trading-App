@@ -61,7 +61,7 @@ test("chart type can be switched and is remembered", async ({ page, open }) => {
   await chartReady(page);
   await expect(type).toHaveValue("line");
   await expect(stage(page)).toHaveAttribute("data-log", "1");
-  await page.getByRole("button", { name: "Reset chart view" }).click();
+  await page.getByRole("button", { name: "Reset view", exact: true }).click();
 });
 
 test("legend shows the bar's prices, change and volume", async ({ page, open }) => {
