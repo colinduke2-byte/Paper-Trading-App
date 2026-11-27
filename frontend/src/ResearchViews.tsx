@@ -1,3 +1,4 @@
+import { safeUrl } from "./safeUrl";
 import { useState } from "react";
 import { usePoll } from "./Market";
 import { compact, dateTime, money, pct } from "./util";
@@ -41,7 +42,7 @@ export function NewsList({ items, empty }: { items: any[]; empty: string }) {
     <ul className="rs-news">
       {items.map((n) => (
         <li key={n.id ?? n.url}>
-          {n.url ? <a href={n.url} target="_blank" rel="noopener noreferrer">{n.headline}</a>
+          {safeUrl(n.url) ? <a href={safeUrl(n.url)} target="_blank" rel="noopener noreferrer">{n.headline}</a>
             : <span className="rs-headline">{n.headline}</span>}
           <div className="muted rs-meta">
             {n.category && <span className="rs-cat">{CATEGORY_LABEL[n.category] || n.category}</span>}

@@ -183,9 +183,11 @@ class LifecycleManager:
         while d < today:
             nxt = d + timedelta(days=1)
             for a in list(self.ex.accounts.values()):
-                self._accrue(a, d)
-                if nxt.month != d.month:
-                    self._post_accruals(a, now, d)
+                def accrue(a=a, d=d, nxt=nxt):
+                    self._accrue(a, d)
+                    if nxt.month != d.month:
+                        self._post_accruals(a, now, d)
+                self.ex.isolated(a, accrue, "interest accrual")  # one bad account must not stop the day roll
             # Ask the feed for this day only, after earlier days' actions were applied to it.
             acts = [x for x in self.ex.feed.corporate_actions(nxt, nxt) if x.ex_date == nxt]
             self._start_of_day(nxt, sorted(acts, key=lambda x: (x.kind != SPLIT, x.symbol)), now)
@@ -525,41 +527,45 @@ class LifecycleManager:
     # ---- margin calls ----------------------------------------------------------------------
     def after_step(self, now: float) -> None:
         for a in list(self.ex.accounts.values()):
-            if a.type != "margin" or (not a.lots and a.life.margin_call_since is None):
-                continue
-            pos, marks, eq, maint = self._state(a)
-            life = a.life
-            if life.margin_call_since is not None:
-                self._count_grace(a, now)
-            missing = self._missing_prices(pos, marks)
-            if missing:  # cannot value the account: no call is started, cleared or enforced
-                if life.prices_missing != missing:
-                    life.prices_missing = missing
-                    self._event(a, "prices_unavailable", f"Margin checks paused: no price for {', '.join(missing)}.")
-                continue
-            life.prices_missing = []
-            if pos and eq < maint:
-                life.margin_call_ok_since = None
-                if life.margin_call_since is None:
-                    life.margin_call_since, life.margin_call_deficit = now, maint - eq
-                    life.margin_call_counted, life.margin_call_last = 0.0, now
-                    grace = cfg.number(a.settings, "margin_call_grace_hours").normalize()
-                    tail = (f" Positions will be liquidated if it is not met within {grace:f} hours of open "
-                            f"market time while PaperDesk is running."
-                            if a.settings["margin_call_liquidation"] else "")
-                    self._log(a, now, "margin_call",
-                              f"Margin call: equity {_fmt(eq)} is below the {_fmt(maint)} maintenance requirement "
-                              f"(deficit {_fmt(maint - eq)}).{tail}")
-                elif (a.settings["margin_call_liquidation"] and self.ex.session(now) == "regular"
-                      and life.margin_call_counted >= self._grace_seconds(a)):
-                    self.liquidate(a, now)
-            elif life.margin_call_since is not None:
-                if not pos or eq >= maint * (1 + CLEAR_BUFFER):
-                    self._clear_call(a, now, eq, maint)
-                elif life.margin_call_ok_since is None:
-                    life.margin_call_ok_since = now
-                elif now - life.margin_call_ok_since >= CLEAR_SECONDS:
-                    self._clear_call(a, now, eq, maint)
+            # One account that cannot be valued must not stop margin checks for the others.
+            self.ex.isolated(a, lambda: self._margin_step(a, now), "the margin check")
+
+    def _margin_step(self, a, now: float) -> None:
+        if a.type != "margin" or (not a.lots and a.life.margin_call_since is None):
+            return
+        pos, marks, eq, maint = self._state(a)
+        life = a.life
+        if life.margin_call_since is not None:
+            self._count_grace(a, now)
+        missing = self._missing_prices(pos, marks)
+        if missing:  # cannot value the account: no call is started, cleared or enforced
+            if life.prices_missing != missing:
+                life.prices_missing = missing
+                self._event(a, "prices_unavailable", f"Margin checks paused: no price for {', '.join(missing)}.")
+            return
+        life.prices_missing = []
+        if pos and eq < maint:
+            life.margin_call_ok_since = None
+            if life.margin_call_since is None:
+                life.margin_call_since, life.margin_call_deficit = now, maint - eq
+                life.margin_call_counted, life.margin_call_last = 0.0, now
+                grace = cfg.number(a.settings, "margin_call_grace_hours").normalize()
+                tail = (f" Positions will be liquidated if it is not met within {grace:f} hours of open "
+                        f"market time while PaperDesk is running."
+                        if a.settings["margin_call_liquidation"] else "")
+                self._log(a, now, "margin_call",
+                          f"Margin call: equity {_fmt(eq)} is below the {_fmt(maint)} maintenance requirement "
+                          f"(deficit {_fmt(maint - eq)}).{tail}")
+            elif (a.settings["margin_call_liquidation"] and self.ex.session(now) == "regular"
+                  and life.margin_call_counted >= self._grace_seconds(a)):
+                self.liquidate(a, now)
+        elif life.margin_call_since is not None:
+            if not pos or eq >= maint * (1 + CLEAR_BUFFER):
+                self._clear_call(a, now, eq, maint)
+            elif life.margin_call_ok_since is None:
+                life.margin_call_ok_since = now
+            elif now - life.margin_call_ok_since >= CLEAR_SECONDS:
+                self._clear_call(a, now, eq, maint)
 
     @staticmethod
     def _grace_seconds(a) -> float:

@@ -107,6 +107,20 @@ while writing this list.
 - Browsers do not separate cookies by port, so the sign-in cookie is also sent to other web apps on the same
   address. Do not run untrusted web apps on the same computer in LAN mode.
 - In Docker, every device shares one wrong-passcode counter.
+- **Live stream limits.** At most 32 open streams, 8 from one address; more are refused at the handshake. A
+  message from a browser may be at most 16 KB of JSON object; anything else closes that stream (code 1008,
+  1009 when too large, 1003 for binary). A browser that takes over 5 s to accept a tick message is dropped.
+  Constants: `backend/app/api/hardening.py`.
+- **An account that cannot be valued** (for example an impossible number in an old state file) is listed with
+  `"broken": true` and an explanation; the tick, margin checks, interest, alerts and the stream carry on for the
+  other accounts. Reset it with a new starting cash, or delete it.
+- **Research requests that reach a real provider** are limited to 60 a minute per client, in bursts of 20
+  (HTTP 429 with `Retry-After`). Simulated research is not limited. Corporate-action `types` must be known types.
+- **File permissions.** A new data directory is created readable by you only (`0700`). On Linux and macOS
+  PaperDesk warns at start-up when the data directory or `.env` can be read by other users and prints the
+  `chmod` that fixes it; it does not change existing permissions. On Windows nothing is checked: files under
+  your user profile are private to your account by default, so keep PaperDesk inside your profile, not in a
+  shared folder such as `C:\Users\Public`.
 
 ## Settings that do not do what `.env.example` suggests
 
