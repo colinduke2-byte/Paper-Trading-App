@@ -27,13 +27,13 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .top-stats span, .qh-grid span, .facts span { font-size: 10.5px; color: var(--muted); }
 .top-stats b { font-size: 13.5px; }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-.top-right select { width: auto; }
+.top-right select { width: auto; max-width: 220px; text-overflow: ellipsis; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--down); } .dot.ok { background: var(--up); }
 
 main { flex: 1; min-height: 0; display: grid; grid-template-columns: 250px minmax(0, 1fr) 300px; gap: 6px; padding: 6px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .center-col, .right-col { display: flex; flex-direction: column; gap: 6px; min-height: 0; min-width: 0; }
-.main-view { flex: 1 1 58%; min-height: 320px; }
+.main-view { flex: 1 1 58%; min-height: 300px; overflow: hidden; } /* never spill over the bottom tabs */
 .bottom { flex: 1 1 42%; min-height: 200px; }
 .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .scroll { overflow: auto; flex: 1; min-height: 0; }
@@ -66,14 +66,17 @@ tr.sel td { background: #1a2433; }
 .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
 
 .chart-wrap, .chain { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.chart { flex: 1; min-height: 220px; }
+.chart { flex: 1; min-height: 160px; }
 .chart-bar, .toolbar { display: flex; gap: 10px; padding: 6px 10px; align-items: center; flex-wrap: wrap; }
 .toolbar input, .toolbar select, .inline select { width: auto; }
 .inline { display: flex; gap: 6px; align-items: center; color: var(--muted); }
 .seg { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .seg button { border-radius: 0; padding: 3px 8px; color: var(--muted); font-size: 11.5px; }
 .seg button.on { background: #223149; color: var(--text); }
-.chain-table td.itm { background: #161f2c; }
+.chain-table td.itm { background: #1a2a40; }
+.chain-table tr.spot-row td { padding: 0; height: 0; border-bottom: 2px solid var(--warn); text-align: center; position: relative; }
+.chain-table tr.spot-row span { position: relative; top: 1px; display: inline-block; font-size: 10.5px; line-height: 14px; padding: 0 8px; color: var(--warn); background: var(--panel); border: 1px solid #5a4520; border-radius: 8px; transform: translateY(50%); }
+.px:disabled { opacity: .35; }
 .chain-table .strike { font-weight: 700; background: var(--panel2); }
 .px { padding: 1px 6px; border: 1px solid var(--line); min-width: 54px; text-align: right; } .px:hover { background: #222a35; }
 
@@ -89,7 +92,9 @@ label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--t
 .primary { background: var(--accent); color: #06121f; font-weight: 700; padding: 8px; }
 .primary.buy { background: var(--up); } .primary.sell { background: var(--down); color: #fff; }
 .ghost { border-color: var(--line); } .ghost:hover:not(:disabled) { background: var(--panel2); }
-.sm { padding: 2px 8px; font-size: 11.5px; }
+/* Two button sizes everywhere: default (dialogs, ticket) and .sm (toolbars, header, table rows). */
+.sm { padding: 3px 9px; font-size: 11.5px; min-height: 24px; }
+.modal .row button, .modal .row .primary { min-height: 34px; }
 .preview { border: 1px solid var(--line); border-radius: 4px; padding: 8px; background: var(--bg); }
 .preview div { display: flex; justify-content: space-between; padding: 1px 0; } .preview span { color: var(--muted); }
 .preview p { margin: 6px 0 0; font-size: 11.5px; }
@@ -115,16 +120,83 @@ label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--t
 .modal h3 { padding: 0; font-size: 14px; text-transform: none; letter-spacing: 0; color: var(--text); } .modal p { margin: 0; }
 .fatal { max-width: 520px; margin: 15vh auto; padding: 16px; }
 
-/* Narrow desktop windows (the phone layout in mobile.css takes over below 900 px). */
-@media (max-width: 1100px) {
-  html, body, #root, .app { height: auto; }
-  .app main { grid-template-columns: minmax(0, 1fr); }
-  .app .watch { max-height: 260px; } .app .main-view { min-height: 480px; } .app .bottom { min-height: 320px; max-height: 480px; }
-  .app .right-col { overflow: visible; } .app .qh-grid { margin-left: 0; grid-template-columns: repeat(2, auto); }
-  .app .top-right { margin-left: 0; flex-wrap: wrap; }
-  /* The page height is auto here, so the chart needs a size that does not come from its own canvas: otherwise
-     the chart's autoSize and the layout feed each other and WebKit resizes it in a loop (iPad in landscape). */
-  .app .chart { flex: 1 0 300px; } .app .chart-wrap { flex: 1 0 auto; } .app .main-view { flex: none; }
+
+/* ---- shared UI pieces ---------------------------------------------------------------------- */
+/* Destructive buttons: filled red in dialogs, outlined red in toolbars and menus. */
+.danger { background: var(--down); color: #fff; font-weight: 700; padding: 8px; border-color: var(--down); }
+.danger:hover:not(:disabled) { filter: brightness(1.1); }
+.danger-outline { border-color: #6b2a28 !important; color: #ff9c99; }
+.danger-outline:hover:not(:disabled) { background: #2c1514 !important; }
+.dialog-name { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal.confirm { width: 400px; }
+.confirm-bg { z-index: 60; }
+
+/* Connection lost: a bar under the header, and frozen numbers dimmed. */
+.lost-bar { background: #3a1414; color: #ffb4b0; border-bottom: 1px solid #6b2a28; padding: 7px 12px; font-size: 12.5px; }
+.stale .top-stats b, .stale .qh-price, .stale .qh-grid b, .stale .watch td.num, .stale .depth td, .stale .bottom td.num,
+.stale .ticket-sym .muted, .stale .m-stats b, .stale .m-acct-stats b { opacity: .45; }
+/* Until the ticket reads useConnection() itself (see docs/reviews/TICKET_HANDOFF.md), block its actions here. */
+.app.stale .ticket .primary, .m-shell.stale .ticket .primary { pointer-events: none; opacity: .45; }
+
+/* Info popover: a small "i" button that opens a definition on click or tap. */
+.info { position: relative; display: inline-flex; vertical-align: middle; text-transform: none; letter-spacing: 0; }
+.info-btn { width: 15px; height: 15px; min-width: 15px; min-height: 15px; padding: 0; border-radius: 50%; border: 1px solid #3a4655;
+  color: var(--muted); font: italic 700 10px/13px Georgia, serif; display: inline-grid; place-items: center; cursor: help; }
+.info-btn:hover, .info-btn[aria-expanded=true] { color: var(--text); border-color: var(--accent); }
+.info-pop { position: absolute; z-index: 50; top: calc(100% + 6px); left: -8px; width: 280px; max-width: calc(100vw - 16px);
+  background: #1c2733; border: 1px solid #2f4257; border-radius: 6px; padding: 9px 11px; box-shadow: 0 6px 20px #000a;
+  display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; line-height: 1.45; color: var(--text); font-weight: 400;
+  text-align: left; white-space: normal; font-style: normal; }
+.info-pop b { font-size: 12.5px; }
+th .info-pop { font-weight: 400; }
+
+/* First-run welcome card. */
+/* On desktop it floats over the bottom-left corner so it does not take height from the chart. */
+.welcome { display: flex; gap: 12px; flex-direction: column; padding: 14px 16px; background: #13233a; border: 1px solid #2f5487;
+  border-radius: 8px; box-shadow: 0 8px 28px #000c; }
+.app .welcome { position: fixed; left: 12px; bottom: 12px; z-index: 32; width: min(520px, calc(100vw - 24px)); }
+.welcome h2 { font-size: 15px; margin: 0 0 4px; }
+.welcome p { margin: 0; max-width: 760px; line-height: 1.5; }
+.welcome-text { min-width: 0; }
+.welcome-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.welcome-actions .primary { padding: 8px 14px; }
+
+/* The chart library's attribution stays a visible, working link, moved off the candles to the top right. */
+.app a#tv-attr-logo { left: auto; right: 8px; top: 6px; bottom: auto; opacity: .55; }
+.app a#tv-attr-logo:hover, .app a#tv-attr-logo:focus-visible { opacity: 1; }
+
+/* Reports opened in full view cover the page below the header. */
+.reports-full { position: fixed; inset: 0; z-index: 45; background: var(--panel); overflow: auto; }
+.reports .rep-full { margin-left: auto; }
+.reports .rep-warn { color: var(--warn); font-size: 11.5px; }
+
+/* Short windows (1280x720 and similar): give the chart a little more of the centre column. */
+@media (max-height: 780px) and (min-width: 1101px) {
+  .main-view { flex-basis: 64%; min-height: 260px; }
+  .bottom { min-height: 170px; }
 }
+
+/* Narrow desktop windows, 900-1100 px (the phone layout in mobile.css takes over below 900 px): two columns.
+   Left: watchlist above the order ticket and depth. Right: quote, chart and the bottom tabs. */
+@media (max-width: 1100px) {
+  .app main { grid-template-columns: 236px minmax(0, 1fr); grid-template-rows: minmax(120px, 30%) minmax(0, 1fr);
+    grid-template-areas: "watch center" "right center"; }
+  .app main > .watch { grid-area: watch; }
+  .app main > .center-col { grid-area: center; }
+  .app main > .right-col { grid-area: right; }
+  .app .top { gap: 8px 12px; }
+  .app .top-stats { gap: 14px; }
+  .app .top-right { margin-left: 0; flex-wrap: wrap; }
+  .app .qh-grid { grid-template-columns: repeat(4, auto); gap: 2px 14px; }
+  .app .quote-head { gap: 10px; }
+  .app .depth { min-height: 260px; }
+}
+@media (max-width: 1100px) and (max-height: 700px) {
+  .app .main-view { min-height: 250px; flex-basis: 62%; }
+  .app .bottom { min-height: 150px; }
+}
+
+/* Long dialogs (Account rules) keep their buttons in view while the content scrolls. */
+.modal > .row:last-child { position: sticky; bottom: -16px; background: var(--panel); padding: 10px 0 0; margin-bottom: -6px; }
 td.row-actions { white-space: nowrap; } td.row-actions button + button { margin-left: 4px; }
 .ticket-note { margin: 0; font-size: 11.5px; line-height: 1.35; }

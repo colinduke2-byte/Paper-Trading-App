@@ -1,6 +1,6 @@
 # PaperDesk
 
-A paper trading simulator: practise trading stocks and options with pretend money. It runs on your own
+A paper trading simulator: practice trading stocks and options with pretend money. It runs on your own
 computer, in your browser (and a phone browser on the same Wi-Fi), and needs no account, API key or
 internet connection to start.
 
@@ -169,16 +169,16 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   the chain; automatic exercise and assignment at expiry; strategy-aware margin for spreads, condors,
   butterflies and calendars (multi-leg orders are API-only for now).
 - **Accounts:** cash and margin accounts, several at once, reset; Reg T style margin and buying power, short
-  selling, margin calls with liquidation after a grace period. Per-account settings (Settings button) for
+  selling, margin calls with liquidation after a grace period. Per-account settings (Account rules button) for
   dividend reinvestment, T+1 settlement and the settled-cash rule, the pattern day trader rule, margin interest
   and short borrow fees with their rates.
 - **Corporate actions:** splits (lots, options and open orders adjusted or canceled, cash in lieu) and
   dividends, for the simulated feed. Real-provider actions are shown in Research but not applied.
 - **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO, highest-cost,
-  lowest-cost or tax-efficient (largest loss first) matching, realised gains report with holding period and
+  lowest-cost or tax-efficient (largest loss first) matching, realized gains report with holding period and
   informational wash-sale detail, tax-year summary, monthly statements, CSV export, trade journal, performance
   statistics (Reports tab).
-- **Tax lots:** the Lots tab lists every open lot (open date, cost, value, unrealised gain, holding period and the
+- **Tax lots:** the Lots tab lists every open lot (open date, cost, value, unrealized gain, holding period and the
   date it turns long-term). Tick lots and press "Sell selected lots" to open the order ticket with them, or choose
   lots in the ticket's "Choose tax lots" section; the API takes `"lots": [{"lot_id": "L3", "qty": 5}]` on a closing
   order. Named lots are reserved while the order works; if another trade closes them first, the order is canceled.
@@ -194,7 +194,7 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   are optional and asked for with a click. Browsers allow notifications only over HTTPS or on the
   computer itself, so on a phone in LAN mode (plain HTTP) they stay inside the app. Earnings dates
   are not available from the data feed, so there is no earnings alert.
-- **Historical replay:** replay a recorded or bundled session in a sandbox account with a simulated clock
+- **Historical replay:** replay a recorded or bundled session in a separate replay account with a simulated clock
   (`docs/REPLAY.md`); live state is never touched.
 - **Help:** an in-app Help panel (top bar, or the menu on a phone).
 

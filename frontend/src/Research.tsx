@@ -125,7 +125,8 @@ export function Research({ symbol, held = [], onSelect }: { symbol: string; held
 export function feedBanner(s: any): { text: string; title: string } {
   if (!s) return { text: "", title: "" };
   const title = [s.data_note, s.fallback_reason, s.stream?.message].filter(Boolean).join(" ");
-  if (s.simulated_data) return { text: " · simulated market data", title };
+  // The fallback reason names environment variables; the banner tooltip says the same in plain words.
+  if (s.simulated_data) return { text: " · simulated market data", title: "Prices are simulated for fictional companies, so nothing here is real market data. docs/DATA_PROVIDERS.md explains how to connect a real data provider." };
   const src = s.data_source || s.feed;
   if (s.stale) return { text: ` · ${src} prices may be stale (feed interrupted)`, title };
   if (s.realtime === false || s.delay_seconds) return { text: ` · ${src} data delayed ${Math.round((s.delay_seconds || 900) / 60)} min`, title };

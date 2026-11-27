@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { api, ASSET_LABELS, compact, isCrypto, money, pct, price, qty, time, tone } from "./util";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { Info } from "./Info";
+import { api, ASSET_LABELS, compact, fixed, isCrypto, money, pct, price, qty, time, timeHeading, tone } from "./util";
 import { KeyRatios } from "./ResearchViews";
 import "./Research.css";
 import { describeLeg, legFromSymbol, parseOption } from "./payoff";
@@ -105,13 +106,15 @@ export function QuoteHeader({ symbol, quote, info }: { symbol: string; quote: an
   );
 }
 
-export function DepthTape({ symbol }: { symbol: string }) {
-  const [depth] = usePoll<any>(`/depth/${symbol}`, 1500);
-  const [trades] = usePoll<any[]>(`/trades/${symbol}?limit=40`, 1500);
+export function DepthTape({ symbol, note }: { symbol: string; note?: string }) {
+  const [depth, depthError] = usePoll<any>(`/depth/${symbol}`, 1500);
+  const [trades, tradesError] = usePoll<any[]>(`/trades/${symbol}?limit=40`, 1500);
   const max = depth ? Math.max(1, ...depth.bids.map((b: any) => b.size), ...depth.asks.map((a: any) => a.size)) : 1;
   return (
     <section className="panel depth" aria-label="Depth and trades">
-      <h3>Depth <span className="tag">{depth && depth.simulated === false ? `order book · ${depth.source || "provider"}` : "simulated depth"}</span></h3>
+      <h3>Depth{note ? `: ${note}` : ""} <span className="tag">{depth && depth.simulated === false ? `order book · ${depth.source || "provider"}` : "simulated depth"}</span></h3>
+      {depthError && !depth && <p className="muted pad">Could not load the depth: {depthError}</p>}
+      {!depth && !depthError && <p className="muted pad">Loading depth…</p>}
       <div className="ladder">
         <table className="tight">
           <thead><tr><th className="num">Size</th><th className="num">Bid</th><th>Ask</th><th>Size</th></tr></thead>
@@ -131,9 +134,10 @@ export function DepthTape({ symbol }: { symbol: string }) {
         </table>
       </div>
       <h3>Time and sales</h3>
+      {tradesError && !trades && <p className="muted pad">Could not load recent trades: {tradesError}</p>}
       <div className="scroll" tabIndex={0} role="group" aria-label="Time and sales">
         <table className="tight">
-          <thead><tr><th>Time</th><th className="num">Price</th><th className="num">Size</th></tr></thead>
+          <thead><tr><th>{timeHeading()}</th><th className="num">Price</th><th className="num">Size</th></tr></thead>
           <tbody>
             {(trades || []).map((t, i) => (
               <tr key={i}><td className="muted">{time(t.ts)}</td>
@@ -172,16 +176,33 @@ export function OptionChain({ symbol, onTrade, onStrategy }: {
   const press = (s: string, side: "buy" | "sell", price: number) => (adding ? pick(s, side) : onTrade(s, side, price));
   const chosen = expiry || (exps && exps[1]?.date) || (exps && exps[0]?.date) || "";
   const [chain, error] = usePoll<any>(chosen ? `/options/chain/${symbol}?expiry=${chosen}` : null, 3000);
+  // Scroll the at-the-money strike into view once per symbol and expiry (not on every 3 s refresh).
+  const tableRef = useRef<HTMLTableElement>(null);
+  const scrolledFor = useRef("");
+  useEffect(() => {
+    const key = `${symbol}|${chosen}`;
+    if (!chain?.rows?.length || scrolledFor.current === key || !tableRef.current) return;
+    scrolledFor.current = key;
+    const spotRow = tableRef.current.querySelector("tr.spot-row") as HTMLElement | null;
+    const box = tableRef.current.closest(".scroll") as HTMLElement | null;
+    if (!spotRow) return;
+    // Centre it in the chain's own scroller, or in the phone view that scrolls as a whole.
+    const scroller = box && box.scrollHeight > box.clientHeight + 1 ? box : (tableRef.current.closest(".m-chart") as HTMLElement | null);
+    if (!scroller) return;
+    const top = spotRow.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    scroller.scrollTop = Math.max(0, top - scroller.clientHeight / 2);
+  }, [chain, symbol, chosen]);
+  const spotAt = chain?.rows?.length ? chain.rows.findIndex((r: any) => r.strike >= chain.spot) : -1;
   const cells = (o: any, itm: boolean, order: string[]) => {
     const c = itm ? " itm" : "";
     const all: Record<string, JSX.Element> = {
       oi: <td key="oi" className={"num muted" + c}>{compact(o.open_interest)}</td>,
       vol: <td key="vol" className={"num muted" + c}>{compact(o.volume)}</td>,
       iv: <td key="iv" className={"num" + c}>{(o.iv * 100).toFixed(1)}%</td>,
-      delta: <td key="delta" className={"num" + c}>{o.delta.toFixed(2)}</td>,
-      bid: <td key="bid" className={"num" + c}><button className={"px down" + (picked(o.symbol, "sell") ? " picked" : "")} title={adding ? "Add a sell leg" : "Sell at the bid"}
+      delta: <td key="delta" className={"num" + c}>{fixed(o.delta)}</td>,
+      bid: <td key="bid" className={"num" + c}><button className={"px down" + (picked(o.symbol, "sell") ? " picked" : "")} disabled={!(o.bid > 0)} title={!(o.bid > 0) ? "No bid: nobody is buying this contract" : adding ? "Add a sell leg" : "Sell at the bid"}
         aria-pressed={adding ? picked(o.symbol, "sell") : undefined} onClick={() => press(o.symbol, "sell", o.bid)}>{money(o.bid)}</button></td>,
-      ask: <td key="ask" className={"num" + c}><button className={"px up" + (picked(o.symbol, "buy") ? " picked" : "")} title={adding ? "Add a buy leg" : "Buy at the ask"}
+      ask: <td key="ask" className={"num" + c}><button className={"px up" + (picked(o.symbol, "buy") ? " picked" : "")} disabled={!(o.ask > 0)} title={!(o.ask > 0) ? "No ask: nobody is selling this contract" : adding ? "Add a buy leg" : "Buy at the ask"}
         aria-pressed={adding ? picked(o.symbol, "buy") : undefined} onClick={() => press(o.symbol, "buy", o.ask)}>{money(o.ask)}</button></td>,
     };
     return order.map((k) => all[k]);
@@ -191,11 +212,11 @@ export function OptionChain({ symbol, onTrade, onStrategy }: {
       <div className="chart-bar">
         <label className="inline">Expiry
           <select value={chosen} onChange={(e) => setExpiry(e.target.value)}>
-            {(exps || []).map((e) => <option key={e.date} value={e.date}>{e.date} ({e.dte}d)</option>)}
+            {(exps || []).map((e) => <option key={e.date} value={e.date}>{expiryLabel(e.date)} ({e.dte === 0 ? "today" : e.dte === 1 ? "1 day" : `${e.dte} days`})</option>)}
           </select>
         </label>
         <span className="tag">{chain?.source_label || "model prices, not market data"}{chain?.model_legs ? ` · ${chain.model_legs} model-priced` : ""}</span>
-        <span className="muted">{adding ? "Adding to a strategy: click an ask to add a buy leg, a bid to add a sell leg." : "Click a bid to sell or an ask to buy. Each contract covers 100 shares."}</span>
+        <span className="muted">{adding ? "Adding to a strategy: click an ask to add a buy leg, a bid to add a sell leg." : "Click a bid to sell or an ask to buy. Each contract covers 100 shares. Shaded rows are in the money."}</span>
         {onStrategy && (
           <span className="chain-strategy">
             <button className="ghost sm" onClick={() => onStrategy()}>Build a strategy…</button>
@@ -205,26 +226,35 @@ export function OptionChain({ symbol, onTrade, onStrategy }: {
       </div>
       {error && <div className="notice bad">Could not load the option chain: {error}</div>}
       <div className="scroll">
-        <table className="tight chain-table">
+        <table className="tight chain-table" ref={tableRef}>
           <thead>
             <tr><th colSpan={6} className="center">Calls</th><th /><th colSpan={6} className="center">Puts</th></tr>
             <tr>
-              <th className="num">OI</th><th className="num">Vol</th><th className="num">IV</th><th className="num">Delta</th><th className="num">Bid</th><th className="num">Ask</th>
+              <th className="num">OI <Info term="oi" /></th><th className="num">Vol</th><th className="num">IV <Info term="iv" /></th><th className="num">Delta <Info term="delta" /></th><th className="num">Bid</th><th className="num">Ask</th>
               <th className="center">Strike</th>
               <th className="num">Bid</th><th className="num">Ask</th><th className="num">Delta</th><th className="num">IV</th><th className="num">Vol</th><th className="num">OI</th>
             </tr>
           </thead>
           <tbody>
-            {(chain?.rows || []).map((r: any) => (
-              <tr key={r.strike}>
-                {cells(r.call, r.strike < chain.spot, ["oi", "vol", "iv", "delta", "bid", "ask"])}
-                <td className="center strike">{money(r.strike, r.strike % 1 ? 1 : 0)}</td>
-                {cells(r.put, r.strike > chain.spot, ["bid", "ask", "delta", "iv", "vol", "oi"])}
-              </tr>
+            {(chain?.rows || []).map((r: any, i: number) => (
+              <Fragment key={r.strike}>
+                {i === spotAt && (
+                  <tr className="spot-row"><td colSpan={13}><span>{chain.symbol || symbol} last {price(chain.spot)}</span></td></tr>
+                )}
+                <tr>
+                  {cells(r.call, r.strike < chain.spot, ["oi", "vol", "iv", "delta", "bid", "ask"])}
+                  <td className="center strike">{money(r.strike, r.strike % 1 ? 1 : 0)}</td>
+                  {cells(r.put, r.strike > chain.spot, ["bid", "ask", "delta", "iv", "vol", "oi"])}
+                </tr>
+              </Fragment>
             ))}
+            {spotAt === -1 && chain?.rows?.length > 0 && (
+              <tr className="spot-row"><td colSpan={13}><span>{chain.symbol || symbol} last {price(chain.spot)}</span></td></tr>
+            )}
           </tbody>
         </table>
         {!chain && !error && <p className="muted pad">Loading option chain…</p>}
+        {chain && !chain.rows?.length && <p className="muted pad">No contracts are listed for this expiry.</p>}
       </div>
       {adding && (
         <div className="strategy-tray" role="region" aria-label="Strategy legs picked">
@@ -247,6 +277,7 @@ export function Company({ info }: { info: any }) {
   const sim = env?.available && env.data?.simulated ? env.data : null;
   const row = (k: string, v: string) => <div key={k}><span>{k}</span><b>{v}</b></div>;
   const eps = sim ? sim.eps : info.eps, pe = sim ? sim.pe : info.pe;
+  const etf = info.type === "etf";
   return (
     <div className="company">
       {info.simulated !== false ? <div className="notice">Every company in this build is fictional and its figures are simulated. Financial statements, earnings, news and calendars are on the Research tab.</div>
@@ -254,15 +285,15 @@ export function Company({ info }: { info: any }) {
       <div className="facts">
         {row("Name", info.name)}
         {row("Sector", info.sector)}
-        {row("Type", info.type === "etf" ? "Fund" : "Stock")}
-        {row("Market cap", compact(sim ? sim.market_cap : info.market_cap))}
-        {row("Shares outstanding", compact(sim ? sim.shares_outstanding : info.shares_outstanding))}
-        {info.type !== "etf" && row(sim ? "Earnings per share (trailing)" : "Earnings per share", money(eps))}
-        {info.type !== "etf" && row("Price / earnings", pe == null ? "–" : pe.toFixed(1))}
-        {row("Dividend per share", money(info.dividend))}
+        {row("Type", etf ? "ETF (a fund that trades like a stock)" : "Stock")}
+        {row(etf ? "Fund size" : "Market cap", compact(sim ? sim.market_cap : info.market_cap))}
+        {!etf && row("Shares outstanding", compact(sim ? sim.shares_outstanding : info.shares_outstanding))}
+        {!etf && row(sim ? "Earnings per share (trailing)" : "Earnings per share", price(eps))}
+        {!etf && row("Price / earnings", pe == null ? "–" : pe.toFixed(1))}
+        {row("Dividend per share (yearly)", price(info.dividend))}
         {row("Dividend yield", info.dividend_yield_pct == null ? "–" : info.dividend_yield_pct.toFixed(2) + "%")}
-        {row("52-week high", money(info.high_52w))}
-        {row("52-week low", money(info.low_52w))}
+        {row("52-week high", price(info.high_52w))}
+        {row("52-week low", price(info.low_52w))}
         {row("Average volume (30 days)", compact(info.avg_volume_30d))}
         {row("Volatility (annual)", info.historical_volatility == null ? "–" : (info.historical_volatility * 100).toFixed(0) + "%")}
       </div>
@@ -275,4 +306,10 @@ export function Company({ info }: { info: any }) {
       )}
     </div>
   );
+}
+
+/** "Fri 4 Dec 2026" for an ISO date, read as a calendar date (no time zone shift). */
+function expiryLabel(iso: string) {
+  const d = new Date(iso + "T12:00:00Z");
+  return isNaN(+d) ? iso : d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 }

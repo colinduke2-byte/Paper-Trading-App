@@ -41,6 +41,8 @@ export const test = base.extend<Fixtures>({
       await page.addInitScript(([a, s]) => {
         localStorage.setItem("pd.account", a);
         localStorage.setItem("pd.symbol", s);
+        // The first-run welcome card has its own test (ux.spec.ts); it is dismissed for every other test.
+        if (localStorage.getItem("pd.welcomed") === null) localStorage.setItem("pd.welcomed", "1");
       }, [acc.id, symbol]);
       await page.goto("/");
       // The phone layout keeps the account picker in its menu, so check the account on the root element there.
@@ -60,6 +62,15 @@ export async function review(page: Page, shares: string) {
   const t = ticket(page);
   await t.getByLabel("Shares").fill(shares);
   await t.getByRole("button", { name: /^Review/ }).click();
+}
+
+// Exiting a replay asks for confirmation first (Confirm.tsx).
+export async function confirmDialog(page: Page, button: string | RegExp, tap = false) {
+  const dlg = page.getByRole("alertdialog");
+  await expect(dlg).toBeVisible();
+  const b = dlg.getByRole("button", { name: button });
+  if (tap) await b.tap(); else await b.click();
+  await expect(dlg).toHaveCount(0);
 }
 
 export async function place(page: Page) {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cleanParam, defaultParams, IndicatorConfig, IndicatorType, INDICATORS, indicatorLabel, newId } from "../indicators";
-import { compact, money } from "../util";
+import { compact, displayZone, money, pct, signed } from "../util";
 import { Gen, plotRect, priceAt } from "./engine";
 
 /** Re-render on every chart viewport change (scroll, zoom, resize, price scale change). */
@@ -19,7 +19,7 @@ const fmtVal = (v: number) => (!isFinite(v) ? "–" : Math.abs(v) >= 1e5 ? compa
 export function formatBarTime(g: Gen, raw: number) {
   const d = new Date(raw * 1000);
   return g.intraday
-    ? d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })
+    ? d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: displayZone() })
     : d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
@@ -47,7 +47,7 @@ export function Legend({ g, tick }: { g: Gen | null; tick: unknown }) {
         <span>H <b>{money(b.high)}</b></span>
         <span>L <b>{money(b.low)}</b></span>
         <span>C <b className={tone}>{money(b.close)}</b></span>
-        {ch != null && <span className={tone}>{ch > 0 ? "+" : ""}{money(ch)} ({chp! > 0 ? "+" : ""}{chp!.toFixed(2)}%)</span>}
+        {ch != null && <span className={tone}>{signed(ch)} ({pct(chp)})</span>}
         <span>Vol <b>{compact(b.volume)}</b></span>
       </div>
       <div className="ct-legend-row">

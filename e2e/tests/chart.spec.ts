@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, type Account } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, confirmDialog, type Account } from "./fixtures";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 
 // Chart tools: chart types, indicators, drawings, order lines, trade at price and keyboard shortcuts.
@@ -503,6 +503,7 @@ test.describe("replay", () => {
 
     // Exit: the live chart has its own line only.
     await bar.getByRole("button", { name: "Exit replay" }).click();
+    await confirmDialog(page, "Exit replay");
     await expect(page.getByRole("note")).toContainText("Paper trading · no real money");
     await chartReady(page);
     await draw.click();

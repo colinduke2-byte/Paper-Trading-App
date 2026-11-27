@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, bottomTab } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, bottomTab, confirmDialog } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 // Phone profiles (see playwright.config.ts). Every interaction here is a real tap, so a control that is
@@ -283,7 +283,7 @@ test("switching account from the menu changes the figures", async ({ page, reque
   await expect(top).toContainText("$56,789.00");
   await go(page, "Account");
   await expect(page.locator(".m-acct")).toContainText(big.name);
-  await expect(page.locator(".m-acct")).toContainText("Margin required");
+  await expect(page.locator(".m-acct")).toContainText("Maintenance margin");
   await page.getByRole("button", { name: "Menu" }).tap();
   await page.getByRole("dialog", { name: "Menu" }).getByRole("combobox", { name: "Account" }).selectOption(small.id);
   await expect(top).toContainText("$1,234.00");
@@ -298,7 +298,7 @@ test("create an account from the menu", async ({ page, open }) => {
   await dialog.getByLabel("Name").fill(name);
   await dialog.getByLabel("Starting cash").fill("5000");
   await dialog.getByRole("button", { name: "Create account" }).tap();
-  await expect(page.getByText(`Account "${name}" created`)).toBeVisible();
+  await expect(page.getByText(`"${name}" created and selected.`)).toBeVisible();
   await expect(page.locator(".m-stats")).toContainText("$5,000.00");
 });
 
@@ -415,6 +415,7 @@ test.describe("replay", () => {
 
     // Exit back to the live accounts.
     await bar.getByRole("button", { name: "Exit replay" }).tap();
+    await confirmDialog(page, "Exit replay", true);
     await expect(page.getByText("Replay closed. You are back on your paper accounts.")).toBeVisible();
     await expect(bar).toHaveCount(0);
     await expect(banner).toContainText("Paper trading · no real money");
@@ -433,7 +434,7 @@ test("Settings, Research and Reports work inside the phone shell", async ({ page
   await page.getByRole("button", { name: "Menu" }).tap();
   const menu = page.getByRole("dialog", { name: "Menu" });
   await expect(menu.getByRole("button", { name: "Sign out" })).toHaveCount(0);
-  await menu.getByRole("button", { name: "Settings" }).tap();
+  await menu.getByRole("button", { name: "Account rules" }).tap();
   const settings = page.getByRole("dialog");
   await expect(settings).toContainText("Account rules");
   found.push(...await smallTargets(page, "Settings dialog"));

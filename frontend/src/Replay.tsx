@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "./Dialog";
 import { api, numText, usd } from "./util";
+import { confirmAction } from "./Confirm";
 import "./replay.css";
 
 // Replay times are shown in New York time, the exchange's own clock.
@@ -49,7 +50,7 @@ export function useModeSwitch(status: any, onSwitch: () => void) {
 
 export function ReplayButton({ status, onOpen }: { status: any; onOpen: () => void }) {
   if (status?.replay) return null;
-  return <button className="ghost sm replay-open" onClick={onOpen} title="Practise on a recorded trading session">Replay</button>;
+  return <button className="ghost sm replay-open" onClick={onOpen} title="Practice on a recorded trading session">Replay</button>;
 }
 
 export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onStarted: (status: any, msg: string) => void }) {
@@ -82,7 +83,7 @@ export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onSt
   return (
     <Dialog onClose={onClose} className="modal replay-modal" labelledBy="replay-title">
         <h3 id="replay-title">Replay a trading session</h3>
-        <p className="muted">You trade in a separate sandbox account while the session plays back on its own clock. Your paper accounts are saved and left exactly as they are; the sandbox is discarded when you exit.</p>
+        <p className="muted">You trade in a separate replay account while the session plays back on its own clock. All times in a replay are New York time (ET), the exchange's clock. Your paper accounts are saved and left exactly as they are; the replay account is discarded when you exit.</p>
         {sessions === null && !error && <p className="muted">Loading sessions…</p>}
         {sessions?.length === 0 && <p className="muted">No sessions found.</p>}
         {sessions && sessions.length > 0 && (
@@ -96,7 +97,7 @@ export function ReplayPicker({ onClose, onStarted }: { onClose: () => void; onSt
                   <span className="muted">
                     {s.error ? `Cannot be replayed: ${s.error}` : `${fmtHM.format(new Date(s.start * 1000))}–${fmtHM.format(new Date((s.end ?? s.start) * 1000))} ET · ${s.symbols.length} symbols`}
                   </span>
-                  {s.description && <span className="muted small">{s.description}</span>}
+                  {s.description && <span className="muted small">{tidyDescription(s.description)}</span>}
                 </span>
               </label>
             ))}
@@ -149,13 +150,20 @@ export function ReplayBar({ status, onStatus, notify }: { status: any; onStatus:
   };
   const doJump = () => {
     const m = jump.match(/^(\d{1,2}):(\d{2})$/);
-    if (!m) { notify("Enter a time as HH:MM, New York time.", true); return; }
+    if (!m) { notify("Enter a time like 10:30 (New York time, ET).", true); return; }
     // Offset from the session start; time zones shift by whole minutes, so the start's seconds carry over.
     const offset = (Number(m[1]) * 60 + Number(m[2]) - nyMinutes(r.start)) * 60 - (r.start % 60);
-    if (offset > span) { notify(`The session ends at ${fmtHM.format(new Date(r.end * 1000))} New York time.`, true); return; }
+    if (offset > span) { notify(`The session ends at ${fmtHM.format(new Date(r.end * 1000))} ET.`, true); return; }
     seekTo(offset);
   };
-  const exit = () => send("exit").then(() => notify("Replay closed. You are back on your paper accounts."));
+  const exit = async () => {
+    const ok = await confirmAction({
+      title: "Exit the replay?",
+      body: "The replay account and its positions, orders and history are discarded. Your paper accounts are not affected.",
+      confirm: "Exit replay", cancel: "Keep replaying", danger: true,
+    });
+    if (ok) send("exit").then(() => notify("Replay closed. You are back on your paper accounts."));
+  };
 
   return (
     <div className={"replay-bar" + (r.ended ? " ended" : "")} role="region" aria-label="Replay controls">
@@ -187,9 +195,17 @@ export function ReplayBar({ status, onStatus, notify }: { status: any; onStatus:
         </label>
         <button className="ghost" type="submit" disabled={busy || r.ended}>Go</button>
       </form>
-      {r.ended && <span className="replay-ended">Session ended</span>}
-      {r.lagging && !r.paused && <span className="muted" title="The computer cannot keep up with this speed">Running behind</span>}
+      {r.ended && <span className="replay-ended">Session ended. Exit the replay to return to your paper accounts.</span>}
+      {r.lagging && !r.paused && <span className="muted" title="This computer can't keep up with this speed, so the replay is running slower than chosen.">Running slower than chosen</span>}
       <button className="ghost replay-exit" disabled={busy} onClick={exit}>Exit replay</button>
     </div>
   );
+}
+
+/** Bundled descriptions carry generator details ("seed 12") and 12-hour times; show plain text with 24-hour ET times. */
+function tidyDescription(d: string) {
+  return d
+    .replace(/\s*\(seed \d+\)/gi, "").replace(/,?\s*seed \d+/gi, "")
+    .replace(/Simulated data from the synthetic feed\.?/i, "Simulated data.")
+    .replace(/\b(\d{1,2}):(\d{2})\s*([ap])\.?m\.?/gi, (_, h, m, ap) => `${String((Number(h) % 12) + (ap.toLowerCase() === "p" ? 12 : 0)).padStart(2, "0")}:${m} ET`);
 }

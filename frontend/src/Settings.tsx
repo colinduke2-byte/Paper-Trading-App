@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Dialog } from "./Dialog";
-import { api, dateTime, numText, usd } from "./util";
+import { confirmAction } from "./Confirm";
+import { Info } from "./Info";
+import { api, dateTime, numText, shortDateTime, usd, zoneLabel } from "./util";
 
 type Field = { key: string; type: "bool" | "number"; default: any; label: string; help: string; min: string | null; max: string | null };
 
@@ -17,7 +19,7 @@ const S = {
   list: { display: "flex", flexDirection: "column" as const, gap: 10 },
   text: { display: "flex", flexDirection: "column" as const, gap: 1 },
   num: { display: "grid", gridTemplateColumns: "1fr 110px", gap: 10, alignItems: "center" },
-  help: { fontSize: 11 },
+  help: { fontSize: 12 },
 };
 const PARENT: Record<string, string> = {
   pdt_min_equity: "pattern_day_trader", margin_interest_rate: "margin_interest", borrow_fee_rate: "borrow_fee",
@@ -33,8 +35,17 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
   const [type, setType] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState<Record<string, any>>({});
+  const [name, setName] = useState("");
+  const dirty = Object.keys(values).some((k) => String(values[k]) !== String(saved[k]));
 
-  const load = (r: any) => { setFields(r.fields); setValues(r.settings); setType(r.account_type); };
+  const load = (r: any) => { setFields(r.fields); setValues(r.settings); setSaved(r.settings); setType(r.account_type); if (r.account_name) setName(r.account_name); };
+  useEffect(() => { api(`/accounts/${accountId}`).then((a) => setName(a.name || "")).catch(() => {}); }, [accountId]);
+  // Closing with unsaved edits asks first, so a stray click on the backdrop does not lose them.
+  const close = async () => {
+    if (dirty && !(await confirmAction({ title: "Discard your changes?", body: "The rules you changed have not been saved.", confirm: "Discard changes", cancel: "Keep editing", danger: true }))) return;
+    onClose();
+  };
   useEffect(() => { api(`/accounts/${accountId}/settings`).then(load).catch((e) => setError(e.message)); }, [accountId]);
 
   const save = async () => {
@@ -43,12 +54,13 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
       const body = Object.fromEntries(Object.entries(values).map(([k, v]) =>
         [k, typeof v === "string" && fields.find((f) => f.key === k)?.type === "number" ? numText(v) : v]));
       load(await api(`/accounts/${accountId}/settings`, { method: "PUT", body }));
-      onSaved("Account settings saved");
+      onSaved(name ? `Rules saved for "${name}".` : "Rules saved.");
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
   const reset = async () => {
+    if (!(await confirmAction({ title: "Restore the default rules?", body: "Every rule for this account goes back to its default and is saved straight away. Your changes to these settings are replaced.", confirm: "Restore default rules", danger: true }))) return;
     setBusy(true); setError("");
-    try { load(await api(`/accounts/${accountId}/settings/reset`, { method: "POST" })); }
+    try { load(await api(`/accounts/${accountId}/settings/reset`, { method: "POST" })); onSaved("Default rules restored."); }
     catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
 
@@ -57,16 +69,16 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
   const hidden = fields.length - shown.length;
 
   return (
-    <Dialog onClose={onClose} style={S.modal} labelledBy="settings-title">
-        <h3 id="settings-title">Account rules</h3>
+    <Dialog onClose={close} style={S.modal} labelledBy="settings-title">
+        <h3 id="settings-title">Account rules{name ? <span className="dialog-name" title={name}>{name}</span> : null}</h3>
         {summary && (
           <div style={S.stats}>
             {type === "margin" && summary.settled_cash < 0
               ? <div style={S.stat} title="Cash is below zero because the account has borrowed to buy (a margin loan). Margin interest is charged on it when that rule is on.">
                   <span className="muted">Margin loan (borrowed)</span><b>{usd(-summary.settled_cash)}</b></div>
-              : <div style={S.stat}><span className="muted">Settled cash</span><b>{usd(summary.settled_cash)}</b></div>}
-            <div style={S.stat}><span className="muted">Unsettled</span><b>{usd(summary.unsettled_cash)}</b></div>
-            {type === "margin" && <div style={S.stat}><span className="muted">Day trades (5 days)</span><b>{summary.day_trades ?? "–"}{summary.day_trades_left != null ? ` · ${summary.day_trades_left} left` : ""}</b></div>}
+              : <div style={S.stat}><span className="muted">Settled cash <Info term="settled_cash" /></span><b>{usd(summary.settled_cash)}</b></div>}
+            <div style={S.stat}><span className="muted">Settling (from recent sales)</span><b>{usd(summary.unsettled_cash)}</b></div>
+            {type === "margin" && <div style={S.stat}><span className="muted">Day trades (last 5 business days) <Info term="day_trades" /></span><b>{summary.day_trades ?? "–"}{summary.day_trades_left != null ? ` · ${summary.day_trades_left} left` : ""}</b></div>}
             {type === "margin" && <div style={S.stat}><span className="muted">Accrued interest</span><b>{usd(summary.accrued_interest)}</b></div>}
             {type === "margin" && <div style={S.stat}><span className="muted">Accrued borrow fee</span><b>{usd(summary.accrued_borrow_fee)}</b></div>}
             {summary.pending_dividends ? <div style={S.stat}><span className="muted">Dividends pending</span><b>{usd(summary.pending_dividends)}</b></div> : null}
@@ -82,7 +94,7 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
           <div className="notice" role="status">Prices unavailable for {summary.prices_unavailable.join(", ")}: margin checks are paused until they return.</div>
         )}
         {summary?.liquidation_at && (
-          <div className="notice bad" role="alert">Margin call: positions will be liquidated after {summary.grace_hours_left != null ? `${summary.grace_hours_left.toFixed(1)} more hours` : "the grace period"} of open market time unless it is met (about {dateTime(summary.liquidation_at)} if PaperDesk keeps running). Time while PaperDesk is closed or a replay runs does not count.</div>
+          <div className="notice bad" role="alert">Margin call: positions will be liquidated after {summary.grace_hours_left != null ? `${summary.grace_hours_left.toFixed(1)} more hours` : "the grace period"} of open market time unless it is met (about {shortDateTime(summary.liquidation_at)} {zoneLabel()} if PaperDesk keeps running). Time while PaperDesk is closed or a replay runs does not count.</div>
         )}
         {!fields.length && !error && <p className="muted">Loading settings…</p>}
         <div style={S.list}>
@@ -106,9 +118,9 @@ export function SettingsDialog({ accountId, summary, onClose, onSaved }: {
         {hidden > 0 && <p className="muted">Rules that only apply to {type === "cash" ? "margin" : "cash"} accounts are hidden.</p>}
         {error && <div className="notice bad" role="alert">{error}</div>}
         <div className="row">
-          <button className="ghost" onClick={reset} disabled={busy}>Restore defaults</button>
-          <button className="ghost" onClick={onClose}>Close</button>
-          <button className="primary" onClick={save} disabled={busy || !fields.length}>Save</button>
+          <button className="ghost" onClick={reset} disabled={busy}>Restore default rules</button>
+          <button className="ghost" onClick={close}>{dirty ? "Cancel" : "Close"}</button>
+          <button className="primary" onClick={save} disabled={busy || !fields.length || !dirty} title={dirty ? undefined : "Nothing has changed yet"}>Save</button>
         </div>
     </Dialog>
   );
