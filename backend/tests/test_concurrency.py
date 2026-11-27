@@ -162,6 +162,7 @@ SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_e
     ("POST", "/api/replay/start"), ("POST", "/api/replay/step"), ("POST", "/api/replay/seek"), ("POST", "/api/replay/exit"),
     # backups and restore: serialise or replace state under ctx.locked() in DataService, write files outside it.
     # Proven by test_data_routes_answer_busy_and_never_block_the_event_loop_while_the_lock_is_stuck.
+    ("POST", "/api/accounts/{aid}/reset"), ("DELETE", "/api/accounts/{aid}"),  # backup outside the lock, then the action
     ("POST", "/api/data/backups"), ("DELETE", "/api/data/backups/{name}"), ("POST", "/api/data/restore/preview"),
     ("POST", "/api/data/restore/apply"), ("POST", "/api/data/accounts/import/preview"),
     ("POST", "/api/data/accounts/import/apply"), ("POST", "/api/data/recovery/restore"),

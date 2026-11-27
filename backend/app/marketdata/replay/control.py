@@ -159,13 +159,16 @@ class ReplayController:
             while done < seconds and not self.closed:
                 with self.guard.hold(COMMAND_WAIT, label="replay command"):
                     until = time.monotonic() + SLICE_SECONDS  # wall time only sizes the slice
+                    ticks = 0
                     while done < seconds and not self.closed:
-                        want = min(SLICE_TICKS, seconds - done)
-                        n = self._run(want)
+                        # The clock is checked after every tick, so a slice overruns SLICE_SECONDS by one tick at
+                        # most. (Checked every SLICE_TICKS ticks, a batch of slow ticks held the lock 0.75 s on CI.)
+                        n = self._run(1)
                         done += n
-                        if n < want:  # the session ended
+                        ticks += 1
+                        if n < 1:  # the session ended
                             return done
-                        if time.monotonic() >= until:
+                        if ticks >= SLICE_TICKS or time.monotonic() >= until:
                             break
             return done
         finally:

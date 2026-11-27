@@ -397,3 +397,36 @@ def test_a_cash_account_oco_sale_does_not_pay_for_its_other_member():
     assert ex.account(a).cash == cash
     at_expiry(ex, feed, clock, Dec("60.00"), FAR)
     assert ex.account(a).cash >= 0
+
+
+# ---- backup (PR 19) x thread safety (PR 29): the safety backup before a reset is written off the lock ------
+
+def test_reset_takes_its_backup_outside_the_lock_and_a_failed_backup_stops_it(tmp_path, monkeypatch):
+    from app.core.locking import held
+    c, app, ex = make_app(tmp_path)
+    ctx = app.state.ctx
+    aid = list(ex.accounts)[0]
+    assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 3}).status_code == 200
+    svc = ctx.data
+    seen = []
+    real = svc.backups.create
+
+    def watched(kind, doc, market, info):
+        seen.append((kind, held(), len(doc["accounts"][0]["fills"])))
+        return real(kind, doc, market, info)
+    monkeypatch.setattr(svc.backups, "create", watched)
+    assert c.post(f"/api/accounts/{aid}/reset", json={"starting_cash": "5000"}).status_code == 200
+    assert seen == [("pre-reset", False, 1)]  # one backup, written without the lock, holding the fill
+    assert ex.accounts[aid].fills == []
+    # a bad value is refused before any backup; a failing backup stops the reset
+    assert c.post(f"/api/accounts/{aid}/reset", json={"starting_cash": "-1"}).status_code in (400, 422)
+    assert len(seen) == 1
+    c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 2})
+    from app.storage.backups import BackupError
+
+    def broken(*a):
+        raise BackupError("the disk is full")
+    monkeypatch.setattr(svc.backups, "create", broken)
+    r = c.post(f"/api/accounts/{aid}/reset", json={})
+    assert r.status_code in (400, 409, 422) and "backup" in r.json()["detail"]
+    assert len(ex.accounts[aid].fills) == 1  # nothing was reset

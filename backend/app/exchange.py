@@ -262,6 +262,15 @@ class Exchange:
         self.dirty = True
         return acct
 
+    @contextlib.contextmanager
+    def backup_taken(self):
+        """The caller has just backed the state up itself (outside the lock): do not take another one."""
+        hook, self.before_destructive = self.before_destructive, None
+        try:
+            yield
+        finally:
+            self.before_destructive = hook
+
     def reset_account(self, account_id: str, starting_cash=None) -> Account:
         """Start the account again with fresh cash. Its rule settings and tax-lot method are kept; positions,
         orders, history and the trade journal are cleared."""

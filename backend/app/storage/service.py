@@ -89,6 +89,24 @@ class DataService:
             doc, market, info = self._serialise(ctx.live)
         return self.backups.create(kind, doc, market, info)
 
+    def backup_before(self, kind: str) -> None:
+        """Back up the live state before a reset or delete, taking the exchange lock only to serialise it: the
+        file is written after the lock is released (a request thread, never the event loop). Raises ValueError
+        when the backup fails, so the action is not done. Skipped during a replay or recovery, like
+        snapshot_before()."""
+        if self.backups is None:
+            return
+        ctx = self.ctx
+        with ctx.locked(f"data {kind}"):
+            st = ctx.live.store
+            if ctx.replay is not None or (st is not None and st.blocked):
+                return
+            doc, market, info = self._serialise(ctx.live)
+        try:
+            self.backups.create(kind, doc, market, info)
+        except BackupError as e:
+            raise ValueError(f"the action was stopped because the backup before it failed: {e}") from None
+
     def snapshot_before(self, kind: str) -> None:
         """Called by the exchange before a reset or delete (already under the lock). A failed snapshot stops
         the action: better to refuse than to destroy data without a way back."""

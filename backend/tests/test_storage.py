@@ -249,9 +249,10 @@ def test_an_unchanged_state_is_not_rewritten(tmp_path):
     ex, feed, clock, a = fresh(tmp_path)
     m = os.stat(tmp_path / "state.json").st_mtime_ns
     n = ex.store.saves
-    os.utime(tmp_path / "state.json", ns=(1, 1))
+    stamp = 10 ** 9  # one second after the epoch: Windows keeps times in 100 ns steps, so 1 ns would read back as 0
+    os.utime(tmp_path / "state.json", ns=(stamp, stamp))
     ex.save(force=True)
-    assert os.stat(tmp_path / "state.json").st_mtime_ns == 1 and ex.store.saves == n + 1
+    assert os.stat(tmp_path / "state.json").st_mtime_ns == stamp and ex.store.saves == n + 1
 
 
 def test_reset_and_delete_start_new_generations_and_old_files_go(tmp_path):

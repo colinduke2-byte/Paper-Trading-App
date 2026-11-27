@@ -32,9 +32,34 @@ class DataDirLocked(RuntimeError):
     """Another PaperDesk process is using this data directory."""
 
 
+def _windows_pid_running(pid: int) -> bool:
+    """OpenProcess + GetExitCodeProcess. No such process -> False; one we may not open (another user's) -> True;
+    anything unexpected -> True, so the heartbeat age decides as before."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists; 87 (invalid parameter): it does not
+        try:
+            code = wintypes.DWORD()
+            if k.GetExitCodeProcess(h, ctypes.byref(code)):
+                return code.value == 259  # STILL_ACTIVE
+            return True
+        finally:
+            k.CloseHandle(h)
+    except Exception:  # noqa: BLE001 - never let the check itself stop a start-up
+        return True
+
+
 def _pid_running(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_pid_running(pid)
     if os.name != "posix":
-        return True  # no cheap check on Windows: rely on the heartbeat age
+        return True  # no cheap check here: rely on the heartbeat age
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

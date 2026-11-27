@@ -595,21 +595,47 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                                  parse_num(body.get("starting_cash", 100000), "starting cash"))
         return plain(ex.summary(acct.id))
 
+    # Reset and delete take a backup first (storage.service). Writing it under the exchange lock held every other
+    # request up while the file was written and synced (slow on Windows), so the backup is serialised under a short
+    # lock and written outside it; the action then runs under the lock. The backup can miss what changed in the
+    # moment between the two, never anything before it.
+    def backup_first(kind: str):
+        data = getattr(ctx, "data", None)
+        if data is not None:
+            data.backup_before(kind)
+
     @app.post("/api/accounts/{aid}/reset")
+    @unlocked("takes the safety backup outside the exchange lock, then resets under ctx.locked()")
     def reset_account(aid: str, body: dict = Body(default={})):
-        ex = ctx.ex
         from ..core.money import parse as parse_num
-        ex.account(aid)
+        from ..exchange import _starting_cash
         raw = body.get("starting_cash")
         cash = parse_num(raw, "starting cash") if raw not in (None, "") else None
-        ex.reset_account(aid, cash)
-        return plain(ex.summary(aid))
+        if cash is not None:
+            _starting_cash(cash)  # a bad value is refused before any backup is taken
+        with ctx.locked("reset check"):
+            ctx.ex.account(aid)
+        backup_first("pre-reset")
+        with ctx.locked("reset"):
+            ex = ctx.ex
+            with ex.backup_taken():
+                ex.reset_account(aid, cash)
+            return plain(ex.summary(aid))
 
     @app.delete("/api/accounts/{aid}")
+    @unlocked("takes the safety backup outside the exchange lock, then deletes under ctx.locked()")
     def delete_account(aid: str):
-        ex = ctx.ex
-        ex.delete_account(aid)
-        return {"ok": True}
+        with ctx.locked("delete check"):
+            ex = ctx.ex
+            ex.account(aid)
+            if len(ex.accounts) == 1:
+                raise ValueError("cannot delete the only account")
+        backup_first("pre-delete")
+        with ctx.locked("delete"):
+            ex = ctx.ex
+            with ex.backup_taken():
+                ex.delete_account(aid)
+            return {"ok": True}
 
     @app.get("/api/accounts/{aid}")
     def account(aid: str):
