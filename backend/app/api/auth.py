@@ -13,8 +13,10 @@ for the access keys below; real environment variables win):
 What is enforced, in every mode:
   * Host header check (blunts DNS rebinding): with LAN mode off only localhost, 127.0.0.0/8 and ::1;
     in LAN mode also any IP address literal and PAPERDESK_ALLOWED_HOSTS.
-  * Cross-origin check on every non-GET request and on the WebSocket handshake.
-  * Security headers on every HTTP response.
+  * Cross-origin check on every non-GET request, on every request to /api and the API docs (GETs
+    included, so another site cannot load account data into a page) and on the WebSocket handshake.
+  * Request bodies are limited to MAX_REQUEST_BODY bytes (413 above that).
+  * Security headers on every HTTP response, including Cross-Origin-Resource-Policy: same-origin.
 With a passcode set, every /api route (except the sign-in endpoints), /ws and the API docs need a
 session; the static UI shell stays public so it can show the sign-in screen.
 
@@ -57,6 +59,7 @@ if not log.handlers:
 COOKIE = "paperdesk_session"
 MIN_PASSCODE = 8
 MAX_PASSCODE = 1024
+MAX_REQUEST_BODY = 1024 * 1024  # bytes; the largest legitimate body (chart state) is capped at 256 KB
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 PUBLIC_API = {"/api/auth/login", "/api/auth/logout", "/api/auth/state", "/print.js"}
 # /print.js: the CSP forbids inline handlers (onclick=...), so server-rendered pages such as printable
@@ -579,7 +582,7 @@ class AccessMiddleware:
             return await self._refuse(scope, receive, send, 421,
                                       "This PaperDesk server does not answer to that host name. Open it with the "
                                       "address the server printed when it started.")
-        if (ws or scope.get("method", "GET") not in SAFE_METHODS) and not acc.origin_ok(
+        if (ws or scope.get("method", "GET") not in SAFE_METHODS or _always_protected(path)) and not acc.origin_ok(
                 headers, host, "https" if scope.get("scheme") in ("https", "wss") else "http"):
             return await self._refuse(scope, receive, send, 403,
                                       "Refused a request that came from another website.")
@@ -594,6 +597,12 @@ class AccessMiddleware:
             if token:
                 send = self._watch_session(send, token)
             return await self.app(scope, receive, send)
+
+        bounded = await self._bounded_body(receive, headers)
+        if bounded is None:
+            return await self._refuse(scope, receive, send, 413,
+                                      f"The request is too large: at most {MAX_REQUEST_BODY // 1024} KB is accepted.")
+        receive = bounded
 
         secure = scope.get("scheme") == "https"
         refresh = bool(token) and acc.sessions.needs_cookie_refresh(token)
@@ -612,6 +621,7 @@ class AccessMiddleware:
                 add("referrer-policy", "no-referrer")
                 add("x-frame-options", "DENY")
                 add("cross-origin-opener-policy", "same-origin")
+                add("cross-origin-resource-policy", "same-origin")
                 if not is_docs:
                     add("content-security-policy", _csp(host))
                 if is_api:
@@ -622,6 +632,34 @@ class AccessMiddleware:
             await send(message)
 
         return await self.app(scope, receive, send_with_headers)
+
+    @staticmethod
+    async def _bounded_body(receive, headers):
+        """Read the whole request body (at most MAX_REQUEST_BODY bytes) and return a receive callable that
+        replays it, or None when the body is too large. Chunked bodies without a length are counted too."""
+        try:
+            if int(headers.get("content-length") or 0) > MAX_REQUEST_BODY:
+                return None
+        except ValueError:
+            return None
+        chunks, size, more = [], 0, True
+        while more:
+            message = await receive()
+            if message["type"] != "http.request":
+                first = message  # a disconnect: hand it on as it is
+                break
+            chunks.append(message.get("body", b""))
+            size += len(chunks[-1])
+            if size > MAX_REQUEST_BODY:
+                return None
+            more = message.get("more_body", False)
+        else:
+            first = {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+        pending = [first]
+
+        async def replay():
+            return pending.pop() if pending else await receive()
+        return replay
 
     def _watch_session(self, send, token: str):
         """Close an open stream (code 4401) as soon as its session ends: sign-out or expiry."""
@@ -649,7 +687,7 @@ class AccessMiddleware:
             body["auth_required"] = True
         resp = JSONResponse(body, status_code=status, headers={
             "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
-            "cache-control": "no-store", "content-security-policy": "default-src 'none'; frame-ancestors 'none'"})
+            "cache-control": "no-store", "cross-origin-resource-policy": "same-origin", "content-security-policy": "default-src 'none'; frame-ancestors 'none'"})
         await resp(scope, receive, send)
 
 

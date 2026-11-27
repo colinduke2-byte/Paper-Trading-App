@@ -4,6 +4,11 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_FLOOR, ROUND
 ZERO = Decimal("0")
 CENT = Decimal("0.01")
 TENTH_MILL = Decimal("0.0001")
+# Bounds for untrusted numbers. Arithmetic on a value like 1e999999999 overflows the decimal context or
+# freezes the server while it formats a billion digits, so parse refuses such values up front.
+MAX_TEXT = 64            # characters in a number's text form
+MAX_ADJUSTED = 15        # largest power of ten: values stay below 10**16
+MIN_EXPONENT = -24       # at most 24 decimal places (room for float noise such as 0.30000000000000004)
 
 
 def D(x) -> Decimal:
@@ -21,12 +26,15 @@ def parse(x, what: str = "value") -> Decimal:
     """Parse untrusted API input (JSON numbers arrive as floats) via its string form.
 
     Raises ValueError naming ``what`` (for example "starting cash") for anything that is not a plain
-    finite number: text, lists, objects, true/false, NaN, and numbers with thousands separators."""
+    finite number: text, lists, objects, true/false, NaN, and numbers with thousands separators. It also
+    refuses magnitudes of 10**16 or more, more than 24 decimal places and texts over 64 characters."""
     if x is None:
         raise ValueError(f"{what} is missing")
     if isinstance(x, bool) or not isinstance(x, (int, float, str, Decimal)):
         raise ValueError(f"{what} must be a number, not {_kind(x)}")
     text = str(x).strip()
+    if len(text) > MAX_TEXT:
+        raise ValueError(f"{what} is too long to be a number: {_show(text)}")
     try:
         d = Decimal(text)
     except (InvalidOperation, ValueError):
@@ -35,6 +43,11 @@ def parse(x, what: str = "value") -> Decimal:
         raise ValueError(f"{what} is not a number: {_show(text)}.{hint}") from None
     if not d.is_finite():
         raise ValueError(f"{what} must be a finite number")
+    exponent = d.as_tuple().exponent
+    if (d.adjusted() if d else exponent) > MAX_ADJUSTED:  # a zero such as 0E+999999999 counts too
+        raise ValueError(f"{what} is too large: {_show(text)}")
+    if exponent < MIN_EXPONENT:
+        raise ValueError(f"{what} has too many decimal places: {_show(text)}")
     return d
 
 
