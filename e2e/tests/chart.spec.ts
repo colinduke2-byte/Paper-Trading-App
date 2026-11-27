@@ -463,10 +463,15 @@ test.describe("replay", () => {
     const draw = page.getByRole("button", { name: "Draw", exact: true });
     const drawingsBtn = () => page.getByRole("button", { name: /^Drawings \(/ });
     const list = page.getByRole("dialog", { name: "Drawings" });
+    // Waits on what the app does, never on time: the drawing count, then the (debounced) save to the server.
     const addHLine = async (fy: number) => {
+      const before = Number((await drawingsBtn().textContent())!.match(/\((\d+)\)/)![1]);
       await page.getByRole("button", { name: "Horizontal line" }).click();
       const box = await stableBox(page.getByTestId("draw-layer"));
+      const saved = page.waitForResponse((r) => r.url().includes("/api/chartstate/drawings/") && r.request().method() === "PUT" && r.ok());
       await page.mouse.click(box.x + box.width / 2, box.y + box.height * fy);
+      await expect(drawingsBtn()).toHaveText(`Drawings (${before + 1})`);
+      await saved;
       await drawingsBtn().click();
       const text = (await list.getByRole("button", { name: /^Horizontal line at / }).last().textContent())!;
       await drawingsBtn().click();
@@ -489,11 +494,16 @@ test.describe("replay", () => {
 
     // Step the simulated clock twice: the chart reloads, the line is still there at the same price.
     const bar = page.getByRole("region", { name: "Replay controls" });
+    const clock = bar.locator(".replay-clock");
     for (let i = 0; i < 2; i++) {
-      await page.waitForTimeout(500); // let the debounced save go out before the remount
+      // The step reloads the chart. chartReady() alone can pass on the chart from before the step, and a click
+      // then lands while it is being replaced: wait until the clock has moved and the reloaded chart is ready.
+      const was = await clock.textContent();
       await bar.getByRole("button", { name: "+1 min" }).click();
+      await expect(clock).not.toHaveText(was!);
       await chartReady(page);
     }
+    await stableBox(page, stage(page));
     await draw.click();
     await drawingsBtn().click();
     await expect(list.getByRole("button", { name: replayLine, exact: true })).toBeVisible();
