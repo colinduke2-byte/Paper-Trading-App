@@ -16,6 +16,12 @@ from ..ledger.account import LOT_METHODS
 from ..options.symbology import parse as parse_option
 from ..core.errors import NotFound
 from ..marketdata.labels import default_benchmark, price_source
+from .locking import unlocked
+
+# Price history can come from the data provider over the network, which must not happen while the
+# exchange lock is held. Routes that need it run unlocked: they fetch prices first and then read the
+# account in one piece under `with ctx.locked():`.
+PRICE_HISTORY = "fetches price history from the feed before reading the account under ctx.locked()"
 
 CSV_KINDS = ("fills", "orders", "ledger", "positions", "gains", "journal")
 LOT_METHOD_LABELS = {"fifo": "First in, first out", "lifo": "Last in, first out", "highest_cost": "Highest cost first"}
@@ -49,14 +55,12 @@ def register(app, ctx):
     def curve(points) -> list:
         return [[t, float(v)] for t, v in points]  # chart data only
 
-    def sectors() -> dict:
-        return {s: i.get("sector", "Other") for s, i in ex().feed.symbols().items()}
-
     # ---- analytics --------------------------------------------------------------------------
     @app.get("/api/accounts/{aid}/analytics")
+    @unlocked(PRICE_HISTORY)
     def analytics(aid: str, benchmark: Optional[str] = None, risk_free: str = "0"):
         e = ex()
-        a = e.account(aid)
+        e.account(aid)
         rf = parse_num(risk_free)
         if not Decimal("-1") < rf < Decimal("1"):
             raise ValueError("risk_free is an annual rate written as a fraction, for example 0.04")
@@ -64,10 +68,15 @@ def register(app, ctx):
         bench = (benchmark or "").upper().strip() or default
         if bench and not e.is_stock(bench):
             raise NotFound(f"unknown benchmark symbol {bench}")
+        hist = price_history(e, bench) if bench else None  # may ask the provider: before the lock is taken
+        with ctx.locked("analytics"):
+            return _analytics(e, aid, bench, default, hist, rf)
+
+    def _analytics(e, aid: str, bench: str, default: str, hist, rf):
+        a = e.account(aid)
         summ = e.summary(aid)
         # With a position that has no price yet, the live equity is not known: leave it off the curve.
         series = equity_points(a, e.now(), None if summ["prices_unavailable"] else summ["equity"])
-        hist = price_history(e, bench) if bench else None
         r = returns_report(series, external_flows(a), hist, rf)
         index = r.pop("index")
         b = r["benchmark"]
@@ -82,7 +91,8 @@ def register(app, ctx):
             "account_id": aid, **price_source(e.feed), "benchmark_default": default, "returns": r, "benchmark": b,
             "account_curve": curve(series), "index_curve": curve(index),
             "trades": trade_stats(lots),
-            "exposure": exposure(e.positions(aid), sectors(), summ["equity"]),
+            "exposure": exposure(e.positions(aid), {s: i.get("sector", "Other") for s, i in e.feed.symbols().items()},
+                                 summ["equity"]),
             "summary": {k: summ[k] for k in ("equity", "cash", "realized_pnl", "unrealized_pnl", "fees", "starting_cash")},
             "lot_method": a.lot_method,
         })
@@ -115,22 +125,25 @@ def register(app, ctx):
     # ---- statements --------------------------------------------------------------------------
     def _statement(aid: str, month: str) -> dict:
         e = ex()
-        a = e.account(aid)
         year, mon = parse_month(month)
         start, end = month_bounds(year, mon)
-        now = e.now()
-        current = end > now
-        splits = {k: CorporateAction.from_plain(r) for k, r in e.lifecycle.split_records.items()}
-        marks = {}
-        for sym in positions_at(a, end, splits):
-            if current:
-                marks[sym] = e.price(sym)
-            elif parse_option(sym) is None and e.is_stock(sym):
-                marks[sym] = price_at(price_history(e, sym), end - 1)
-        marks = {s: p for s, p in marks.items() if p is not None}
-        summ = e.summary(aid) if current else None
-        live = summ["equity"] if current and not summ["prices_unavailable"] else None
-        return monthly_statement(a, year, mon, now, live, marks, splits, source=price_source(e.feed))
+        with ctx.locked("statement"):
+            a = e.account(aid)
+            now = e.now()
+            current = end > now
+            splits = {k: CorporateAction.from_plain(r) for k, r in e.lifecycle.split_records.items()}
+            symbols = list(positions_at(a, end, splits))
+        # A past month is valued at prices from the feed's history, which may come from the provider:
+        # they are fetched here, with the lock released.
+        past = {} if current else {sym: price_at(price_history(e, sym), end - 1) for sym in symbols
+                                   if parse_option(sym) is None and e.is_stock(sym)}
+        with ctx.locked("statement"):
+            a = e.account(aid)
+            marks = {sym: e.price(sym) for sym in symbols} if current else past
+            marks = {s: p for s, p in marks.items() if p is not None}
+            summ = e.summary(aid) if current else None
+            live = summ["equity"] if current and not summ["prices_unavailable"] else None
+            return monthly_statement(a, year, mon, now, live, marks, splits, source=price_source(e.feed))
 
     @app.get("/api/accounts/{aid}/statements")
     def statements(aid: str):
@@ -139,10 +152,12 @@ def register(app, ctx):
         return {"months": months_between(a.created_at, e.now())}
 
     @app.get("/api/accounts/{aid}/statements/{month}")
+    @unlocked(PRICE_HISTORY)
     def statement(aid: str, month: str):
         return plain(_statement(aid, month))
 
     @app.get("/api/accounts/{aid}/statements/{month}/html", response_class=HTMLResponse)
+    @unlocked(PRICE_HISTORY)
     def statement_page(aid: str, month: str):
         return HTMLResponse(statement_html(_statement(aid, month)))
 
