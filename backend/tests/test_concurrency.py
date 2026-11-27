@@ -365,6 +365,19 @@ def test_no_route_asks_the_data_provider_while_holding_the_lock():
     assert c.post(f"/api/accounts/{aid}/orders/preview", json={"symbol": "AAPL", "side": "buy", "qty": 1}).status_code == 200
     assert asked >= 6, "the routes that fetch from the provider were not exercised"
     assert under_lock == []
+    # An option order with the provider's contract list not cached (or over an hour old): the list is fetched
+    # before the lock is taken, never inside the order routes (release review finding 2).
+    listing = feed.option_listing("AAPL")
+    expiry = sorted(listing)[0]
+    contract = build("AAPL", expiry, "C", sorted(listing[expiry])[len(listing[expiry]) // 2])
+    for path in ("orders/preview", "orders"):
+        feed._exp_cache.clear()
+        n = len(tr.requests)
+        r = c.post(f"/api/accounts/{aid}/{path}", json={"symbol": contract, "side": "buy", "qty": 1, "type": "limit",
+                                                       "limit_price": "0.05", "tif": "day"})
+        assert r.status_code == 200, r.text
+        assert any(q["path"] == "/v2/options/contracts" for q in tr.requests[n:]), "the listing was not fetched at all"
+    assert under_lock == []
     # The poller thread learns what to fetch through the lock, and gets the last list while the lock is busy.
     ctx = app.state.ctx
     assert feed.interest_source == ctx.live_interest and "AAPL" in feed.wanted()

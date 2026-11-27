@@ -22,7 +22,7 @@ from .core.clock import Clock
 from .core.assets import is_crypto
 from .core.models import Fill, Order, Quote, from_plain, to_plain
 from .core.money import CENT, ZERO, D, cents, parse as parse_num, px4
-from .ledger.account import Account, is_long_term
+from .ledger.account import Account, Lot, is_long_term
 from .lifecycle import settings as life_settings
 from .lifecycle.manager import LifecycleManager
 from .marketdata.feed import MarketDataProvider
@@ -138,6 +138,7 @@ class Exchange:
         self.load_result = None  # what the last load() found (app.storage.store.LoadResult)
         self.before_destructive = None  # set by the data service: snapshot before a reset or delete
         self.faults: dict = {}  # account id -> why it cannot be valued right now (see isolated())
+        self._booking: frozenset = frozenset()  # order ids whose fills _handle is booking (reserved_lots)
         self.step_faults: dict = {}  # account id -> {step: why it failed}; cleared only when that step next works
         # Expiry settlement prices: (underlying, expiry ISO) -> (price, exact, note); fetches of the provider's
         # daily close in progress or finished: key -> {"started": ts, "done": bool}.
@@ -504,7 +505,8 @@ class Exchange:
         saved = [(o, dict(o.__dict__)) for o in self.engine.active_orders() if o.account_id == account_id]
         led = a.ledger
         n_txn, balances = len(led.transactions), dict(led.balances)
-        lots = {s: [copy.copy(l) for l in ls] for s, ls in a.lots.items()}
+        # The constructor, not copy.copy: several times faster, and an account can hold hundreds of lots.
+        lots = {s: [Lot(l.qty, l.price, l.ts, l.cost, l.fill_id, l.id) for l in ls] for s, ls in a.lots.items()}
         lot_seq = a.lot_seq  # tax-lot ids (PR 13): a rolled-back fill must not use one up
         n_fills, n_closed, life = len(a.fills), len(a.closed), a.life.copy()
         # `dirty` is not put back: the save thread sets it when a write fails, and a rolled-back request
@@ -799,7 +801,11 @@ class Exchange:
     def reserved_lots(self, account_id: str, exclude: Optional[str] = None) -> dict:
         """Lot id -> quantity still to be closed by the account's open orders that named it."""
         out: dict = {}
-        for o in self.engine.orders.values():
+        # Open orders, plus the orders whose fills are being booked right now (see _handle): never the whole
+        # order history, which grows with every order and made each fill slower.
+        orders = self.engine.orders
+        candidates = list(self.engine.active_orders()) + [orders[i] for i in sorted(self._booking) if i in orders]
+        for o in {c.id: c for c in candidates}.values():
             if o.account_id != account_id or not o.lots or o.id == exclude:
                 continue
             wants = [(e["lot_id"], D(e["qty"]) - D(e.get("filled", "0"))) for e in o.lots]
@@ -832,11 +838,13 @@ class Exchange:
         sale, an assignment or an exercise can still close them. The order is then canceled rather
         than left to close lots nobody chose (or to open a short position).
         """
+        mine = [o for o in self.engine.active_orders() if o.account_id == account.id and o.lots]
+        if not mine:
+            return  # nothing names a lot: no need to look at every lot on every fill
         held = {l.id: abs(l.qty) for ls in account.lots.values() for l in ls}
         # Several orders can each name part of one lot, so what they still need is counted together:
         # the oldest orders keep their claim and the newest ones that no longer fit are canceled.
         claimed: dict = {}
-        mine = [o for o in self.engine.orders.values() if o.account_id == account.id and o.lots and o.active]
         for o in sorted(mine, key=lambda o: (o.created_at, o.id)):
             need: dict = {}
             for e in o.lots:
@@ -1895,6 +1903,14 @@ class Exchange:
         return short or [e["lot_id"] for e in order.lots]
 
     def _handle(self, events: list) -> None:
+        outer = self._booking
+        self._booking = outer | {ev[1].order_id for ev in events if ev[0] == "fill" and ev[1].order_id}
+        try:
+            self._handle_batch(events)
+        finally:
+            self._booking = outer
+
+    def _handle_batch(self, events: list) -> None:
         # Within one batch, fills of orders that name lots are booked first, so a plain order filling
         # in the same step cannot take lots another order named before that order's fill is booked.
         first = [ev for ev in events if ev[0] == "fill" and self._names_lots(ev[1]) is not None]
