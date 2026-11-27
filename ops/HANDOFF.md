@@ -392,3 +392,8 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   session_01ByytwbHUspwrSQ6ofo7MA1 on fix/multileg-route-test. Merge it, then PR 34.
   PHASE 6 (owner testing on Windows PC, phone, Alpaca keys) started via the owner's session.
   Small follow-up: hardening.py docstring points to docs/LIMITS.md (now KNOWN_LIMITS.md).
+- 18:35 UTC: test fix ready but uncommitted in session_01ByytwbHUspwrSQ6ofo7MA1 (commit refused by
+  the permission check): test-only cause (same-day expiry on Fridays; sold strike bid 0.00, correctly
+  rejected); fix pins the clock in tests/test_integration_wave1.py. Owner to run the commit there.
+  Then: merge that PR when green, then PR 34 (docs). Owner tests phase 6 on Nov 28 evening; results
+  come via the owner's session. Lead schedules no idle check-ins.
