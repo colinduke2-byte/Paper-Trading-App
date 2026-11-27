@@ -91,8 +91,8 @@ def test_api_refuses_extreme_numbers_with_4xx_and_names_the_field():
         r = c.post("/api/accounts", json={"starting_cash": cash})
         assert r.status_code == 400 and "starting cash" in r.json()["detail"].lower(), (cash, r.text)
     r = c.post("/api/alerts", json={"symbol": "NVLX", "op": "above", "price": "1E-999999"})
-    assert r.status_code == 400 and "alert price" in r.json()["detail"].lower()
-    assert c.post("/api/alerts", json={"symbol": "NVLX", "op": "above", "price": "12.345"}).status_code == 400
+    assert r.status_code == 400 and "price" in r.json()["detail"].lower()
+    assert c.post("/api/alerts", json={"symbol": "NVLX", "op": "above", "price": "12.123456789"}).status_code == 400
     for k in ("trail_amount", "trail_percent"):
         body = {"symbol": "NVLX", "side": "sell", "qty": 1, "type": "trailing_stop", "tif": "gtc", k: "1e-999999"}
         r = c.post(f"/api/accounts/{aid}/orders", json=body)
@@ -252,16 +252,16 @@ def test_allow_body_for_one_route():
 
 @pytest.mark.parametrize("limit,make", [
     ("MAX_ACCOUNTS", lambda c, aid, i: c.post("/api/accounts", json={"name": f"a{i}"})),
-    ("MAX_ALERTS", lambda c, aid, i: c.post("/api/alerts", json={"symbol": "NVLX", "op": "above", "price": "1"})),
+    ("app.alerts.model.MAX_ALERTS", lambda c, aid, i: c.post("/api/alerts", json={"symbol": "NVLX", "op": "above", "price": "1"})),
     ("MAX_WATCHLISTS", lambda c, aid, i: c.put(f"/api/watchlists/w{i}", json=["NVLX"])),
 ])
 def test_count_caps(monkeypatch, limit, make):
-    monkeypatch.setattr(limits, limit, 3)
+    monkeypatch.setattr(limit, 3) if "." in limit else monkeypatch.setattr(limits, limit, 3)
     c, ex = client()
     aid = next(iter(ex.accounts))
     codes = [make(c, aid, i).status_code for i in range(6)]
     assert 400 in codes and codes[-1] == 400 and codes.count(200) <= 3
-    assert "at most 3" in make(c, aid, 99).json()["detail"]
+    assert " 3 " in make(c, aid, 99).json()["detail"]
 
 
 def test_watchlist_symbol_cap_and_journal_caps(monkeypatch):

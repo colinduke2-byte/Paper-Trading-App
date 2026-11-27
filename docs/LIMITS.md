@@ -25,7 +25,8 @@ Each field then has its own range:
 | Field | Range |
 |---|---|
 | Starting cash (new account, reset, replay) | more than 0, at most 1,000,000,000, whole cents. A reset is checked completely before anything is replaced |
-| Prices (limit, stop, take profit, stop loss, trail amount, alert price) | positive, at most 1,000,000,000, on the tick grid: whole cents at or above $1, hundredths of a cent below. Changing an order applies the same rules |
+| Order prices (limit, stop, take profit, stop loss, trail amount) | positive, at most 1,000,000,000, on the tick grid: whole cents at or above $1, hundredths of a cent below. Changing an order applies the same rules |
+| Alert levels | within the bounds above and at most 1,000,000,000 (a level need not be on the tick grid) |
 | Trail percent | above 0 and below 100, at most 4 decimal places |
 | Quantity | as before: positive, at most 1,000,000, at most 4 decimal places, whole contracts for options |
 | Rule settings (interest rates, grace hours, equity minimum) | the ranges shown in the Settings dialog |
@@ -61,7 +62,7 @@ allow_body(app, "/api/backup/restore", 50 * limits.MB)     # an exact path or a 
 | Accounts | 20 |
 | Open orders per account | 500 |
 | Orders in one linked group, legs in a multi-leg order | 5 and 4 (unchanged) |
-| Alerts | 200 in total |
+| Alert rules | 10,000 in total (the alert engine only evaluates rules whose symbol changed, so tick cost stays bounded) |
 | Watchlists | 20, with at most 200 symbols each; names up to 30 characters |
 | Journal entries | 2,000 per account; a note up to 4,000 characters, 12 tags of up to 32 characters |
 | Symbol text | 32 characters; longer text is refused before any lookup or cache (option symbols are at most 21) |
