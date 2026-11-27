@@ -373,3 +373,9 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
 - Old sessions the owner restarted by accident were interrupted by the owner's session; left stopped.
 - 02:10 UTC: PR 30 (security hardening) MERGED on top of PR 28; all 8 checks green.
 - 02:34 UTC: PR 31 (hardening extras: WebSocket validation/caps, per-account fault isolation, research rate limit, safeUrl, data-dir perms) MERGED. Release review must look at isolated(): margin/accrual exceptions become per-account faults instead of tick errors.
+- 04:10 UTC: PHASE 3 done: PR 32 (integration/wave2 -> main, head f0a4316) combines 19, 13, 14, 18, 20,
+  11, uxpolish, 17 and main (28, 30, 31). Local: backend 1045, vitest 54, Chromium e2e 206 passed.
+  16 cross-feature bugs fixed (listed in PR 32), incl. a pre-existing OCO cash bug from PR 28 (fixed
+  only on this branch). Integrator session_01ByytwYf74TQnjtG3k5yzNc watches CI and fixes.
+  PHASE 4 started: release review (Opus) session_01ByytwZeY6oV1ktaeyhh6XJ, posts on PR 32.
+  When PR 32 merges, close PRs 11, 13, 14, 17, 18, 19, 20 as included (owner may need to).
