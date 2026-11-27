@@ -358,3 +358,16 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   in both sessions.
 - 03:17 UTC: still blocked on the owner: Actions billing (no runs since 02:26); commits in the
   integrator and PR 17 sessions. Cashfix worker told to finish items 10/12 and push (skip PR text).
+
+## 2026-11-27 (CI back: repository made public, Actions minutes free)
+- 01:49 UTC: PR 28 (cash accounts: strict reservation for every subset of fills, split settlement in
+  cash accounts, sorted option-symbol matching) MERGED. Release blocker 4 closed. All release
+  blockers (B1-B4, cash) are now closed on main.
+- PR 30 hardening (758ebff, account cap 1000) green; updated with main after PR 28, re-running.
+- PR 17 provider actions fixed for both reviews at 850eaa7 (comment on PR 17); goes via the integrator.
+- Integrator session_01ByytwYf74TQnjtG3k5yzNc: integration/wave2 at b6b1748 (PR 19 merged, 732
+  tests); next 17, then main, then 13, 14, 18, 20, 30, crossbrowser (f0f5ef0), uxpolish.
+- Old hardening session_01ByytwYvYF7ikH9tiRUTe5a pushed a competing stream/hardening-b; decision:
+  PR 30 stands; it ports only missing items into stream/hardening-extra after PR 30 is on main.
+  stream/hardening-b can be deleted later.
+- Old sessions the owner restarted by accident were interrupted by the owner's session; left stopped.
