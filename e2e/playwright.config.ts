@@ -117,6 +117,9 @@ const server = (p: string, env: Record<string, string>, url: string) => ({
   url,
   reuseExistingServer: false,
   timeout: 60_000,
+  // In CI the server's stdout (uvicorn's line for every HTTP request) goes to the job log too, so a navigation
+  // that never completes (seen in Firefox, see README) shows whether its request reached the server.
+  stdout: (process.env.CI ? "pipe" : "ignore") as "pipe" | "ignore",
   env: { ...common, ...env },
 });
 

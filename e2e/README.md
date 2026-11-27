@@ -42,11 +42,12 @@ No retries: a test that fails sometimes is fixed (usually by waiting for the rig
 `chart.mobile.spec.ts` sends real touch drags and long-presses through the Chrome DevTools Protocol (Playwright
 itself only taps), so it runs on the Chromium phone projects only (`CDP_ONLY` in `playwright.config.ts`).
 
-Known Firefox behaviour: Firefox sometimes never fires the load event for a page whose script has run and whose
-WebSocket is open (seen about once per CI run, in a different test each time). Every `page.goto` and
-`page.reload` therefore waits for `domcontentloaded` (`navDefaults` in `tests/fixtures.ts`, applied to the
-`page` fixture), and the test then waits for the real UI it checks. A page made in another browser context goes
-through `navDefaults` too; never wait for `"load"`.
+Known Firefox behaviour (open): about once per CI run, in a different test each time, a Firefox navigation in a
+fresh browser context never completes, not even to DOMContentLoaded, until the test times out. So far it followed a
+test that reloaded the page or opened a second one. Every `page.goto` and `page.reload` waits for
+`domcontentloaded` (`navDefaults` in `tests/fixtures.ts`), not the load event; that did not stop it. In CI the
+servers' stdout (one line per HTTP request) is in the job log, which shows whether the hung request reached the
+server.
 
 ## CI
 
