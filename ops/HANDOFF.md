@@ -372,3 +372,4 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   stream/hardening-b can be deleted later.
 - Old sessions the owner restarted by accident were interrupted by the owner's session; left stopped.
 - 02:10 UTC: PR 30 (security hardening) MERGED on top of PR 28; all 8 checks green.
+- 02:34 UTC: PR 31 (hardening extras: WebSocket validation/caps, per-account fault isolation, research rate limit, safeUrl, data-dir perms) MERGED. Release review must look at isolated(): margin/accrual exceptions become per-account faults instead of tick errors.
