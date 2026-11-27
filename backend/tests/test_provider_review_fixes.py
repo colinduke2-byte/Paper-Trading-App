@@ -249,3 +249,88 @@ def test_late_actions_apply_once_to_what_was_held_over_the_ex_date(held, after, 
     assert [p["qty"] for p in pend] == ([str(10 * held)] if held else [])
     assert bb.life.pending_dividends == []
     assert sum(t.kind == "split" for t in acct.ledger.transactions) == (1 if held else 0)
+
+
+# ---- second review (a): quote age counts from Alpaca's last confirmation -------------------------------
+from app.marketdata import alpaca as al  # noqa: E402
+from test_provider_actions import iso, setup_holdings  # noqa: E402
+
+
+def _snap(bid, ask, t):
+    return {"latestQuote": {"bp": D(bid), "bs": 1, "ap": D(ask), "as": 1, "t": iso(t)}}
+
+
+def test_quiet_iex_symbol_confirmed_by_each_poll_stays_tradeable():
+    lv = Live(ny("2024-04-22", "10:00"), json.dumps(ca_body({}), default=str))
+    a = lv.ex.create_account("Margin", "margin")
+    lv.quote("AAPL", "99.99", "100.00", "100.00")  # the last change on IEX, at 10:00
+    lv.ex.tick()
+    t = ny("2024-04-22", "10:00")
+    for _ in range(90):  # an hour and a half of polls that return the same standing quote
+        t += 60
+        lv.clock.set(t)
+        lv.feed.apply_snapshots({"AAPL": _snap("99.99", "100.00", ny("2024-04-22", "10:00"))})
+        assert lv.ex.quote("AAPL").stale is False
+    (o,) = lv.ex.submit(a.id, {"symbol": "AAPL", "side": "buy", "qty": 1})
+    assert o.status == "filled" and o.avg_fill_price == D("100.00")
+    assert lv.feed.quote_note("AAPL") is None or not lv.feed.quote_note("AAPL")["stale"]
+    # the polls stop answering: stale once Alpaca has not confirmed it for two minutes
+    lv.clock.advance(121)
+    assert lv.ex.quote("AAPL").stale is True
+    assert "has not confirmed the quote for AAPL for 2 minutes" in lv.feed.quote_note("AAPL")["note"]
+
+
+def test_a_confirmed_quote_from_before_the_session_is_still_stale():
+    lv = Live(ny("2024-04-22", "10:00"), json.dumps(ca_body({}), default=str))
+    lv.clock.set(ny("2024-04-22", "15:00"))
+    lv.feed._on_stream([{"T": "q", "S": "AAPL", "bp": D("99.99"), "bs": 1, "ap": D("100.00"), "as": 1,
+                         "t": iso(ny("2024-04-19", "15:59"))}])  # Friday's book, received now
+    lv.ex.tick()
+    assert lv.ex.quote("AAPL").stale is True
+    assert "is from before this session" in lv.feed.quote_note("AAPL")["note"]
+
+
+def test_is_stale_with_confirmations():
+    mon = "2024-04-22"
+    assert not al.is_stale(ny(mon, "10:00"), ny(mon, "14:00"), confirmed=ny(mon, "13:59"))  # quiet, confirmed
+    assert al.is_stale(ny(mon, "10:00"), ny(mon, "14:00"), confirmed=ny(mon, "13:57"))
+    assert al.is_stale(ny("2024-04-19", "15:59"), ny(mon, "10:00"), confirmed=ny(mon, "10:00"))  # before the open
+    assert al.is_stale(ny(mon, "03:59"), ny(mon, "08:00"), confirmed=ny(mon, "08:00"))  # pre: before 04:00
+    assert not al.is_stale(ny(mon, "04:01"), ny(mon, "08:00"), confirmed=ny(mon, "07:50"))
+
+
+# ---- second review (b): the previous close is adjusted for a split once --------------------------------
+def _split_lv():
+    lv = Live(ny("2024-04-22", "10:00"), json.dumps(ca_body({"split": "2024-04-24"}), default=str))
+    setup_holdings(lv)  # TSLA at 200.00
+    lv.goto(ny("2024-04-22", "11:00"))
+    lv.clock.set(ny("2024-04-23", "17:00"))  # the 23rd closed at 200.00 (a snapshot gives the close)
+    day = {"o": D("200"), "h": D("201"), "l": D("199"), "c": D("200.00"), "v": 10, "t": "2024-04-23T04:00:00Z"}
+    lv.feed.apply_snapshots({"TSLA": {"dailyBar": day, "prevDailyBar": {**day, "t": "2024-04-22T04:00:00Z"}}})
+    lv.goto(ny("2024-04-24", "00:01"))  # the 2-for-1 split takes effect; the previous close becomes 100.00
+    assert lv.feed.quote("TSLA").prev_close == D("100.00")
+    return lv
+
+
+def test_previous_close_already_adjusted_by_alpaca_is_not_adjusted_again_before_any_trade_today():
+    lv = _split_lv()
+    lv.clock.set(ny("2024-04-24", "07:00"))  # pre-market: no trade or quote from today yet
+    bar = {"o": D("101"), "h": D("101"), "l": D("99"), "c": D("100.00"), "v": 10, "t": "2024-04-23T04:00:00Z"}
+    lv.feed.apply_snapshots({"TSLA": {**_snap("99.99", "100.00", ny("2024-04-23", "15:59")), "dailyBar": bar}})
+    lv.feed.step(lv.clock.now())
+    assert lv.feed.quote("TSLA").prev_close == D("100.00")  # not 50.00
+
+
+def test_previous_close_is_not_scaled_again_by_a_snapshot_without_daily_bars():
+    lv = _split_lv()
+    lv.clock.set(ny("2024-04-24", "07:00"))
+    for minute in range(3):  # quote-only snapshots (a change each time), no daily bars
+        lv.feed.apply_snapshots({"TSLA": _snap("99.9%d" % minute, "100.00", ny("2024-04-23", "15:5%d" % (7 + minute)))})
+        lv.feed.step(lv.clock.now())
+        assert lv.feed.quote("TSLA").prev_close == D("100.00")
+    # a raw (unadjusted) bar later is still put on the adjusted basis, once
+    raw = {"o": D("201"), "h": D("201"), "l": D("199"), "c": D("200.00"), "v": 10, "t": "2024-04-23T04:00:00Z"}
+    for _ in range(2):
+        lv.feed.apply_snapshots({"TSLA": {**_snap("99.99", "100.00", ny("2024-04-23", "15:59")), "dailyBar": raw}})
+        lv.feed.step(lv.clock.now())
+        assert lv.feed.quote("TSLA").prev_close == D("100.00")

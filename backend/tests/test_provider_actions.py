@@ -811,24 +811,24 @@ def test_stale_quotes_are_flagged_and_never_filled_against():
     assert q.stale is True and lv.feed.quote_note("AAPL")["stale"] is True
     c = TestClient(create_app(lv.ex, run_loop=False))
     row = c.get("/api/quotes", params={"symbols": "AAPL"}).json()["AAPL"]
-    assert row["stale"] is True and "2 minutes old" in row["note"]
+    assert row["stale"] is True and "has not confirmed the quote for AAPL for 2 minutes" in row["note"]
     with pytest.raises(OrderRejected, match="The quote for AAPL is stale, so a market order has no current price"):
         lv.ex.submit(a.id, {"symbol": "AAPL", "side": "buy", "qty": 1})
     # a marketable limit order rests instead of filling against the old ask
     (lim,) = lv.ex.submit(a.id, {"symbol": "AAPL", "side": "buy", "qty": 1, "type": "limit", "limit_price": "101.00"})
     assert lim.status == "working"
-    # a snapshot that only repeats the old quote is still stale and fills nothing on the tick
-    lv.feed.apply_snapshots({"AAPL": {"latestQuote": {"bp": D("99.99"), "bs": 1, "ap": D("100.00"), "as": 1,
-                                                      "t": iso(ny("2024-04-22", "10:00"))}}})
-    lv.feed._changed.add("AAPL")
-    lv.ex.tick()
-    assert lv.ex.engine.orders[lim.id].status == "working"
     s = lv.ex.summary(a.id)
     assert s["stale_prices"] == ["AAPL"] and s["prices_unavailable"] == [] and s["equity"] > 0  # still valued
     assert lv.ex.positions(a.id)[0]["stale"] is True
-    lv.quote("AAPL", "100.49", "100.50", "100.50")  # a new quote arrives
     lv.ex.tick()
-    assert lv.ex.engine.orders[lim.id].status == "filled" and lv.ex.engine.orders[lim.id].avg_fill_price == D("100.50")
+    assert lv.ex.engine.orders[lim.id].status == "working"  # the tick fills nothing against it
+    # A snapshot that repeats the same quote confirms it: Alpaca says it is still the book (a quiet symbol),
+    # so it is current again and the resting order fills against it.
+    lv.feed.apply_snapshots({"AAPL": {"latestQuote": {"bp": D("99.99"), "bs": 1, "ap": D("100.00"), "as": 1,
+                                                      "t": iso(ny("2024-04-22", "10:00"))}}})
+    assert lv.ex.quote("AAPL").stale is False
+    lv.ex.tick()
+    assert lv.ex.engine.orders[lim.id].status == "filled" and lv.ex.engine.orders[lim.id].avg_fill_price == D("100.00")
     assert lv.ex.summary(a.id)["stale_prices"] == []
 
 

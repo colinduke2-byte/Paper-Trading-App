@@ -63,10 +63,12 @@ TF_LOOKBACK_DAYS = {"1m": 7, "5m": 30, "15m": 60, "1h": 200}
 TF_TTL = {"1m": 30, "5m": 60, "15m": 120, "1h": 300, "1d": 900, "1w": 3600}
 ROUND_LOT = Decimal(100)  # stock quote sizes arrive in round lots
 RECENT_TRADE = 60.0  # seconds: a missing side may be filled from a trade at most this old
-# Quote age (docs/DATA_PROVIDERS.md, "Quote age"): a quote is stale when the provider's newest quote or
-# trade time for the symbol is older than this in the regular session, or in the pre/post sessions...
+# Quote age (docs/DATA_PROVIDERS.md, "Quote age"): while a session is open, a quote is stale when Alpaca
+# has not confirmed it (a snapshot that returned the symbol, or a stream message for it) for longer than
+# this, or when the provider's own quote or trade time is from before the session's start. A quiet symbol
+# whose standing quote is confirmed by every poll stays tradeable however old its last change is.
 STALE_AFTER = {"regular": 120.0, "pre": 900.0, "post": 900.0}
-# ... and, while the market is closed, when it is from before the open of the latest session.
+# While the market is closed it is stale when it is from before the open of the latest session.
 
 
 def last_session_open(now: float) -> float:
@@ -81,12 +83,23 @@ def last_session_open(now: float) -> float:
     return now
 
 
-def is_stale(newest: float, now: float) -> bool:
+def session_start(now: float, sess: str) -> float:
+    """Start of the session now is in: 04:00 New York for pre-market, the regular open otherwise."""
+    if sess == "pre":
+        return datetime.combine(cal.ny_date(now), cal.PRE_OPEN, tzinfo=cal.NY).timestamp()
+    return last_session_open(now)
+
+
+def is_stale(newest: float, now: float, confirmed: Optional[float] = None) -> bool:
+    """newest: the provider's newest quote or trade time; confirmed: when Alpaca last confirmed the quote
+    (defaults to newest, the same rule without confirmations)."""
     if not newest:
         return True
-    limit = STALE_AFTER.get(cal.session(now))
+    sess = cal.session(now)
+    limit = STALE_AFTER.get(sess)
     if limit is not None:
-        return now - newest > limit
+        seen = max(newest, confirmed or 0.0)
+        return now - seen > limit or newest < session_start(now, sess)
     return newest < last_session_open(now)
 
 
@@ -228,6 +241,9 @@ class SymbolState:
     trade_ts: float = 0.0
     new_trade: bool = False
     received: float = 0.0  # wall time this process last heard about the symbol
+    confirmed: float = 0.0  # wall time Alpaca last confirmed the quote (a snapshot with it, or a stream message)
+    prev_fresh: bool = False  # the last apply_snapshot set prev_close from the provider's bar (raw candidate)
+    prev_on_basis: bool = False  # prev_close is known to be on the basis of the splits since its bar
     feed_name: str = "IEX"
 
     @property
@@ -260,6 +276,7 @@ class SymbolState:
 
     def apply_snapshot(self, snap: dict, today: date) -> bool:
         changed = False
+        before, fresh = self.prev_close, False
         q, t = snap.get("latestQuote"), snap.get("latestTrade")
         if q and (ts := parse_ts(q.get("t"))) is not None:
             changed |= self.apply_quote(q, ts)
@@ -273,16 +290,19 @@ class SymbolState:
                 self.open, self.high, self.low = dec(daily["o"]), dec(daily["h"]), dec(daily["l"])
                 self.volume = dec(daily.get("v")) or ZERO
                 if prev:
-                    self.prev_close = dec(prev.get("c"))
+                    self.prev_close, fresh = dec(prev.get("c")), True
             else:  # before today's first trade the daily bar is the previous session
-                self.prev_close = dec(daily.get("c"))
+                self.prev_close, fresh = dec(daily.get("c")), True
                 self.open = self.high = self.low = None
                 self.volume = ZERO
             changed = True
         elif prev:
             pc = dec(prev.get("c"))
             changed |= pc != self.prev_close  # before the first trade or quote this is the only price known
-            self.prev_close = pc
+            self.prev_close, fresh = pc, True
+        self.prev_fresh = fresh
+        if fresh and self.prev_close != before:
+            self.prev_on_basis = False  # a new provider value: _fix_prev_close decides its basis
         return changed
 
     def to_quote(self, now: Optional[float] = None) -> Optional[Quote]:
@@ -796,7 +816,7 @@ class AlpacaFeed(MarketDataProvider):
                 if st.filled_from_trade(wall):
                     self._fresh_until[sym] = st.trade_ts + RECENT_TRADE
                 st.new_trade = False
-                q.stale = is_stale(st.ts, wall)
+                q.stale = self._stale(st, wall)
                 self.quotes[sym] = q
                 out.append(q)
         return out
@@ -807,7 +827,7 @@ class AlpacaFeed(MarketDataProvider):
         st = self._state.get(symbol)
         if q is None or st is None:
             return q
-        stale = is_stale(st.ts, self.wall_clock())
+        stale = self._stale(st, self.wall_clock())
         if q.stale != stale:
             q = self.quotes[symbol] = replace(q, stale=stale)
         return q
@@ -819,13 +839,18 @@ class AlpacaFeed(MarketDataProvider):
             return None
         now = self.wall_clock()
         stale, text = st.note(now)
-        old = is_stale(st.ts, now)
-        if old and st.ts and cal.session(now) != "closed":
-            age = now - st.ts
-            when = f"{age / 60:.0f} minutes" if age < 7200 else f"{age / 3600:.0f} hours"
-            text = ((text + " ") if text else "") + (f"The latest quote or trade for {symbol} is {when} old, so it is "
-                                                     f"treated as stale: market orders are refused and orders do not "
-                                                     f"fill against it until a new quote arrives.")
+        old = self._stale(st, now)
+        sess = cal.session(now)
+        if old and st.ts and sess != "closed":
+            if st.ts < session_start(now, sess):
+                why = (f"The latest quote or trade for {symbol} is from before this session "
+                       f"({cal.ny_datetime(st.ts):%Y-%m-%d %H:%M} New York time)")
+            else:
+                age = now - max(st.ts, st.confirmed)
+                when = f"{age / 60:.0f} minutes" if age < 7200 else f"{age / 3600:.0f} hours"
+                why = f"Alpaca has not confirmed the quote for {symbol} for {when}"
+            text = ((text + " ") if text else "") + (f"{why}, so it is treated as stale: market orders are refused "
+                                                     f"and orders do not fill against it until a new quote arrives.")
         return {"stale": stale or old, "note": text} if text else None
 
     def no_price_reason(self, symbol: str) -> str:
@@ -836,6 +861,9 @@ class AlpacaFeed(MarketDataProvider):
             return f"{symbol} is not in Alpaca's list of tradable US equities."
         return (f"No quote has arrived from Alpaca for {symbol} yet. It may be halted, not trading on "
                 f"{FEEDS[self.data_feed]['exchange']} yet today, or the first request is still in progress.")
+
+    def _stale(self, st: SymbolState, wall: float) -> bool:
+        return is_stale(st.ts, wall, st.confirmed)
 
     def quote_age(self, symbol: str) -> Optional[float]:
         st = self._state.get(symbol)
@@ -860,7 +888,7 @@ class AlpacaFeed(MarketDataProvider):
                         self.prints.setdefault(sym, deque(maxlen=200)).append(
                             {"ts": ts, "price": st.last, "size": st.last_size, "side": side})
                 if ok:
-                    st.received = now
+                    st.received = st.confirmed = now
                     self._changed.add(sym)
 
     def _state_for(self, sym: str) -> SymbolState:
@@ -877,21 +905,33 @@ class AlpacaFeed(MarketDataProvider):
                 if not snap:
                     continue
                 st = self._state_for(sym)
+                held = st.prev_close if st.prev_on_basis else None  # on today's basis already (if known)
+                was_stale = bool(st.ts) and self._stale(st, now)
+                if (snap.get("latestQuote") or snap.get("latestTrade")) and st.ts:
+                    st.confirmed = now  # Alpaca answered with the symbol's book: unchanged is still current
                 if st.apply_snapshot(snap, today):
-                    self._fix_prev_close(sym, st, snap, today)
+                    self._fix_prev_close(sym, st, snap, today, held)
                     st.received = now
+                    st.confirmed = now if st.ts else st.confirmed
                     self._changed.add(sym)
+                elif was_stale != self._stale(st, now):
+                    self._changed.add(sym)  # confirmed again: the quote becomes tradeable
 
-    def _fix_prev_close(self, sym: str, st: SymbolState, snap: dict, today: date) -> None:
+    def _fix_prev_close(self, sym: str, st: SymbolState, snap: dict, today: date,
+                        held: Optional[Decimal] = None) -> None:
         """Keep the previous close on the same basis as today's prices after a split.
 
         Whether Alpaca's snapshot adjusts the previous daily bar for a split on today's ex-date is
         UNVERIFIED. So when a split took effect after the bar the previous close came from, the
         raw and the split-adjusted value are both candidates, and the one closer to today's prices
         (last trade or quote) is kept. A split ratio is far from 1, so the two are easy to tell apart.
+
+        Only a value this snapshot just supplied is a candidate (one already in state is on the right basis
+        and is never scaled again). With no price from today, the previous close already held on the
+        adjusted basis (`held`) is the reference, so an already adjusted bar is not adjusted a second time.
         """
         splits = self._splits.get(sym)
-        if not splits or st.prev_close is None:
+        if not splits or st.prev_close is None or not st.prev_fresh or st.prev_on_basis:
             return
         daily, prev = snap.get("dailyBar"), snap.get("prevDailyBar")
         dts = parse_ts(daily.get("t")) if daily else None
@@ -910,11 +950,14 @@ class AlpacaFeed(MarketDataProvider):
             ref = st.last
         elif st.bid and st.ask and st.bid > 0 and st.ask > 0 and st.quote_ts and cal.ny_date(st.quote_ts) == today:
             ref = (st.bid + st.ask) / 2
+        elif held is not None and held > 0:
+            ref = held  # the previous close already on the adjusted basis
         else:
-            ref = None  # nothing from today yet: assume the bar is not adjusted; the next snapshot re-checks
+            ref = None  # nothing to compare with: assume the bar is not adjusted; the next snapshot re-checks
         adjusted = (st.prev_close * factor).quantize(Decimal("0.0001"))
         if ref is None or abs(math.log(float(adjusted / ref))) < abs(math.log(float(st.prev_close / ref))):
             st.prev_close = adjusted
+        st.prev_on_basis = ref is not None  # a guess (no reference) is checked again by the next snapshot
 
     def option_quote(self, symbol: str) -> Optional[Quote]:
         hit = self._opt.get(symbol)
@@ -1277,6 +1320,7 @@ class AlpacaFeed(MarketDataProvider):
                     if v is not None and v > 0:  # an empty side stays empty: never invent a price
                         setattr(st, k, (v * f).quantize(Decimal("0.0001")))
                 st.volume = st.volume / f
+                st.prev_on_basis = st.prev_close is not None  # just scaled onto the new basis
                 q = st.to_quote(self.wall_clock())
                 if q is not None:
                     self.quotes[sym] = q

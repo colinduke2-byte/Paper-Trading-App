@@ -159,11 +159,14 @@ falls back to synthetic, with the cause shown.
   silent for 2 minutes, or when it is down and REST has not succeeded for 90 seconds. The banner
   then says prices may be stale.
 - **Quote age.** Every quote carries `stale` (in `Quote`, `/api/quotes`, the websocket ticks and
-  position rows). It is worked out each time the quote is read, from the provider's own time of the
-  newest quote or trade for the symbol: stale when that is more than **120 seconds** old in the
-  regular session, more than **15 minutes** old before the open or after the close (4:00 to 9:30
-  and 16:00 to 20:00 New York time), and, while the market is closed, when it is from before the
-  open of the latest session. A stale quote is never traded against: a new market order during the
+  position rows). It is worked out each time the quote is read. While a session is open it counts
+  from the last time Alpaca **confirmed** the quote: a snapshot that returned the symbol (even with
+  the same quote) or a stream message for it. A quiet IEX symbol whose standing quote every poll
+  confirms stays tradeable, however long ago it last changed. It is stale when not confirmed for
+  more than **120 seconds** in the regular session, or **15 minutes** before the open or after the
+  close (4:00 to 9:30 and 16:00 to 20:00 New York time), or when the provider's own quote or trade
+  time is from before the session started (4:00 for pre-market, the regular open otherwise). While
+  the market is closed it is stale when it is from before the open of the latest session. A stale quote is never traded against: a new market order during the
   regular session is refused with the cause, other orders are accepted but rest, the tick does not
   match resting orders against it, a model option price from a stale underlying is stale too, and
   margin call liquidation does not use it. It still values positions (better than no value):
@@ -281,7 +284,10 @@ these come from `/v1/corporate-actions` (code: `backend/app/marketdata/alpaca_ac
   split so nothing shows the old price until the next update. The previous close: whether Alpaca's
   snapshot adjusts the previous daily bar on the ex-date is **UNVERIFIED**, so when a split took
   effect after that bar, PaperDesk keeps whichever of the raw or the adjusted value is closer to
-  today's trades or quote (a split ratio is far from 1, so they are easy to tell apart). Option
+  today's trades or quote (a split ratio is far from 1, so they are easy to tell apart); before any
+  trade or quote from today, the previous close already held on the adjusted basis is the
+  reference. Only a value a snapshot just supplied is a candidate, so a previous close is never
+  scaled twice. Option
   listings and option quotes on the old strikes are dropped and reloaded. The feed remembers the
   splits it has reflected in `market.json`, so a restart neither repeats nor forgets them.
 
