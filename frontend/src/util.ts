@@ -1,18 +1,32 @@
+/** Times a request answered "busy" (HTTP 503, the simulator's lock was held too long) is sent again. */
+export const BUSY_RETRIES = 2;
+
 export async function api(path: string, opts: { method?: string; body?: any } = {}): Promise<any> {
-  let r: Response;
-  try {
-    r = await fetch("/api" + path, {
-      method: opts.method || "GET",
-      headers: opts.body !== undefined ? { "Content-Type": "application/json" } : undefined,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    });
-  } catch {
-    throw new Error("Cannot reach the PaperDesk server. Check that it is still running.");
+  // The same body is sent on a retry (an order keeps its client_id, so it can never be placed twice).
+  const body = opts.body !== undefined ? JSON.stringify(opts.body) : undefined;
+  for (let attempt = 0; ; attempt++) {
+    let r: Response;
+    try {
+      r = await fetch("/api" + path, {
+        method: opts.method || "GET",
+        headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+        body,
+      });
+    } catch {
+      throw new Error("Cannot reach the PaperDesk server. Check that it is still running.");
+    }
+    const j = await r.json().catch(() => null);
+    // "Busy" means the request did not run: the server could not take its lock in time (a slow or stalled
+    // computer). Wait as the server asks (Retry-After) and send it again, then say so plainly.
+    if (r.status === 503 && j?.busy && attempt < BUSY_RETRIES) {
+      const wait = Math.min(5, Math.max(0.2, Number(r.headers.get("Retry-After")) || 1));
+      await new Promise((ok) => setTimeout(ok, wait * 1000));
+      continue;
+    }
+    if (r.status === 401 && j?.auth_required) signedOut();
+    if (!r.ok) throw new Error(errorText(r.status, j?.detail));
+    return j;
   }
-  const j = await r.json().catch(() => null);
-  if (r.status === 401 && j?.auth_required) signedOut();
-  if (!r.ok) throw new Error(errorText(r.status, j?.detail));
-  return j;
 }
 
 // Field names in validation errors, as the user sees them.

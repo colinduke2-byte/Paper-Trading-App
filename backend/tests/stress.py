@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
+from app.api import locking as api_locking
 from app.api.server import create_app
 from app.core import calendar as cal
 from app.core.clock import SimClock
@@ -164,8 +165,19 @@ def file_problems(path: str, scratch: str) -> list:
 
 
 # ---- the server under load ------------------------------------------------------------------------
+RIG_LOCK_WAIT = 10.0  # seconds a request waits for the exchange lock in the stress rig (see Rig)
+
+
 class Rig:
-    """A server whose loop ticks as fast as it can; every tick moves the simulated clock `step` seconds."""
+    """A server whose loop ticks as fast as it can; every tick moves the simulated clock `step` seconds.
+
+    Requests wait up to RIG_LOCK_WAIT seconds for the exchange lock here, not the product's 2 s (ROUTE_WAIT). The CI
+    runners stall now and then for seconds at a time, every thread at once: on Windows the tick was measured waiting
+    2.62 s for the lock on its own 1 s timeout, so no thread held the lock that long; the process was not running.
+    With the product's bound such a stall turned a few requests into 503 "busy" and failed the run. What the stress
+    tests check is unchanged: no failed request, consistent books, a consistent state file. The 2 s "busy" bound
+    itself is covered by the busy tests in test_concurrency.py and test_integration_wave2.py.
+    """
 
     def __init__(self, tmp_path, seed: int = 7, step: float = 5.0, feed=None, accounts=(("margin", "1000000"),),
                  **app_kw):
@@ -199,6 +211,7 @@ class Rig:
         self._interval = sys.getswitchinterval()
 
     def __enter__(self):
+        self._route_wait, api_locking.ROUTE_WAIT = api_locking.ROUTE_WAIT, RIG_LOCK_WAIT
         sys.setswitchinterval(1e-5)  # switch threads often, so races that exist show up
         self.client.__enter__()
         return self
@@ -208,6 +221,7 @@ class Rig:
             return self.client.__exit__(*exc)
         finally:
             sys.setswitchinterval(self._interval)
+            api_locking.ROUTE_WAIT = self._route_wait
 
     def call(self, method: str, path: str, **kw):
         r = self.client.request(method, path, **kw)

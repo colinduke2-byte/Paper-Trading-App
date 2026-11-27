@@ -2,6 +2,9 @@
 
 Each test is seeded and bounded. They fail on a server without the exchange lock (see docs/CONCURRENCY.md)
 and are the regression suite for it. PAPERDESK_STRESS=1 runs a much longer variant of each.
+
+Requests in the rig wait up to 10 s for the lock instead of the product's 2 s: CI runners stall for seconds at a time
+(Windows: the tick waited 2.62 s on its own 1 s timeout), which turned requests into 503 "busy". See stress.Rig.
 """
 import os
 import threading
