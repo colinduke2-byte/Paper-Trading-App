@@ -23,9 +23,32 @@ is [USER_GUIDE.md](USER_GUIDE.md).
    then **Review** and **Place paper order** again. **Fills**, **Orders** and **Reports** show the history.
 
 To stop: press **Ctrl+C** in the black window. To start again: double-click `run.bat`. Your accounts are
-saved in `backend\data`; copy that folder to back them up.
+saved in `backend\data`.
+
+**Back up.** Open the menu (top right), press **Data**, then **Download everything** and keep the file
+somewhere else, such as a USB stick. PaperDesk also makes a backup about every hour. If PaperDesk cannot
+read its files one day, it shows a recovery screen where you restore the latest backup.
 
 The **Help** button (top right) has a short in-app guide.
+
+## More to try
+
+Each of these is explained in the user guide.
+
+- **Other order types:** Limit, Stop, Trailing stop, orders that trade at the open or the close, Good till
+  date, and orders linked together (take profit and stop loss, or one cancels the other). **Change…** on an
+  open order edits it. On the **Options** tab, **Build a strategy…** places spreads and other
+  multi-leg orders.
+- **Tax lots:** the **Lots** tab and **Reports** (Gains and Tax year) show lots, wash sales and yearly totals.
+  They are for information, not tax advice.
+- **Crypto:** search for `BTC/USD`. Coins trade all day, with no short selling.
+- **Alerts:** the **Alerts** tab and the bell at the top. Alerts work only while PaperDesk is running.
+- **Finding symbols:** several watchlists, the **Screener** tab, and the **Markets** and **Compare** views.
+- **Research:** news, earnings and fundamentals, simulated and labelled so when you have no data key.
+- **Cash accounts** reject an order they could not pay for if all open orders filled, and cancel open
+  orders they can no longer cover.
+- **"The simulator is busy. Try again in a moment."** means your request did not run. Wait a moment and
+  press the button again. Limits on accounts and requests are in section 18 of the guide.
 
 ## Phone access in five steps
 
@@ -48,7 +71,9 @@ else.
 5. **Open it on the phone.** With the phone on the same Wi-Fi, type that address in the phone's browser,
    enter the passcode, and trade. To leave, open the menu (top right) and press **Sign out**.
 
-If it does not connect, see "If the phone cannot connect" in section 12 of the user guide.
+If it does not connect, see "If the phone cannot connect" in section 12 of the user guide. The phone
+needs the same passcode and the PC must stay on with PaperDesk running. Notifications from the bell stay
+inside the page on a phone.
 
 ## Real prices, optionally
 

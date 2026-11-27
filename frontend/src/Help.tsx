@@ -48,9 +48,11 @@ const SECTIONS: Section[] = [
           <li><b>Stop</b>: waits until the last price reaches the stop price, then becomes a market order.</li>
           <li><b>Stop limit</b>: waits for the stop price, then becomes a limit order, so it may not fill.</li>
           <li><b>Trailing stop</b>: a stop that follows the price by a dollar amount or a percentage, and only moves in your favour.</li>
+          <li><b>Market or limit on open or on close</b>: waits for the next opening or closing auction and trades once, at the last price then. A limit order that misses the auction price expires. If PaperDesk was not running at that time, it expires too.</li>
         </ul>
-        <p><b>Time in force</b>: Day (ends at the close), Good till canceled, Immediate or cancel (fill what you can now, cancel the rest) and Fill or kill (all of it now or none). Immediate and fill or kill are for market and limit orders only.</p>
+        <p><b>Time in force</b>: Day (ends at the close), Good till canceled, Good till date (ends on the date you pick), Immediate or cancel (fill what you can now, cancel the rest) and Fill or kill (all of it now or none). Immediate and fill or kill are for market and limit orders only.</p>
         <p><b>Attach take profit and stop loss</b> adds two exit orders that start when the entry order fills; when one fills the other is canceled. <b>Allow extended hours</b> lets a limit order trade before and after the regular session.</p>
+        <p><b>Linked orders</b>: <i>Then place more orders when this one fills</i> holds the extra orders until the first one has filled completely. <i>One cancels the other</i> works two to five orders at once and cancels or reduces the rest when one fills. Review lists every order that will be created. <b>Change…</b> on a working order in the Orders tab changes its quantity or price. On the Options tab, <b>Build a strategy…</b> opens the strategy builder: spreads, straddles, condors, butterflies and covered calls as one order that fills all legs or none.</p>
         <p>Review shows an estimate and any warning. If the order would be rejected, it says why.</p>
       </>
     ),
@@ -62,6 +64,7 @@ const SECTIONS: Section[] = [
       <>
         <p>A <b>cash account</b> cannot borrow and cannot sell short. A <b>margin account</b> can borrow against its holdings and can sell short (Sell more shares than you own). Buying power on a margin account is about twice its spare equity for stocks.</p>
         <p>If a margin account's value falls below the maintenance requirement you get a <b>margin call</b>. Unless you fix it within the grace period, PaperDesk sells positions for you (you can turn that off in Account rules). The grace period counts only time while the market is open and PaperDesk is running: time while the app is closed or a replay runs does not count, and after such a pause the account log says how much grace is left. Account value includes dividends pending and subtracts margin interest and borrow fees accrued but not yet charged. The <b>Account rules</b> button lists every account rule (settlement, day trading limit, interest, margin calls) with its default.</p>
+        <p>A cash account is checked as if every open order will fill. An order is rejected if the account could not pay for it whichever other orders fill, and open orders are canceled, newest first, if later events leave the account unable to cover them. After a split that cannot be settled in cash, a cash account may sell some of the shares behind a covered call to pay for buying the call back.</p>
         <p><b>Reset</b> erases an account's history and starts again. It cannot be undone.</p>
       </>
     ),
@@ -74,6 +77,54 @@ const SECTIONS: Section[] = [
         <p>Open the Options tab. Choose an expiry, then press an <b>ask</b> price to buy or a <b>bid</b> price to sell. One contract covers 100 shares. Calls are on the left and puts on the right.</p>
         <p>Without a market data key the prices are <b>model prices</b>, calculated from the share price. They are not quotes. Contracts that finish in the money are exercised or assigned automatically at the close on the expiry date.</p>
       </>
+    ),
+  },
+  {
+    id: "lots",
+    title: "Tax lots and wash sales",
+    body: (
+      <>
+        <p>Each purchase opens a tax lot. The Lots tab lists them. A sale closes lots by the account's method (first in first out by default), or you can choose lots in the ticket under Choose tax lots. Reports, Gains lists closed lots; Tax year totals a year and its wash sales.</p>
+        <p>Wash-sale detail is information only. It never changes your gains or cost basis, and nothing here is tax advice.</p>
+      </>
+    ),
+  },
+  {
+    id: "crypto",
+    title: "Crypto",
+    body: (
+      <p>Coins such as BTC/USD trade all day, every day, paid for in full, with no short selling, no linked orders and one fee rate on every fill. Enter a quantity or a dollar amount. Without a data key the coins are invented. Coins have Chart, About and Markets views only.</p>
+    ),
+  },
+  {
+    id: "alerts",
+    title: "Alerts and notifications",
+    body: (
+      <p>Alerts tab, New alert: price, percent change, volume, indicators, options, positions, account value and margin, reminders and dates. They are checked only while PaperDesk runs. The bell lists fired alerts and events such as fills, canceled orders and margin calls, with read and unread state. Browser notifications work on the PC itself, not over the Wi-Fi address on a phone.</p>
+    ),
+  },
+  {
+    id: "research",
+    title: "Research and finding symbols",
+    body: (
+      <p>Research has news, earnings and fundamentals. Without a data key they are simulated and labelled Simulated, and earnings reports and economic releases move the simulated prices. You can keep several watchlists. The Screener tab filters symbols and saves screens. The Markets view shows indices, breadth, sectors and top movers. Compare puts symbols side by side.</p>
+    ),
+  },
+  {
+    id: "data",
+    title: "Backups and recovery",
+    body: (
+      <>
+        <p>Menu, Data: save status, automatic hourly backups, Back up now, Download everything, Restore (it shows what changes and backs up what you have first), and export or import of one account. Keep a copy of the downloaded file elsewhere.</p>
+        <p>If saved files cannot be read at start, a recovery screen offers the latest backup, another backup, new accounts, or quitting. The damaged files are kept.</p>
+      </>
+    ),
+  },
+  {
+    id: "busy",
+    title: "Busy, try again",
+    body: (
+      <p>"The simulator is busy. Try again in a moment." means the request waited about 2 seconds for its turn and did not run. Nothing was placed or changed. The page already tried again twice. Wait a moment and press the button again, checking the Orders tab first. Limits (1,000 accounts, 1,000 open orders per account, 60 real-provider research requests a minute) are in the guide, section 18.</p>
     ),
   },
   {

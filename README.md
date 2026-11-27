@@ -163,11 +163,11 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 - **Orders in the ticket:** market, limit, stop, stop limit and trailing stop; day, good till canceled,
   immediate or cancel and fill or kill; a bracket (take profit and stop loss); fractional shares; order
-  preview; cancel. **In the engine and API, not yet in the ticket:** market and limit on open and on close,
-  good-till-date, one-cancels-other and one-triggers-other groups, multi-leg orders and changing an order.
+  preview; cancel. Also market and limit on open and on close, good till date, one-cancels-other and
+  one-triggers-other groups, changing a working order, and multi-leg strategies from the strategy builder.
 - **Options:** chains with weekly and monthly expiries, implied volatility and greeks, single-leg trades from
   the chain; automatic exercise and assignment at expiry; strategy-aware margin for spreads, condors,
-  butterflies and calendars (multi-leg orders are API-only for now).
+  butterflies and calendars; the strategy builder places multi-leg orders.
 - **Accounts:** cash and margin accounts, several at once, reset; Reg T style margin and buying power, short
   selling, margin calls with liquidation after a grace period. Per-account settings (Account rules button) for
   dividend reinvestment, T+1 settlement and the settled-cash rule, the pattern day trader rule, margin interest
@@ -200,9 +200,9 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
 
 ## What is not built yet
 
-See `docs/KNOWN_LIMITS.md`. Still to do: ticket screens for the engine-only order types, chart drawing tools,
-early assignment and American-style pricing, corporate actions from a real provider applied to accounts, user
-accounts and HTTPS.
+See `docs/KNOWN_LIMITS.md`. Still to do: early assignment and American-style pricing, corporate actions
+from a real provider applied to accounts, user accounts and HTTPS. PaperDesk has no LICENSE file yet (the
+owner's decision).
 
 ## Develop
 

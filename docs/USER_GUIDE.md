@@ -23,10 +23,13 @@ Contents
 13. [Real market data](#13-real-market-data)
 14. [Troubleshooting](#14-troubleshooting)
 15. [Glossary](#15-glossary)
+16. [Crypto](#16-crypto)
+17. [Your data: backups, downloads and recovery](#17-your-data-backups-downloads-and-recovery)
+18. [Limits, and what "busy, try again" means](#18-limits-and-what-busy-try-again-means)
 
-Sections that will need updating when other work lands are marked **Will change**. At the time of
-writing, a new order ticket with a strategy builder, a provider update and chart tools (drawing
-tools, more indicators, keyboard shortcuts) are being built on separate branches.
+Sections 16 to 18 come after the glossary and cover crypto, your saved data (backups, downloads and
+recovery) and the limits PaperDesk keeps on accounts and requests, including what "busy, try again"
+means.
 
 ---
 
@@ -241,8 +244,8 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
 | **Fills** | Each execution: time, price, fee and kind (trade, exercise, assignment, dividend reinvestment and so on) |
 | **Activity** | The ledger: every cash movement with its realized profit or loss |
 | **Reports** | Statistics, gains, statements, journal, export (section 9) |
-| **Alerts** | Price alerts (section 11) |
-| **Screener** | Filter the whole list of symbols (section 11) |
+| **Alerts** | Alerts on prices, indicators, positions and the account (section 11) |
+| **Screener** | Filter the whole list of symbols, and save screens (section 11) |
 
 ![Orders tab](img/desktop-orders.png)
 
@@ -290,6 +293,8 @@ placed: …"). Orders that are still waiting are under **Orders**.
 | **Stop** | Waits. When the last trade price reaches the stop price (at or above it for a buy, at or below for a sell), it becomes a market order. | Stop price |
 | **Stop limit** | Like Stop, but it becomes a limit order, so it may not fill if the price runs past your limit. | Stop price and Limit price |
 | **Trailing stop** | A stop price that follows the market at a distance, in dollars or percent. For a sell it rises with the price and never falls; for a buy it falls with the price and never rises. | Trail by (amount or %) |
+| **Market on open**, **Market on close** | Waits for the next opening or closing auction of the market and trades once, in full, at the last price then. See "Auction orders" below. Stocks only. | nothing |
+| **Limit on open**, **Limit on close** | The same, but it trades only if that auction price is at your limit or better. If not, it expires without trading. Stocks only. | Limit price |
 
 ### Time in force
 
@@ -299,6 +304,19 @@ placed: …"). Orders that are still waiting are under **Orders**.
 | **Good till canceled** | Stays until it fills or you cancel it. There is no automatic expiry. |
 | **Immediate or cancel** | Fill what you can right now; cancel the rest. Market and limit orders only. |
 | **Fill or kill** | Fill all of it right now, or cancel. Market and limit orders only. |
+| **Good till date** | Stays until it fills, you cancel it, or the date you choose (up to 366 days ahead) ends. The ticket shows a date field when you choose it. |
+
+Auction orders take no time in force: they wait for one auction and are done.
+
+### Auction orders
+
+Market on open, limit on open, market on close and limit on close wait for the next auction and trade
+once. With real market hours that is the next 9:30 am or 4:00 pm New York time on a trading day. In
+the default simulated mode the market never closes, so the next auction is the next midnight UTC: the
+"close" is the last prices of the old day and the "open" is the first prices of the new one. An auction
+order fills in full at the last trade price of that auction, whatever the displayed size, so it can fill
+better or worse than the quote you saw. If PaperDesk was not running at the auction time, the order
+expires without trading instead of waiting for a later auction. The Orders tab shows when it will trade.
 
 ### Extras on the ticket
 
@@ -333,20 +351,44 @@ account refuses it: "short selling needs a margin account".
   buying power the change needs and what is available). The quantity of a one-cancels-other order can be
   lowered but not raised. On the chart you can also drag an order line to a new price.
 
-### Coming (other work in progress)
+### Linked orders
 
-The program's engine can already handle some things that the ticket on this branch does not offer. They
-have no screen here, so you cannot use them from the browser yet:
+Under **Linked orders** on the ticket you choose how more orders are tied to this one:
 
-- Multi-leg option orders (spreads, condors, butterflies, calendars).
-- Market-on-open, limit-on-open, market-on-close and limit-on-close orders.
-- Good-till-date orders.
-- One-cancels-other and one-triggers-other groups (other than the bracket above).
-- Changing the price or quantity of a working order.
+- **Then place more orders when this one fills** (one triggers other, OTO). The extra orders wait, on
+  hold, until this order has filled completely. Leave an extra order's quantity blank and it closes
+  exactly what this order bought or sold.
+- **One cancels the other** (OCO). This order and one to four more, each with its own symbol, side,
+  type and prices, all work at once. When one fills, the others are reduced or canceled. Quantities are
+  whole numbers. The extra orders may use Good till canceled or Good till date, and Day for an OCO.
+- **Attach take profit and stop loss** is the bracket described above. It cannot be combined with the
+  two choices here, and tax lots cannot be named on linked orders.
 
-A separate branch is building a new order ticket and a strategy builder that covers these. **Will
-change:** this section, section 6 and the order descriptions in the in-app Help need updating when it
-lands.
+After you press Review the ticket lists **Orders that will be created**, one line each, so you can check
+the prices before you press **Place paper order**. At most five orders can be linked. Crypto does not
+offer linked orders.
+
+### Change an order
+
+**Change…** (Orders tab) on a working order is described under "Close, cancel, change" above. On the
+chart you can also drag an order's line to a new price.
+
+### Strategy builder (option strategies)
+
+On the **Options** tab press **Build a strategy…**, or tick legs in the chain and press **Open in strategy
+builder**. Choose a template: bull call, bear call, bear put and bull put spreads, calendar and diagonal
+spreads, long straddle and strangle, iron condor, butterfly, covered call, protective put, or a custom
+strategy of up to four legs (at most one of them stock). Changing the template or expiry rebuilds the
+legs; you can then change each leg's side, kind, expiry, strike and ratio. Set the number of units, a
+**Net limit** price (or Market) and the time in force. The price shows as a debit (you pay) or a credit
+(you receive). The builder draws the profit and loss at expiry from the quotes, and after Review from
+the server's own figures. Calendar and diagonal spreads are not drawn, because their value at expiry
+depends on later prices.
+
+A strategy is **one order that fills all legs or none**, at the net price worked out from the legs'
+quotes (buying at the ask, selling at the bid). It is margined by its worst-case loss. In a cash
+account a strategy is allowed only if every short leg is covered (see section 8). Legs of an open
+strategy appear grouped under Positions, and **Close strategy…** opens the builder with the opposite legs.
 
 ---
 
@@ -447,6 +489,24 @@ Examples of the refusals you may see on the ticket: "insufficient buying power",
 "short selling needs a margin account", "uncovered calls need a margin account", "insufficient cash to
 secure short options".
 
+**Cash accounts and open orders.** A cash account never goes below zero cash and never short. When you
+place an order, PaperDesk reserves for every open order of the account as if all of them filled in
+full, and it counts on no money that an unfilled order would bring in. So the order is **rejected**
+if the account could not pay for it whichever of its other orders fill, even when the sale that would
+pay for it is still open. Later events can use up cash that was reserved, or move a price so that a
+buy would cost much more than it was reserved at (a stop buy that gaps, or an option that settles at
+expiry). When that happens PaperDesk **cancels** the fewest open orders needed, newest first, before
+they can fill, and the Activity list and notifications say which and why.
+
+**Splits in a cash account.** Some splits cannot be turned into new option contracts (reverse splits,
+ratios such as 3-for-2), so the contracts are closed for their value in cash. A cash account cannot
+borrow to pay for that. It settles its long contracts first, because they bring cash in. If buying back
+its short contracts would then take cash below zero (for example a covered call worth more than the
+cash there is), PaperDesk **sells just enough of the shares that covered the call**, at the split-adjusted
+price, to pay for it. The sale appears as a "split settlement" fill and an event says so. Account value
+at those prices is unchanged. Margin accounts settle as before. At expiry, contracts a cash account
+cannot pay for or deliver are closed for their value in cash instead of exercised (section 8).
+
 ### Margin calls and automatic liquidation
 
 If a margin account's value falls below its maintenance requirement, it is in **margin call**. A red
@@ -537,10 +597,11 @@ Cash dividends are always paid; that cannot be turned off.
 ### Creating and resetting accounts
 
 **New account** asks for a name (up to 40 characters), a type (Margin or Cash) and starting cash (up to
-1,000,000,000). Type plain digits, with no commas: "1,000" is not accepted and currently shows the
-unhelpful message "Internal Server Error". **Reset account** erases the selected account's positions, orders and
-history and starts again with the cash you enter; it cannot be undone. There is no screen to delete an
-account.
+1,000,000,000). Type plain digits, with no commas: "1,000" is refused with the message "starting cash is not a number … Write
+it without thousands separators". **Reset account** erases the selected account's positions, orders and
+history and starts again with the cash you enter; it cannot be undone. **Delete account** (menu, in red) removes the selected account and its history; it
+is offered only when you have more than one account. There is no way in the screens to deposit or withdraw
+cash.
 
 ![New account](img/desktop-new-account.png)
 
@@ -611,8 +672,7 @@ cash instead (fill kind "closed at expiry"), which a real broker would do just b
 
 Spreads whose short leg is not covered in one of those ways need a **margin account**.
 
-**Will change:** multi-leg strategies (spreads and so on) are supported by the engine but not yet by the
-ticket on this branch. The new ticket and strategy builder will update this section.
+Multi-leg strategies are placed from the strategy builder (section 5).
 
 ---
 
@@ -772,28 +832,67 @@ minute (REPLAY.md explains how).
 
 ## 11. Alerts, watchlist, screener and research
 
-**Alerts.** Open the **Alerts** tab. Type a stock symbol, choose "rises to" or "falls to", enter a price
-and press **Add alert**. When the last price reaches the level, a message appears at the bottom right
-("Alert: MKTX rose to 460.00") and the alert shows "Triggered" with the time. An alert fires only once
-and only works on stocks, not options. It can fire only while PaperDesk is running, and the message
-shows only if PaperDesk is open in a browser at that moment (later you can still read "Triggered" in
-the tab). There is no sound or phone notification. If the price is already past the level when you add
-it, the alert fires at once. **Remove** deletes an alert.
+**Alerts.** Open the **Alerts** tab and press **New alert**. Choose what to watch:
 
-**Watchlist.** One list, called Main. Add by searching; remove with the ×. With real data, a new
-install starts with SPY, QQQ, IWM, AAPL, MSFT, NVDA, AMZN, GOOGL, META and TSLA. The simulated list
-starts with the ten fictional companies.
+- **Price**, **Percent change** (against the previous close or a reference price) and **Volume** (a
+  number of shares, or a multiple of the 30-day average).
+- **Indicator**: the price crossing its simple or exponential moving average, the relative strength
+  index (RSI), or MACD (12, 26, 9) crossing its signal line, on 1-minute to weekly bars.
+- **Option contract**: implied volatility or delta.
+- **Position gain or loss** and **Account value and margin** (account value, buying power, margin
+  excess, unrealised gain or loss, day gain or loss). These belong to the account you chose.
+- **Reminder**, and **Dividend, split and earnings dates** for symbols you hold.
 
-**Screener.** The **Screener** tab lists the symbols and can filter them by sector (Technology, Health
-Care, Financials, Energy, Consumer, Industrials, Utilities, Communication, ETF), minimum and maximum
-price, minimum change %, maximum P/E and minimum dividend yield %. Click a row to open it. With the
-simulated feed it covers the ten fictional companies. It has not been checked with real data (no live key was available), so how complete the P/E and yield columns are then is unknown.
+An alert fires once, or re-arms after a cool-down you choose, and can have an expiry date and a note.
+Alerts are checked only while PaperDesk is running. If the price is already past the level when you add
+the alert, it fires at once. Alerts on indicators need price history; with a real data feed they wait
+until that history has loaded. Upcoming earnings for symbols you hold also show as a notice on the
+earnings calendar, not as alerts.
+
+**Notification centre.** The **bell** (top bar, or **Notifications** in the menu on a phone) lists every
+alert that fired and every system event for the account: fills, canceled and expired orders, margin
+calls and liquidation, dividends, splits, option exercise and expiry, and data feed problems. Each has
+read and unread state, a filter, **Show** (opens the symbol) and **Edit alert**, and **Mark all read**.
+The list is kept per account and survives restarts. **Delivery** sets a sound and browser
+notifications (you are asked to allow them). Browsers allow notifications only on the PC itself or over
+HTTPS, so on a phone using the Wi-Fi address they stay inside the app. These settings are kept in
+that browser only. There is no phone push notification.
+
+**Watchlists.** You can keep several lists. **Lists** creates, renames, duplicates, reorders and deletes
+them (the last one cannot be deleted; deleting a list touches no positions or orders). **Columns**
+chooses what each row shows, **Reorder** moves rows, and a column header sorts. Add symbols with the
+search box, which finds symbols by symbol or company name (and crypto pairs). With real data a new
+install starts with SPY, QQQ, IWM, AAPL, MSFT, NVDA, AMZN, GOOGL, META and TSLA; the simulated list
+starts with ten fictional companies. The foot of the list names the price sources.
+
+**Screener.** The **Screener** tab filters the symbol list. Choose **Add a filter…** and combine up to 20:
+sector, price, percent change, P/E, dividend yield, price against its 20- or 50-day average, a gap up
+or down, asset type (stock, fund, crypto), whether it has options, and more. Start from a built-in screen
+or save your own, and **How this is screened** explains the rules. Click a row to open it, or add
+results to a watchlist. With real data the sector, P/E and yield columns are only as complete as the
+feed's data.
+
+**Markets view.** The **Markets** view next to the chart shows index and fund prices, market breadth
+(how many symbols rose and fell) and a sector overview. The figures cover stocks and funds, not coins. It also lists the biggest gainers, losers and most active symbols.
+
+**Compare.** The **Compare** view puts the current symbol next to others you add: price, change and key
+figures side by side. With simulated data it says the companies are fictional.
 
 **Research.** With a real provider: **News**, **Earnings** dates (needs a Finnhub key), **Dividends and
 splits**, and **Fundamentals** (also Finnhub), each with a source line, an updated time and a "stale"
-note if a refresh failed. Without a provider the same sections hold simulated research (statements,
-earnings reports that gap the price and move option volatility, news, an economic calendar), every block
-labelled "Source: Simulated"; see `docs/SIMULATED_RESEARCH.md`. Links in news open in a new tab.
+note if a refresh failed. Without a provider the same sections hold **simulated research**, all labelled
+"Source: Simulated" and made of fictional companies and events:
+
+- Income statement, balance sheet and cash flow by quarter and year, and key ratios.
+- **Earnings** reports on a calendar, before the open or after the close, with estimates. An earnings
+  report moves the price with a gap, and the gap reaches your orders like any quote: a resting stop can
+  fill at the gapped price, not at its stop price. Option volatility rises into a report and drops after.
+- **News** about earnings, dividends, splits, rating changes, big moves and sector moves.
+- An **economic calendar** (jobs, prices, sales, growth, central bank decisions). Each release moves
+  the simulated market.
+
+The same seed gives the same research again, also in a replay. The research for a real symbol is never
+simulated, and nothing simulated describes a real company. Links in news open in a new tab.
 
 ---
 
@@ -1055,7 +1154,8 @@ These are the messages you can actually meet, and what to do.
 | `Could not load chart data: …`, `Could not load the option chain: …`, `Could not load fills: …` | A request to the server failed; the text after the colon is the cause. Reload; check the server window. |
 | `Research data is unavailable. …` | The feed has no research at all (for example a replay of non-simulated symbols). See section 13. |
 | `Account value –` and dashes everywhere | Not connected to the server yet, or signed out. |
-| "Internal Server Error" when creating an account | You typed a starting amount with a comma or letters. Use plain digits. |
+| "Starting cash is not a number" when creating an account | You typed a starting amount with a comma or letters. Use plain digits, such as 25000. |
+| "The simulator is busy. Try again in a moment." | The request waited about 2 seconds for its turn and did not run. Wait a moment and try again (section 18). |
 
 ### Signing in (phone)
 
@@ -1194,3 +1294,73 @@ stretched.
 **Volatility.** How much a price swings.
 **Wash sale.** A loss followed or preceded within 30 days by buying the same security. Worked out lot by
 lot here (replacement lot, disallowed loss, adjusted basis) for information only.
+
+---
+
+## 16. Crypto
+
+PaperDesk can simulate **spot** trading in coins quoted in US dollars, such as `BTC/USD`, next to stocks
+and options. With the simulated feed the coins are invented. With an Alpaca key the prices are Alpaca's
+crypto data, which has not been tested with a real key (see [KNOWN_LIMITS.md](KNOWN_LIMITS.md)). The full
+rules are in [CRYPTO.md](CRYPTO.md). In short:
+
+- A coin trades **24 hours a day, every day**, also when the stock market is closed. A Day order ends at
+  midnight UTC.
+- The crypto ticket offers Market, Limit, Stop and Stop limit, with Day, Good till canceled or Immediate
+  or cancel. No trailing stops, brackets, linked orders, auctions or extended hours. A coin has a
+  minimum order size and a step; the ticket shows both. You can enter a **dollar amount** instead of a
+  quantity.
+- There is **no short selling** and no borrowing: a coin is paid for in full, in cash and margin
+  accounts alike, and a purchase that would take cash below zero is refused.
+- One fee rate applies to every fill, charged in dollars on top.
+- A coin has a **Chart**, **About** and **Markets** view. It has no options, company data or research.
+- Sale money settles at once, and crypto does not count towards the pattern day trader rule.
+
+## 17. Your data: backups, downloads and recovery
+
+PaperDesk keeps everything in its data folder (section 2). It saves as you work. Open **Data** in the
+menu (top right) to see whether saving works and when it last did.
+
+- **Automatic backups** are made about every hour while PaperDesk runs. It keeps the newest of each of
+  the last 24 hours and 14 days. Before a reset, a restore or a delete it also takes a backup.
+- **Back up now** makes a backup you keep until you delete it.
+- **Download everything** saves all accounts as one file. **Download** next to a backup saves that
+  backup. Keep a copy on another disk or a USB stick.
+- **Restore from a file…** and **Restore…** on a backup show what would change first (accounts, open
+  orders, watchlists, alerts). If you go on, everything you have now is backed up first, so you can
+  undo the restore. A file from an older version is converted. You cannot restore during a replay.
+- **Export this account** and **Import an account…** move one account to another PaperDesk or another
+  data mode. It gets new ids there.
+
+**Recovery mode.** If PaperDesk cannot read its saved files at start (a damaged file, or one written by a
+newer version), it does not open the trading screen. It copies the files into a `recovery` folder inside
+the data folder, switches saving off so nothing can overwrite them, and shows a **recovery screen** that
+says why. You can restore the newest backup that passes every check, choose another backup, **Start
+fresh with new paper accounts** (the damaged files stay in `recovery`), or quit without changing
+anything. A full disk is a common cause of damage, so free some space first.
+
+Simulated and real-data modes keep separate folders, backups and recovery copies.
+
+## 18. Limits, and what "busy, try again" means
+
+PaperDesk keeps these limits so one mistake cannot make it slow or fill the disk. You will rarely meet
+them.
+
+- Up to **1,000 accounts**, **1,000 open orders** per account, **50 watchlists**, and **10,000 alerts**.
+- An order is at most **1,000,000** shares, and at most **5** orders can be linked; a good-till-date
+  order can run up to 366 days; up to 100 tax lots can be named on one closing order.
+- A screen has at most 20 filters. A chart state, a backup upload and other requests have size limits;
+  the message names the limit.
+- **Real-provider research** is limited to 60 requests a minute from your device, in bursts of 20.
+  Past that, the answer says to wait, and the Research tab shows the last data it has. Simulated
+  research has no limit.
+- At most 32 live streams (browser windows or phones) at once, 8 from one device.
+- After several wrong passcodes on a phone, sign-in is delayed for a while (section 12).
+
+**"The simulator is busy. Try again in a moment."** PaperDesk does one thing at a time with your
+accounts. If a request waits more than about 2 seconds for its turn, it is refused with this message and
+does **not** run: nothing was placed, changed or deleted. The page already tries again on its own, up
+to twice, before it shows the message. If you see it, wait a moment and press the button again. For
+an order, check the Orders tab first: an order that the page sent twice is recognised and placed
+only once. If the message keeps coming back, a replay seek or a very slow disk is usually the cause;
+see section 14.
