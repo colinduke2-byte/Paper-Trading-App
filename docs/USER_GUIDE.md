@@ -32,7 +32,7 @@ tools, more indicators, keyboard shortcuts) are being built on separate branches
 
 ## 1. What PaperDesk is and is not
 
-PaperDesk is a **simulator**. You practise buying and selling stocks and options with pretend money.
+PaperDesk is a **simulator**. You practice buying and selling stocks and options with pretend money.
 It runs on your own computer.
 
 - **No real orders.** PaperDesk never sends an order to a broker or an exchange. There is no code in it
@@ -126,7 +126,7 @@ Everything PaperDesk saves is in one folder: `backend\data` inside the PaperDesk
 **Back up:** stop PaperDesk, then copy the whole `backend\data` folder somewhere safe (a USB stick or
 cloud folder). To restore, stop PaperDesk and copy it back.
 
-**Reset one account:** use **Reset** in the top bar (section 4). It erases that account's orders,
+**Reset one account:** use **Reset account** in the top bar (section 4). It erases that account's orders,
 positions and history and starts again with the cash you choose.
 
 **Reset everything:** stop PaperDesk and delete the `backend\data` folder (or rename it, to keep a
@@ -196,15 +196,20 @@ On a computer (a window at least 900 pixels wide) the screen has three columns.
 **Top bar.** From left to right:
 
 - The **banner**: "Paper trading · no real money" plus the price source. "simulated market data" means
-  fictional prices. A blue banner "Replay of …" means a replay sandbox (section 10). Hover over the
+  fictional prices. A blue banner "Replay of …" means a replay account (section 10). Hover over the
   banner for more detail.
 - **Account value** (everything the account is worth now: cash plus positions at market value),
   **Day P&L** (change in account value since the day began), **Buying power** (what you can still
-  spend on stocks), **Cash**, and, on margin accounts, **Margin required** (the maintenance
+  spend on stocks), **Cash**, and, on margin accounts, **Maintenance margin** (the maintenance
   requirement, section 7).
 - A green dot (connected to the PaperDesk server; red means reconnecting), the market state and time
-  ("Market open · 04:13:37", in your computer's time zone), the **account menu**, and the buttons
-  **New account**, **Reset**, **Replay**, **Settings** and **Help**. **Sign out** appears only on a
+  ("Market open · 04:13:37 UTC"). **Times rule:** every time on screen is in your computer's time zone and
+  is labelled with its short name (UTC, CET, ET …), except during a replay, where every time is New York
+  time (ET), the clock of the recorded session. Downloaded CSV files use UTC. With US market hours
+  (`PAPERDESK_SESSIONS=us`) the header also shows the New York time. If the connection to the server is
+  lost for more than 3 seconds, a red bar says so, the numbers on screen are dimmed because they are
+  frozen, and the order ticket waits until the connection is back. Then the **account menu**, and the buttons
+  **New account**, **Reset account**, **Replay**, **Account rules**, **Keyboard shortcuts** and **Help**. **Sign out** appears only on a
   device that had to sign in with a passcode.
 
 **Left: watchlist.** Your list of symbols with last price and change since the previous close. Click a
@@ -218,7 +223,7 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
   and **1W** (week); keys 1 to 6 pick them. Indicators you can
   switch on: SMA 20, SMA 50, EMA 21, Bollinger bands, VWAP (intraday timeframes only) and RSI 14. The
   chart draws your average cost as a solid blue line and your open orders as dashed lines. Intraday
-  times are in your computer's time zone. The last candle updates as prices arrive.
+  times follow the times rule above. The last candle updates as prices arrive.
 - **Options**: the option chain (section 8).
 - **Company**: facts about the company (market cap, earnings per share, dividend, 52-week range,
   volatility). For the fictional companies these figures are generated.
@@ -226,14 +231,15 @@ add it. The **×** removes a symbol. There is one watchlist, called Main.
   market-wide news with earnings and economic calendars. With simulated prices all of it is simulated for
   the fictional companies and labelled Simulated (`docs/SIMULATED_RESEARCH.md`).
 
-**Centre bottom: your account.** Seven tabs:
+**Centre bottom: your account.** Eight tabs:
 
 | Tab | What it shows |
 |---|---|
 | **Positions** | What you hold: quantity, average cost, mark, market value, day and open P&L, and a **Close…** button that fills the ticket to sell or buy back the whole position |
+| **Lots** | Every open tax lot of every position: lot id (L1, L2, ...), open date, quantity, cost per unit, cost basis, value, unrealised gain, holding period and the date it turns long-term, and any informational wash-sale adjustment. Tick lots and press **Sell selected lots** (**Buy to cover selected lots** for a short) to open the ticket with exactly those lots |
 | **Orders** | Open orders with **Change…** and **Cancel**, and **Cancel all open orders**; tick "Show finished orders" for filled, canceled, rejected and expired ones |
 | **Fills** | Each execution: time, price, fee and kind (trade, exercise, assignment, dividend reinvestment and so on) |
-| **Activity** | The ledger: every cash movement with its realised profit or loss |
+| **Activity** | The ledger: every cash movement with its realized profit or loss |
 | **Reports** | Statistics, gains, statements, journal, export (section 9) |
 | **Alerts** | Price alerts (section 11) |
 | **Screener** | Filter the whole list of symbols (section 11) |
@@ -453,11 +459,11 @@ regular trading days in US session mode; only time while the market is open and 
 counts), and the setting "Liquidate on
 unmet margin calls" is on, PaperDesk cancels your open orders and sells positions with market orders,
 largest maintenance requirement first, until the call is met. It only does this during the regular
-session, and it will not leave a short option uncovered that was covered before. The Settings dialog
+session, and it will not leave a short option uncovered that was covered before. The Account rules dialog
 shows "Margin call: positions will be liquidated from <time> unless it is met." You can fix a call by
 closing positions or by using Reset.
 
-No margin check runs while a symbol you hold has no price. The Settings dialog then says "Prices
+No margin check runs while a symbol you hold has no price. The Account rules dialog then says "Prices
 unavailable for X: margin checks are paused until they return."
 
 ### The pattern day trader rule
@@ -467,7 +473,7 @@ A **day trade** is opening a position and closing it on the same day. In a margi
 could become a fourth. Closing orders are still allowed, and the message tells you the first date new
 opening orders are allowed again. Above the minimum equity the rule does not apply. A "day" here is the
 New York trading date with market hours, and the UTC date in simulated mode. The rule does not apply to
-cash accounts. You can turn it off or change the $25,000 in Settings.
+cash accounts. You can turn it off or change the $25,000 in Account rules.
 
 ### Settlement
 
@@ -503,14 +509,14 @@ within a day.
 | Margin interest | 8% a year | on a negative cash balance (borrowed money), accrued daily on actual/360, posted on the first day of each month |
 | Short borrow fee | 0.5% a year | on the market value of short stock, accrued daily, posted monthly |
 
-### The Settings dialog
+### The Account rules dialog
 
-**Settings** (top bar, or the menu on a phone) shows the rules for the selected account. Margin-only
+**Account rules** (top bar, or the menu on a phone) shows the rules for the selected account. Margin-only
 rules are hidden for a cash account and the reverse. At the top it shows settled cash, unsettled cash,
 day trades in the last 5 days, accrued interest and accrued borrow fee. **Save** applies your changes;
-**Restore defaults** puts everything back. Each number is checked and must be inside the range shown.
+**Restore default rules** puts everything back, after you confirm. Closing the dialog with unsaved changes asks first. Each number is checked and must be inside the range shown.
 
-![Settings](img/desktop-settings.png)
+![Account rules](img/desktop-settings.png)
 
 | Setting | Default | Range | Applies to |
 |---|---|---|---|
@@ -532,7 +538,7 @@ Cash dividends are always paid; that cannot be turned off.
 
 **New account** asks for a name (up to 40 characters), a type (Margin or Cash) and starting cash (up to
 1,000,000,000). Type plain digits, with no commas: "1,000" is not accepted and currently shows the
-unhelpful message "Internal Server Error". **Reset** erases the selected account's positions, orders and
+unhelpful message "Internal Server Error". **Reset account** erases the selected account's positions, orders and
 history and starts again with the cash you enter; it cannot be undone. There is no screen to delete an
 account.
 
@@ -612,8 +618,8 @@ ticket on this branch. The new ticket and strategy builder will update this sect
 
 ## 9. Reports
 
-Open the **Reports** tab in the bottom panel. All figures come from the simulated account. Five views:
-**Overview**, **Gains**, **Statements**, **Journal**, **Export**.
+Open the **Reports** tab in the bottom panel. All figures come from the simulated account. Six views:
+**Overview**, **Gains**, **Tax year**, **Statements**, **Journal**, **Export**.
 
 ### Overview
 
@@ -645,7 +651,7 @@ account is sampled about once a minute while PaperDesk is running.
 **Closed trades.** A "trade" here is one **closed tax lot**: each time a fill closes part of an earlier
 purchase, that is one closed lot. One order can close several lots.
 
-- **Closed lots**: how many.
+- **Closed trades**: how many lots were closed.
 - **Win rate**: closed lots with a gain, divided by all closed lots.
 - **Average win** and **Average loss**: the average gain and the average loss.
 - **Profit factor**: total of all gains divided by total of all losses (shown "–" when there are no
@@ -666,29 +672,47 @@ market value, not adjusted for how much they move with the stock.
 
 ![Gains](img/desktop-reports-gains.png)
 
-The realised gains report lists every closed lot: instrument, long or short, quantity, opened and closed
-dates, proceeds, cost, gain, term and wash-sale flag. The totals at the top are **Realised gain**,
-**Short-term**, **Long-term**, **Proceeds**, **Cost** and **Wash-sale flags**. Gains leave out fees,
-which are reported separately.
+The realized gains report lists every closed lot: tax lot id, the method that chose it ("Chosen lot"
+when the order named it), instrument, long or short, quantity, opened and closed dates, proceeds, cost,
+gain, term and wash-sale detail. The totals at the top are **Realized gain**, **Short-term**,
+**Long-term**, **Proceeds**, **Cost**, **Wash-sale flags** and the **Wash-sale disallowed** amount. Gains
+leave out fees, which are reported separately.
 
 - **Term**: a lot is **long-term** if it was held for more than one year (sold after the one-year
   anniversary of the purchase date, New York time); otherwise **short-term**. Short sales always count
   as short-term.
-- **Tax-lot method** chooses which earlier purchase a sale closes: **First in, first out** (oldest
-  first, the default), **Last in, first out** (newest first), or **Highest cost first** (the lot that
-  gives the smallest gain). A change applies only to trades closed after you make it. For a short
-  position, "highest cost" means the lot sold at the lowest price.
-- **Wash-sale flag**: marks a loss on a lot closed within 30 days before or after another purchase of
-  the same symbol (another short sale for a short lot). It is **informational only**. It does not look
-  for similar securities, does not change your cost basis and does not defer any loss. This is not tax
-  advice and PaperDesk is not a tax tool.
-- **Download CSV** saves the table. **Add note** attaches a journal note to a lot.
+- **Tax-lot method** chooses which earlier purchase a sale closes when the order names no lots: **First
+  in, first out** (oldest first, the default), **Last in, first out** (newest first), **Highest cost
+  first** (the smallest gain), **Lowest cost first** (the largest gain) or **Tax-efficient: largest loss
+  first** (the biggest loss per share at the sale price; a long-term lot first when two are equal). A
+  change applies only to trades closed after you make it. For a short position the costs mirror:
+  "highest cost" means the lot sold at the lowest price.
+- **Choosing lots**: in the order ticket, open **Choose tax lots (optional)** and tick the lots to close
+  (and how much of each), or use **Sell selected lots** on the Lots tab. The lots must belong to the
+  position, add up to the order quantity and not already be named by another open order. Named lots are
+  kept aside from other sales while the order works; if another trade or an assignment closes them
+  first, the order is canceled and says why. Lots can be chosen on single orders, not on brackets,
+  linked groups or multi-leg orders.
+- **Wash sale** (informational): a loss with replacement shares (another purchase of the same symbol,
+  or another short sale for a short lot) within 30 days before or after. Press the amount to see the
+  replacement lot, how much loss is disallowed, and the cost basis and holding period the replacement
+  lot would carry. Replacement shares are matched earliest first and each is used once. PaperDesk never
+  changes your realised gains or cost basis for this; similar securities and other accounts are not
+  considered. This is not tax advice and PaperDesk is not a tax tool.
+- **Download CSV** saves the table, including lot ids and the wash-sale columns. **Add note** attaches a
+  journal note to a lot.
+
+### Tax year
+
+Choose a **Year** to see short-term and long-term totals (lots, proceeds, cost, gain) for lots closed
+that year, the wash-sale disallowed amounts, the **adjusted gain** after those informational adjustments,
+and a list of that year's wash sales with their replacement lots. Informational only, not tax advice.
 
 ### Statements
 
 Choose a **Month** to see a monthly statement: opening account value, deposits and withdrawals,
-realised profit and loss, fees, other income and charges (dividends, interest, borrow fees), the change
-in unrealised profit and loss, closing account value, cash, trade count, amounts bought and sold, and the
+realized profit and loss, fees, other income and charges (dividends, interest, borrow fees), the change
+in unrealized profit and loss, closing account value, cash, trade count, amounts bought and sold, and the
 positions at month end. The figures reconcile with each other. The current month is marked as in
 progress. **Open printable statement** opens a page you can print or save as PDF from your browser. The
 statement notes say it is a paper statement, not a brokerage record.
@@ -702,15 +726,15 @@ journal as CSV. Notes are saved with your account data.
 ### Export
 
 Downloads, as comma-separated files for a spreadsheet: **Fills**, **Orders**, **Ledger**, **Positions**,
-**Realised gains** and **Journal**. Times are in UTC and amounts are exact. Text that starts with a
+**Realized gains** and **Journal**. Times are in UTC and amounts are exact. Text that starts with a
 character a spreadsheet could treat as a formula gets an apostrophe in front for safety.
 
 ---
 
 ## 10. Replay mode
 
-Replay plays back one past trading session with a clock you control, so you can practise without waiting.
-You trade in a **sandbox account**; your normal accounts are saved first and are untouched.
+Replay plays back one past trading session with a clock you control, so you can practice without waiting.
+You trade in a **replay account**; your normal accounts are saved first and are untouched. Every time in a replay is New York time (ET), the exchange clock.
 
 ![Replay picker](img/desktop-replay-picker.png)
 
@@ -732,7 +756,7 @@ and has:
 - A **progress slider** and a **Jump to** box (type a New York time such as `11:30`, then Go). Both only
   move **forward**: a replay cannot go back, because your orders cannot be undone. To see an earlier
   part, exit and start again.
-- **Exit replay** returns to your normal accounts. The sandbox is thrown away.
+- **Exit replay** returns to your normal accounts after you confirm. The replay account is thrown away.
 
 Everything works as usual on the replayed market: charts, options, orders, reports and settings. Orders
 fill, day orders expire, options expire and exercise, and dividends happen on the replayed clock. The
@@ -876,9 +900,9 @@ On the PC's own browser you do **not** have to sign in (unless you set `PAPERDES
 
 The bottom bar has four views: **Watchlist**, **Chart**, **Trade** and **Account**. The **menu** button at
 the top right opens a sheet with the account picker, your numbers, and the buttons New account, Reset,
-Replay, Settings, Help and (when you signed in) Sign out. On the **Chart** view, **Buy** and **Sell**
+Replay, Account rules, Keyboard shortcuts, Help and (when you signed in) Sign out. Reset account sits on its own below them. On the **Chart** view, **Buy** and **Sell**
 buttons open the ticket for that symbol. On **Trade**, once you press Review, **Place paper order**
-stays pinned above the tab bar. **Account** shows buying power and the seven tabs (Positions to
+stays pinned above the tab bar. **Account** shows buying power and the eight tabs (Positions to
 Screener). In the option chain, a Calls / Puts / Both switch picks the side to show.
 
 ![Phone: watchlist](img/phone-watchlist.png)
@@ -1024,8 +1048,8 @@ These are the messages you can actually meet, and what to do.
 | `Cannot reach the PaperDesk server (…). Check that it is running, then reload.` | The black window is closed or crashed. Start `run.bat` again and reload the page. |
 | "Connecting…" / "Reconnecting…" in the status area, and a red dot | The live connection to the server dropped. It retries by itself. If it stays, check the server window. |
 | `This order would be rejected: <reason>.` | The ticket checked the order and refused it. The reasons: `insufficient buying power`, `insufficient cash`, `short selling needs a margin account`, `uncovered calls need a margin account`, `insufficient cash to secure short options`, `no quote available for X` (the symbol has no price right now), `unknown symbol X`, `quantity must be positive and at most 1,000,000`, `fractional shares are limited to market and limit day orders`, `limit price is required`, `stop price is required`, `take profit must be on the profitable side of the entry price`, `stop loss must be on the losing side of the entry price`, `this option has expired`. |
-| `Pattern day trader rule: this account has made N day trades …` | See section 7. Close positions only, or wait for the date it gives, or raise the account's equity, or change the rule in Settings. |
-| `Cash accounts can only buy with settled cash: …` | Sale money has not settled yet. Wait for the date it gives, or turn the rule off in Settings. |
+| `Pattern day trader rule: this account has made N day trades …` | See section 7. Close positions only, or wait for the date it gives, or raise the account's equity, or change the rule in Account rules. |
+| `Cash accounts can only buy with settled cash: …` | Sale money has not settled yet. Wait for the date it gives, or turn the rule off in Account rules. |
 | `Margin call: account value … is below … maintenance requirement. Only closing orders are accepted until this is resolved.` | Section 7. Close positions or Reset. |
 | `Prices unavailable for X: margin checks are paused until they return.` | A symbol you hold has no price. Margin checks are paused. |
 | `Could not load chart data: …`, `Could not load the option chain: …`, `Could not load fills: …` | A request to the server failed; the text after the colon is the cause. Reload; check the server window. |
@@ -1140,7 +1164,7 @@ options.
 **Market order.** An order to trade now at the best available price.
 **Model price.** An option price calculated by a formula, not quoted by a market.
 **Open interest (OI).** Number of contracts outstanding. Invented for model prices.
-**Open P&L.** Unrealised profit or loss on what you hold.
+**Open P&L.** Unrealized profit or loss on what you hold.
 **P/E.** Price divided by earnings per share.
 **Pattern day trader (PDT).** The US rule limiting day trading in small margin accounts; see section 7.
 **Position.** What you currently hold in a symbol.
@@ -1148,7 +1172,7 @@ options.
 **Previous close.** The last price of the previous trading day.
 **Profit factor.** Total gains divided by total losses.
 **Put.** An option giving the right to sell 100 shares at the strike price.
-**Realised / unrealised.** Profit or loss locked in by closing; or still open.
+**Realized / unrealized.** Profit or loss locked in by closing; or still open.
 **Replay.** Playing back a past session with your own clock.
 **RSI.** Relative strength index, a 0 to 100 momentum indicator; above 70 or below 30 is often read as
 stretched.
@@ -1168,5 +1192,5 @@ stretched.
 **Trailing stop.** A stop that follows the price.
 **VWAP.** Volume-weighted average price for the day.
 **Volatility.** How much a price swings.
-**Wash sale.** A loss followed or preceded within 30 days by buying the same security. Flagged here for
-information only.
+**Wash sale.** A loss followed or preceded within 30 days by buying the same security. Worked out lot by
+lot here (replacement lot, disallowed loss, adjusted basis) for information only.

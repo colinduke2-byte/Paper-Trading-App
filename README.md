@@ -1,6 +1,6 @@
 # PaperDesk
 
-A paper trading simulator: practise trading stocks and options with pretend money. It runs on your own
+A paper trading simulator: practice trading stocks and options with pretend money. It runs on your own
 computer, in your browser (and a phone browser on the same Wi-Fi), and needs no account, API key or
 internet connection to start.
 
@@ -23,6 +23,10 @@ Nothing here is investment advice.
 
 The app also has a **Help** button with the essentials, for use offline.
 
+Crypto pairs quoted in US dollars trade alongside stocks and options, 24 hours a day and fully paid
+(no margin, no short selling, a percentage fee per fill). The simulated coins (SIMCOIN/USD and others)
+are invented; see [docs/CRYPTO.md](docs/CRYPTO.md).
+
 ## Run it
 
 Requires Python 3.11 or newer (Node is not needed).
@@ -37,7 +41,12 @@ http://127.0.0.1:8000. The first start creates a virtual environment and install
 `backend/pyproject.toml`; later starts reuse it until `pyproject.toml` changes.
 
 The first start creates two accounts (a 100,000 margin account and a 25,000 cash account). State is saved in
-`backend/data/` and survives restarts.
+`backend/data/` and survives restarts. PaperDesk backs it up every hour (keeping 24
+hourly and 14 daily backups) and before every reset, delete or restore; **Data** in the top bar shows the save
+status and lets you download a backup of everything, restore one (with a preview of what changes) and move one
+account to another installation. If the saved state cannot be read, nothing is overwritten: the app offers to
+restore the latest backup, start fresh or quit. Only one server can use a data folder at a time. Details:
+[docs/STATE_FORMAT.md](docs/STATE_FORMAT.md).
 
 > **By default there is no login.** Anyone who can reach the port can trade and delete your paper accounts,
 > so PaperDesk listens on `127.0.0.1` only. To use it from your phone, turn on LAN mode (below), which adds a
@@ -47,7 +56,9 @@ The first start creates two accounts (a 100,000 margin account and a 25,000 cash
 |---|---|---|
 | `PAPERDESK_SESSIONS` | `always` (`us` with real data) | `always`: the simulated market never closes. `us`: follow US market hours and holidays |
 | `PAPERDESK_DATA` | `backend/data` | Where state is saved. Set it in the environment: the server ignores it in `.env` |
+| `PAPERDESK_BACKUP_INTERVAL` | `3600` | Seconds between automatic backups; `0` turns them off (`PAPERDESK_BACKUP_KEEP_HOURLY` 24, `PAPERDESK_BACKUP_KEEP_DAILY` 14) |
 | `PAPERDESK_SEED` | `7` | Seed for the simulated price history. Set it in the environment, not `.env` |
+| `PAPERDESK_CLOCK_START` | unset | Simulated prices only: start the clock at this UTC time, e.g. `2026-11-28T15:00:00Z` (tests and demos) |
 | `PORT` | `8000` | Port (`run.sh`, `run.bat`, Docker). In `.env` it is read by Docker only |
 | `HOST` | `127.0.0.1` | Bind address (`run.sh`, `run.bat`; `0.0.0.0` in LAN mode). A network address is refused without LAN mode. Only the Docker image sets `0.0.0.0`, inside the container |
 | `PAPERDESK_LAN` | `0` | `1`: let devices on your network connect (needs `PAPERDESK_PASSCODE`). See LAN mode |
@@ -101,6 +112,29 @@ Mechanics, for developers and reviewers:
 - Server-rendered pages cannot use inline scripts under the Content-Security-Policy. A print button is written
   as `<button type="button" data-print>Print</button><script src="/print.js"></script>`.
 
+### Add it to your phone's home screen
+
+PaperDesk can be added to the home screen like an app (it has a web app manifest and icons). With LAN mode on,
+open the address the server printed on the phone, sign in, then:
+
+- **iPhone or iPad (Safari):** tap Share, then **Add to Home Screen** (recent iOS versions offer the same entry
+  in other browsers' share menus).
+- **Android (Chrome):** open the ⋮ menu, then **Add to Home screen** (it may say **Install app**). Samsung
+  Internet: menu, **Add page to**, **Home screen**.
+
+The icon opens PaperDesk full screen in the phone layout, without the browser's address bar. On iOS the
+home-screen app keeps its own cookies, so you sign in once more there. What does not work: PaperDesk is served
+over plain HTTP on your network, which browsers do not treat as a secure context, so there is no offline mode,
+no service worker and no push notifications; the computer running PaperDesk must be on and reachable. Android
+may offer only a shortcut rather than a full install for the same reason. If the computer's address changes,
+remove the icon and add it again (or give the computer a fixed address in your router).
+
+The manifest and icons (`/manifest.webmanifest`, `/favicon.ico`, `/favicon.svg`, `/apple-touch-icon.png`,
+`/icons/...`) are served without signing in, because browsers fetch them that way; they hold nothing about your
+accounts. The server serves only that exact list from the UI build (`PUBLIC_STATIC` in
+`backend/app/api/auth.py`). The icons are drawn from `frontend/public/icons/mark.svg`; after editing it, run
+`node tools/make_icons.mjs` to render the PNGs and `favicon.ico`.
+
 ### Docker
 
 ```bash
@@ -135,14 +169,21 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   the chain; automatic exercise and assignment at expiry; strategy-aware margin for spreads, condors,
   butterflies and calendars (multi-leg orders are API-only for now).
 - **Accounts:** cash and margin accounts, several at once, reset; Reg T style margin and buying power, short
-  selling, margin calls with liquidation after a grace period. Per-account settings (Settings button) for
+  selling, margin calls with liquidation after a grace period. Per-account settings (Account rules button) for
   dividend reinvestment, T+1 settlement and the settled-cash rule, the pattern day trader rule, margin interest
   and short borrow fees with their rates.
 - **Corporate actions:** splits (lots, options and open orders adjusted or canceled, cash in lieu) and
   dividends, for the simulated feed. Real-provider actions are shown in Research but not applied.
-- **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO or highest-cost
-  matching, realised gains report with holding period and an informational wash-sale flag, monthly statements,
-  CSV export, trade journal, performance statistics (Reports tab).
+- **Records and reports:** double-entry ledger, order and fill history, tax lots with FIFO, LIFO, highest-cost,
+  lowest-cost or tax-efficient (largest loss first) matching, realized gains report with holding period and
+  informational wash-sale detail, tax-year summary, monthly statements, CSV export, trade journal, performance
+  statistics (Reports tab).
+- **Tax lots:** the Lots tab lists every open lot (open date, cost, value, unrealized gain, holding period and the
+  date it turns long-term). Tick lots and press "Sell selected lots" to open the order ticket with them, or choose
+  lots in the ticket's "Choose tax lots" section; the API takes `"lots": [{"lot_id": "L3", "qty": 5}]` on a closing
+  order. Named lots are reserved while the order works; if another trade closes them first, the order is canceled.
+  Wash-sale detail (replacement lot, disallowed loss, adjusted basis and holding period) is informational only and
+  not tax advice.
 - **Alerts and notifications:** alerts on price, percent change, volume, indicators (moving-average
   crosses, RSI, MACD on any bar size), option implied volatility and delta, position and account
   gain/loss, account value, buying power and margin excess, reminders, and dividend or split dates of
@@ -153,7 +194,7 @@ LAN mode and a passcode. In Docker every browser has to sign in, including the o
   are optional and asked for with a click. Browsers allow notifications only over HTTPS or on the
   computer itself, so on a phone in LAN mode (plain HTTP) they stay inside the app. Earnings dates
   are not available from the data feed, so there is no earnings alert.
-- **Historical replay:** replay a recorded or bundled session in a sandbox account with a simulated clock
+- **Historical replay:** replay a recorded or bundled session in a separate replay account with a simulated clock
   (`docs/REPLAY.md`); live state is never touched.
 - **Help:** an in-app Help panel (top bar, or the menu on a phone).
 
@@ -198,15 +239,19 @@ cd e2e && npm install && npm test              # browser tests: builds the UI, s
 ```
 
 The end-to-end tests (Playwright, `e2e/`) start the server themselves on a random private port with a
-temporary data directory and a synthetic feed, and fail on any console or page error. They run on a desktop
-profile and on iPhone 13 and Pixel 7 emulation (`e2e/tests/mobile.spec.ts`); mobile tests that today's layout
-fails are marked `test.fixme` with the reason. Environment: `E2E_PYTHON` (Python with the backend installed;
+temporary data directory and a synthetic feed, and fail on any console or page error. Locally they run in
+Chromium only (desktop, iPhone 13 and Pixel 7 emulation); `E2E_ENGINES=chromium,firefox,webkit` adds desktop
+Firefox, desktop Safari, iPhones and an iPad on the real WebKit engine. They include axe-core accessibility
+scans, a keyboard-only walkthrough and visual comparisons; `e2e/README.md` lists the projects, how CI runs them
+and how to update the visual baselines. Tests that today's product fails are marked `test.fixme` with the
+reason. Environment: `E2E_PYTHON` (Python with the backend installed;
 defaults to `backend/.venv`, else `python3`), `E2E_PORT`, `E2E_CHROMIUM` (path to a Chromium to use instead of
 Playwright's own), `E2E_SKIP_BUILD=1`. Run `npx playwright install chromium` once if no browser is installed.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pull requests and pushes to `main`: backend tests on
-Python 3.11 and 3.13 (Linux), plus Windows and macOS; the UI build; the end-to-end tests; and a Windows job that
-starts `run.bat` and checks that the API and UI answer; and a Docker job that builds the image, runs it and checks
+Python 3.11 and 3.13 (Linux), plus Windows and macOS; the UI build; the end-to-end tests in Chromium, Firefox and
+WebKit (one job per engine); the desktop end-to-end suite in Microsoft Edge on Windows against a server started by
+`run.bat` (in a non-UTC time zone); a Windows job that starts `run.bat` and checks that the API and UI answer; and a Docker job that builds the image, runs it and checks
 that the API and UI answer. The e2e run starts a second server with a passcode (loopback bypass off) for the
 sign-in tests (`e2e/tests/auth.spec.ts`, desktop and Pixel 7; `E2E_AUTH_PORT`, `E2E_PASSCODE`).
 
@@ -217,7 +262,7 @@ sign-in tests (`e2e/tests/auth.spec.ts`, desktop and Pixel 7; `E2E_AUTH_PORT`, `
 | `backend/app/core` | Decimal money helpers, clock, US market calendar, shared records |
 | `backend/app/marketdata` | Provider interface, bar storage, scripted test feed, synthetic feed |
 | `backend/app/matching` | Order matching engine (pure, deterministic) |
-| `backend/app/ledger` | Double-entry ledger and account with FIFO lots |
+| `backend/app/ledger` | Double-entry ledger and account with tax lots (lot ids, lot methods, chosen lots) |
 | `backend/app/risk` | Margin and buying-power rules |
 | `backend/app/options` | Option symbols, Black-Scholes pricing, chain, expiry |
 | `backend/app/exchange.py` | The simulated broker that wires everything together |

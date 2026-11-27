@@ -54,9 +54,28 @@ def wanted_symbols(ex, clients=None) -> list:
         out.extend(sorted(a.positions()))
     for sub in list((clients or {}).values()):
         out.extend(sub.get("symbols") or [])
-    for syms in list(ex.watchlists.values()):
-        out.extend(syms)
+    # Watchlists a browser is showing (declared by routes_discovery) come before the others, so the
+    # visible list is streamed; when lists are being shown, the hidden ones are not polled at all.
+    shown = getattr(ex, "watchlists_shown", None)
+    names = [n for n in (shown() if callable(shown) else []) if n in ex.watchlists] or list(ex.watchlists)
+    for name in names:
+        out.extend(ex.watchlists.get(name) or [])
     return list(dict.fromkeys(out))
+
+
+def held_symbols(ex) -> list:
+    """Stocks whose corporate actions matter: held (directly or as an option's underlying) or with open orders."""
+    from ..options.symbology import parse as parse_option
+    out = set()
+    syms = [s for a in list(ex.accounts.values()) for s in list(a.lots)]
+    for o in list(ex.engine.orders.values()):
+        if o.active:
+            syms.append(o.symbol)
+            syms.extend(l["symbol"] for l in (o.legs or ()))
+    for s in syms:
+        c = parse_option(s)
+        out.add(c.underlying if c else s)
+    return sorted(out)
 
 
 def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] = None, synthetic_seed: int = 7,
@@ -91,7 +110,8 @@ def select_feed(now: float, data_dir: str, environ=None, dotenv: Optional[Path] 
 
 
 def _alpaca(now, data_dir, environ, key, secret, start, **kw):
-    from .alpaca import PAPER_TRADING_URL, AlpacaFeed
+    from .alpaca import PAPER_TRADING_URL
+    from .alpaca_crypto import AlpacaCryptoFeed as AlpacaFeed  # stocks and options as before, plus crypto pairs
     from .finnhub import FinnhubClient
     from .http import ProviderError
     from .research import ResearchHub
@@ -100,7 +120,8 @@ def _alpaca(now, data_dir, environ, key, secret, start, **kw):
         feed = AlpacaFeed(key, secret, feed=environ.get("PAPERDESK_ALPACA_FEED", "iex").strip().lower(),
                           options_feed=environ.get("PAPERDESK_ALPACA_OPTIONS_FEED", "indicative").strip().lower(),
                           trading_url=environ.get("APCA_API_BASE_URL", PAPER_TRADING_URL).strip().rstrip("/"),
-                          rpm=float(environ.get("PAPERDESK_ALPACA_RPM", "190")), data_dir=live_dir, **kw)
+                          rpm=float(environ.get("PAPERDESK_ALPACA_RPM", "190")), data_dir=live_dir,
+                          crypto_loc=environ.get("PAPERDESK_ALPACA_CRYPTO_LOC", "us").strip().lower(), **kw)
     except ValueError as e:
         return f"Alpaca settings are invalid: {e}. Using simulated prices.", f"the settings are invalid: {e}"
     try:
@@ -125,3 +146,5 @@ def attach(sel: Selection, ex) -> None:
     """Let a live feed see which symbols the exchange needs."""
     if hasattr(sel.feed, "interest_source"):
         sel.feed.interest_source = lambda: wanted_symbols(ex)
+    if hasattr(sel.feed, "holdings_source"):
+        sel.feed.holdings_source = lambda: held_symbols(ex)

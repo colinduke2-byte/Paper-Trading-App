@@ -9,6 +9,7 @@ import { Bar, IndicatorConfig, INDICATORS, Output } from "../indicators";
 import { Anchor, logicalToTime, timeToLogical, XY } from "./drawings";
 import { DrawingScene, DrawingsPrimitive } from "./primitive";
 import type { ChartType } from "./state";
+import { displayShift } from "../util";
 
 export const TF_SECONDS: Record<string, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400, "1w": 604800 };
 export const INTRADAY = new Set(["1m", "5m", "15m", "1h"]);
@@ -88,7 +89,7 @@ export function create(el: HTMLElement, opts: {
   let frame = 0;
   const g: Gen = {
     alive: true, key: `${opts.symbol}|${opts.tf}`, symbol: opts.symbol, tf: opts.tf, type: opts.type, intraday,
-    shift: intraday ? -new Date().getTimezoneOffset() * 60 : 0, step: TF_SECONDS[opts.tf] || 60,
+    shift: intraday ? displayShift() : 0, step: TF_SECONDS[opts.tf] || 60,
     chart, main, volume, compare, compareSymbol: opts.compare, primitive: null as any, bars: [], raw: [], inds, loaded: false,
     viewport: new Set(), hover: new Set(), hovered: null,
     emitViewport: () => {
@@ -138,6 +139,10 @@ export function setBars(g: Gen, input: Bar[]) {
   g.raw = raw.map((b) => b.time);
   g.bars = raw.map((b) => ({ ...b, time: b.time + g.shift }));
   g.main.setData(g.bars.map((b) => mainPoint(g, b)) as any);
+  // Small prices (crypto pairs under $1) need more decimals on the price scale.
+  const lastClose = raw.length ? Math.abs(raw[raw.length - 1].close) : 1;
+  const precision = lastClose >= 1 || lastClose === 0 ? 2 : lastClose >= 0.01 ? 4 : 6;
+  g.main.applyOptions({ priceFormat: { type: "price", precision, minMove: Math.pow(10, -precision) } });
   g.volume.setData(g.bars.map(volPoint) as any);
   computeIndicators(g);
   for (const ind of g.inds)

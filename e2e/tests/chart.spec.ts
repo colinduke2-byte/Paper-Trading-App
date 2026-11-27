@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, type Account } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, confirmDialog, expectRefusals, BENIGN, navDefaults, type Account } from "./fixtures";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 
 // Chart tools: chart types, indicators, drawings, order lines, trade at price and keyboard shortcuts.
@@ -11,14 +11,15 @@ test.afterEach(async ({ page, request }) => {
   await request.delete("/api/chartstate");
 });
 
-const chartImg = (page: Page, sym = "MKTX") => page.getByRole("img", { name: `${sym} price chart` });
+const chartImg = (page: Page, sym = "MKTX") => page.getByRole("figure", { name: `${sym} price chart` });
 const legend = (page: Page) => page.getByTestId("chart-legend");
 const stage = (page: Page) => page.locator(".ct-stage");
 
 async function chartReady(page: Page) {
   await expect(stage(page)).toHaveAttribute("data-loaded", "1");
   await expect(legend(page)).toBeVisible();
-  await expect(page.getByText(/^(Market open|Market closed|Pre-market|After hours) · /)).toBeVisible(); // the header has its final size
+  // the header has its final size; in a replay it has no clock (the replay bar shows it)
+  await expect(page.getByText(/^(Market open|Market closed|Pre-market|After hours)( · |$)/)).toBeVisible();
 }
 
 /** The element's box once it has stopped moving (the price scale settles after the data and order lines load). */
@@ -61,7 +62,7 @@ test("chart type can be switched and is remembered", async ({ page, open }) => {
   await chartReady(page);
   await expect(type).toHaveValue("line");
   await expect(stage(page)).toHaveAttribute("data-log", "1");
-  await page.getByRole("button", { name: "Reset chart view" }).click();
+  await page.getByRole("button", { name: "Reset view", exact: true }).click();
 });
 
 test("legend shows the bar's prices, change and volume", async ({ page, open }) => {
@@ -72,7 +73,7 @@ test("legend shows the bar's prices, change and volume", async ({ page, open }) 
   await expect(legend(page)).toContainText(/L \d/);
   await expect(legend(page)).toContainText(/C \d/);
   await expect(legend(page)).toContainText(/Vol /);
-  await expect(legend(page)).toContainText(/\([+-]?\d+\.\d\d%\)/);
+  await expect(legend(page)).toContainText(/\([+\-\u2212]?\d+\.\d\d%\)/);
   await expect(legend(page)).toContainText("SMA 20");
   // Hovering an earlier bar changes the date and time shown.
   const before = await legend(page).locator(".ct-legend-row").first().textContent();
@@ -146,16 +147,16 @@ test("a horizontal line stays after a reload, a timeframe change and in another 
   await page.reload();
   await chartReady(page);
   await check(page);
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1h, 1 hour", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
-  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 day", exact: true }).click();
+  await page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1D, 1 day", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Drawings" }).getByRole("button", { name: text!, exact: true })).toBeVisible();
 
   // A fresh browser profile has no local cache: the drawing comes from the server.
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, baseURL: new URL(page.url()).origin });
-  const other = await ctx.newPage();
+  const other = navDefaults(await ctx.newPage());
   const errors: string[] = [];
-  other.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+  other.on("console", (m) => { if (m.type() === "error" && !BENIGN.some((b) => b.test(m.text()))) errors.push(m.text()); });
   await other.addInitScript((a) => localStorage.setItem("pd.account", a), account.id);
   await other.goto("/");
   await expect(other.getByRole("heading", { name: "MKTX", level: 2 })).toBeVisible();
@@ -210,7 +211,20 @@ test("drawing tools create, select, move and delete shapes", async ({ page, open
   const list = page.getByRole("dialog", { name: "Drawings" });
   const before = await list.getByRole("button", { name: /^Text note "Support test"/ }).textContent();
   await page.getByRole("button", { name: /^Drawings/ }).click();
-  await remeasure(); await drag({ x: at(0.1, 0.8).x + 20, y: at(0.1, 0.8).y - 8 }, { x: at(0.1, 0.5).x + 20, y: at(0.1, 0.5).y - 8 });
+  // The note keeps its price, not its pixel: live ticks rescale the price axis, and on a short chart that moves the
+  // note well away from where it was clicked. Find it where it is now: a click on it keeps it selected, a click on
+  // empty space clears the selection. Only the note is this close to the left edge.
+  const del = page.getByRole("button", { name: "Delete selected" });
+  await remeasure();
+  let grab: { x: number; y: number } | null = null;
+  for (const dy of [-8, -14, -2, -20, 4, -26, 10, -32, 16, -38, 22, -44, 28]) {
+    const p = { x: at(0.1, 0.8).x + 20, y: at(0.1, 0.8).y + dy };
+    if (p.y < box.y + 2 || p.y > box.y + box.height - 2) continue;
+    await page.mouse.click(p.x, p.y);
+    if (await expect(del).toBeEnabled({ timeout: 400 }).then(() => true, () => false)) { grab = p; break; }
+  }
+  expect(grab, "the text note was found near where it was placed").not.toBeNull();
+  await drag(grab!, { x: grab!.x, y: grab!.y - box.height * 0.3 });
   await page.getByRole("button", { name: /^Drawings/ }).click();
   await expect(list.getByRole("button", { name: /^Text note "Support test"/ })).not.toHaveText(before!);
   await page.getByRole("button", { name: /^Drawings/ }).click();
@@ -285,10 +299,7 @@ test("a change the server refuses shows the reason and puts the line back", asyn
   await expect(page.getByRole("dialog", { name: "Confirm order change" })).toHaveCount(0);
   await expect(handle).toContainText(limit.toFixed(2));
   expect((await getOrder(request, acc, o.id)).limit_price).toBe(limit);
-  // The browser logs the refused PATCH (HTTP 422) as a failed resource load; that one entry is expected.
-  const expected = problems.filter((p) => /Failed to load resource: .* 422/.test(p));
-  expect(expected).toHaveLength(1);
-  problems.splice(problems.indexOf(expected[0]), 1);
+  expectRefusals(page, problems, 422, 1); // the refused PATCH
 });
 
 test("multi-leg orders draw no line on the chart", async ({ page, open, request, account }) => {
@@ -375,9 +386,9 @@ test("keyboard shortcuts and their help", async ({ page, open }) => {
   await search.blur();
 
   await page.keyboard.press("4");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1 hour", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "1h, 1 hour", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.keyboard.press("2");
-  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5 minutes", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "Timeframe" }).getByRole("button", { name: "5m, 5 minutes", exact: true })).toHaveAttribute("aria-pressed", "true");
   const t = ticket(page);
   await page.keyboard.press("s");
   await expect(t.getByRole("button", { name: "Sell", exact: true })).toHaveClass(/on/);
@@ -436,7 +447,7 @@ test("no console errors when switching symbol, timeframe, indicators and views q
   const tfs = page.getByRole("group", { name: "Timeframe" });
   for (let round = 0; round < 3; round++) {
     for (const s of ["TECX", "MKTX", "NVLX", "MKTX"]) await watch.getByRole("cell", { name: s, exact: true }).click();
-    for (const tf of ["1 minute", "1 day", "15 minutes", "1 week", "5 minutes"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
+    for (const tf of ["1m, 1 minute", "1D, 1 day", "15m, 15 minutes", "1W, 1 week", "5m, 5 minutes"]) await tfs.getByRole("button", { name: tf, exact: true }).click();
     await page.getByLabel("Chart type").selectOption(round % 2 ? "line" : "candles");
     await page.getByRole("tab", { name: "Options" }).click();
     await page.getByRole("tab", { name: "Chart" }).click();
@@ -463,10 +474,15 @@ test.describe("replay", () => {
     const draw = page.getByRole("button", { name: "Draw", exact: true });
     const drawingsBtn = () => page.getByRole("button", { name: /^Drawings \(/ });
     const list = page.getByRole("dialog", { name: "Drawings" });
+    // Waits on what the app does, never on time: the drawing count, then the (debounced) save to the server.
     const addHLine = async (fy: number) => {
+      const before = Number((await drawingsBtn().textContent())!.match(/\((\d+)\)/)![1]);
       await page.getByRole("button", { name: "Horizontal line" }).click();
       const box = await stableBox(page.getByTestId("draw-layer"));
+      const saved = page.waitForResponse((r) => r.url().includes("/api/chartstate/drawings/") && r.request().method() === "PUT" && r.ok());
       await page.mouse.click(box.x + box.width / 2, box.y + box.height * fy);
+      await expect(drawingsBtn()).toHaveText(`Drawings (${before + 1})`);
+      await saved;
       await drawingsBtn().click();
       const text = (await list.getByRole("button", { name: /^Horizontal line at / }).last().textContent())!;
       await drawingsBtn().click();
@@ -489,11 +505,16 @@ test.describe("replay", () => {
 
     // Step the simulated clock twice: the chart reloads, the line is still there at the same price.
     const bar = page.getByRole("region", { name: "Replay controls" });
+    const clock = bar.locator(".replay-clock");
     for (let i = 0; i < 2; i++) {
-      await page.waitForTimeout(500); // let the debounced save go out before the remount
+      // The step reloads the chart. chartReady() alone can pass on the chart from before the step, and a click
+      // then lands while it is being replaced: wait until the clock has moved and the reloaded chart is ready.
+      const was = await clock.textContent();
       await bar.getByRole("button", { name: "+1 min" }).click();
+      await expect(clock).not.toHaveText(was!);
       await chartReady(page);
     }
+    await stableBox(page, stage(page));
     await draw.click();
     await drawingsBtn().click();
     await expect(list.getByRole("button", { name: replayLine, exact: true })).toBeVisible();
@@ -503,6 +524,7 @@ test.describe("replay", () => {
 
     // Exit: the live chart has its own line only.
     await bar.getByRole("button", { name: "Exit replay" }).click();
+    await confirmDialog(page, "Exit replay");
     await expect(page.getByRole("note")).toContainText("Paper trading · no real money");
     await chartReady(page);
     await draw.click();

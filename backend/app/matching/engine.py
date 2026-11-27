@@ -6,7 +6,9 @@ quotes and gets back events: ("order", Order) for every state change and
 
 Fill model (conservative by design):
 - Market orders (and triggered stops) fill in full, walking a synthetic book:
-  each level holds the displayed size and is one slippage step worse.
+  each level holds the displayed size and is one slippage step worse. On a provider's real
+  book (Quote.provider_book) they never fill against an empty side (no bid for a sell, no
+  ask for a buy): they wait. Simulated and model quotes keep the walk as before.
 - Limit orders fill only when the opposite quote reaches the limit, at the quote
   price, for at most the displayed size per quote update. A resting limit also
   fills at its limit price when a new print trades strictly through it.
@@ -29,7 +31,7 @@ Linked orders:
   quantity and are released only when the parent filled completely.
 """
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from itertools import count
 from typing import Optional
 
@@ -38,6 +40,12 @@ from ..core.models import (BUY, SELL, MARKET, LIMIT, STOP, STOP_LIMIT, TRAILING_
                            AUCTION_TYPES, OPEN_TYPES, CLOSE_TYPES, LOO, LOC, MULTILEG, TRIGGERED)
 from ..core.money import ZERO, CENT, cents, px4
 from .multileg import net_price
+
+
+def _fine(x: Decimal) -> Decimal:
+    """Rounded to 9 decimal places without trailing zeros (and never in exponent form)."""
+    d = x.quantize(Decimal("1e-9")).normalize()
+    return d.quantize(Decimal(1)) if d.as_tuple().exponent > 0 else d
 
 
 @dataclass
@@ -55,6 +63,9 @@ class MatchingEngine:
         # Pruned as it is read; an order never becomes open again once it has finished.
         self._open: dict[str, Order] = {}
         self._fill_seq = count(1)
+        # Symbols priced finer than a cent (crypto pairs): symbol -> price increment, via .get(symbol).
+        # Their market fills walk the book one increment per level and keep that precision.
+        self.ticks = {}
 
     # ---- queries -------------------------------------------------------
     def active_orders(self, symbol: Optional[str] = None):
@@ -226,14 +237,19 @@ class MatchingEngine:
     def _walk(self, q: Quote, side: str, qty: Decimal) -> Decimal:
         """Volume-weighted price for taking qty from a synthetic book."""
         top, size = (q.ask, q.ask_size) if side == BUY else (q.bid, q.bid_size)
-        size = max(size, Decimal(1))
-        step = self.cfg.slippage_per_level if side == BUY else -self.cfg.slippage_per_level
+        inc = self.ticks.get(q.symbol)
+        size = size if inc is not None and size > 0 else max(size, Decimal(1))
+        slip = inc if inc is not None else self.cfg.slippage_per_level
+        step = slip if side == BUY else -slip
         n = int(qty // size)
         rem = qty - n * size
         if rem == 0:
             n, rem = n - 1, size
         # n full levels 0..n-1, then the remainder at level n
         cost = size * (n * top + step * n * (n - 1) / 2) + rem * (top + step * n)
+        if inc is not None:  # round against the taker, to the pair's increment
+            avg = ((cost / qty) / inc).to_integral_value(ROUND_CEILING if side == BUY else ROUND_FLOOR) * inc
+            return max(avg.quantize(inc), inc)
         return max(px4(cost / qty), self.cfg.min_price)
 
     def _process(self, o: Order, q: Optional[Quote], now: float, session: str, events: list, initial: bool) -> None:
@@ -251,6 +267,12 @@ class MatchingEngine:
             events.append(("order", o))
         as_market = o.type == MARKET or o.type in (STOP, TRAILING_STOP)
         remaining = o.remaining
+        if as_market and q.provider_book and (q.ask if o.side == BUY else q.bid) <= 0:
+            # One-sided book (a live feed reports no bid or no ask): nothing to fill against, so wait.
+            if initial and immediate:
+                self._finish(o, CANCELED, now, events, f"no {'ask' if o.side == BUY else 'bid'} available for an "
+                                                       f"immediate order")
+            return
         if as_market:
             self._fill(o, remaining, self._walk(q, o.side, remaining), now, events)
             return
@@ -290,7 +312,8 @@ class MatchingEngine:
     def _fill(self, o: Order, qty: Decimal, price: Decimal, now: float, events: list) -> None:
         prev_notional = (o.avg_fill_price or ZERO) * o.filled_qty
         o.filled_qty += qty
-        o.avg_fill_price = px4((prev_notional + price * qty) / o.filled_qty)
+        avg = (prev_notional + price * qty) / o.filled_qty
+        o.avg_fill_price = px4(avg) if self.ticks.get(o.symbol) is None else _fine(avg)
         o.status = FILLED if o.filled_qty >= o.qty else PARTIAL
         o.updated_at = now
         fill = Fill(id=f"F{next(self._fill_seq):08d}", order_id=o.id, account_id=o.account_id,

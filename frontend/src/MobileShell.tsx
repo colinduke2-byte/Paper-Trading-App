@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useState } from "react";
 import { Dialog } from "./Dialog";
-import { signed, tone, usd } from "./util";
+import { signed, signedUsd, tone, usd } from "./util";
+import { Info } from "./Info";
 import "./mobile.css";
 
 // Small-screen layout: a compact top bar, one full-height view at a time and a bottom tab bar.
@@ -20,7 +21,7 @@ export type Screen = "Watchlist" | "Chart" | "Trade" | "Account";
 export const SCREENS: Screen[] = ["Watchlist", "Chart", "Trade", "Account"];
 
 // A top-bar entry. Desktop renders it in the header; the phone layout lists it in the menu.
-export type TopAction = { label: string; onClick?: () => void; element?: ReactNode; title?: string };
+export type TopAction = { label: string; onClick?: () => void; element?: ReactNode; title?: string; danger?: boolean };
 
 // Phones in portrait (below 900 px), and phones in landscape (short and not very wide).
 export const SMALL_QUERY = "(max-width: 899px), (max-height: 540px) and (max-width: 1199px)";
@@ -93,6 +94,7 @@ export function MobileShell(p: {
   ticket: ReactNode; depth: ReactNode; bottom: ReactNode; symbol: string;
   onTrade: (side: "buy" | "sell") => void; children?: ReactNode;
   replayBar?: ReactNode; mode?: string; // the replay controls (only while a replay runs) and a key that changes on live/replay switches
+  stale?: boolean; lostBar?: ReactNode; // the live stream is down: frozen numbers are dimmed and the bar says why
 }) {
   const [menu, setMenu] = useState(false);
   const [replayMore, setReplayMore] = useState(false);
@@ -100,10 +102,17 @@ export function MobileShell(p: {
   const keyboard = useKeyboardOpen();
   const s = p.summary;
 
-  const stat = (label: string, value: ReactNode, cls = "") => <div><span>{label}</span><b className={cls}>{value}</b></div>;
+  useEffect(() => {
+    if (!menu) return;
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(false); };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [menu]);
+
+  const stat = (label: ReactNode, value: ReactNode, cls = "") => <div><span>{label}</span><b className={cls}>{value}</b></div>;
 
   return (
-    <div className={"m-shell" + (keyboard ? " m-kb" : "")} data-account={p.accountId} data-screen={p.screen}>
+    <div className={"m-shell" + (keyboard ? " m-kb" : "") + (p.stale ? " stale" : "")} data-account={p.accountId} data-screen={p.screen}>
       <header className="m-top">
         <div className="m-top-row">
           <div className="m-brand">
@@ -115,7 +124,7 @@ export function MobileShell(p: {
           </div>
           <div className="m-stats">
             {stat("Account value", usd(s?.equity))}
-            {stat("Day P&L", signed(s?.day_pnl), tone(s?.day_pnl))}
+            {stat("Day P&L", signedUsd(s?.day_pnl), tone(s?.day_pnl))}
           </div>
           <button className="m-menu-btn" aria-label="Menu" aria-expanded={menu} aria-haspopup="dialog" onClick={() => setMenu(true)}>
             <Icon d="M4 7h16M4 12h16M4 17h16" />
@@ -130,7 +139,7 @@ export function MobileShell(p: {
             onClick={() => setReplayMore((x) => !x)}><Icon d="M6 9l6 6 6-6" /></button>
         </div>
       )}
-      {p.notice}
+      {(p.lostBar || p.notice) && <div className="m-notices">{p.lostBar}{p.notice}</div>}
 
       <main className="m-views" key={p.mode}>
         <section className="m-view m-watch" hidden={p.screen !== "Watchlist"} aria-label="Watchlist view">{p.watchlist}</section>
@@ -171,9 +180,9 @@ export function MobileShell(p: {
               {p.account && <span className="tag">{p.account.type === "margin" ? "margin account" : "cash account"}</span>}
             </div>
             <div className="m-acct-stats">
-              {stat("Buying power", usd(s?.buying_power))}
+              {stat(<>Buying power <Info term="buying_power" /></>, usd(s?.buying_power))}
               {stat("Cash", usd(s?.cash))}
-              {s?.type === "margin" && stat("Margin required", usd(s?.maintenance_requirement))}
+              {s?.type === "margin" && stat(<>Maintenance margin <Info term="maintenance_margin" /></>, usd(s?.maintenance_requirement))}
             </div>
           </div>
           {p.bottom}
@@ -199,16 +208,24 @@ export function MobileShell(p: {
             <div className="m-sheet-account" onChange={() => setMenu(false)}>{p.accountSelect}</div>
             <div className="m-acct-stats">
               {stat("Account value", usd(s?.equity))}
-              {stat("Day P&L", signed(s?.day_pnl), tone(s?.day_pnl))}
+              {stat("Day P&L", signedUsd(s?.day_pnl), tone(s?.day_pnl))}
               {stat("Buying power", usd(s?.buying_power))}
               {stat("Cash", usd(s?.cash))}
-              {s?.type === "margin" && stat("Margin required", usd(s?.maintenance_requirement))}
+              {s?.type === "margin" && stat("Maintenance margin", usd(s?.maintenance_requirement))}
             </div>
             <div className="m-sheet-actions">
-              {p.actions.map((a) => a.element
+              {p.actions.filter((a) => !a.danger).map((a) => a.element
                 ? <div key={a.label} className="m-sheet-item">{a.element}</div>
                 : <button key={a.label} className="ghost" title={a.title} onClick={() => { setMenu(false); a.onClick?.(); }}>{a.label}</button>)}
             </div>
+            {/* Destructive actions sit apart from the everyday ones, so a slip of the thumb cannot reach them. */}
+            {p.actions.some((a) => a.danger) && (
+              <div className="m-sheet-danger">
+                {p.actions.filter((a) => a.danger).map((a) => (
+                  <button key={a.label} className="ghost danger-outline" title={a.title} onClick={() => { setMenu(false); a.onClick?.(); }}>{a.label}</button>
+                ))}
+              </div>
+            )}
             <p className="muted m-sheet-status">{p.connected ? "Live connection" : "Reconnecting…"} · {p.session}</p>
         </Dialog>
       )}

@@ -20,6 +20,7 @@ from ..marketdata.feed import TIMEFRAMES
 from ..marketdata.labels import price_source
 from ..marketdata.synthetic import SyntheticFeed
 from ..options import chain as optchain
+from ..core.assets import asset_class
 from ..options.symbology import describe, parse as parse_option
 from ..core.errors import NotFound
 from . import hardening, ui_build
@@ -27,6 +28,10 @@ from . import locking
 from .locking import unlocked
 
 TICK_WAIT = 1.0  # seconds the tick waits for the exchange lock before it skips a turn and says who holds it
+# Wall seconds between two state snapshots taken by the tick. Serialising the state is the largest piece of
+# work done under the exchange lock; a real server ticks once a second, so this only limits fast tick rates
+# (replay, tests), where taking a snapshot every turn kept requests waiting. Shutdown always saves.
+SAVE_EVERY = 0.2
 MARKET_DATA = "market data: reads only the feed, which may ask the provider"
 
 
@@ -53,34 +58,107 @@ def quote_row(ex: Exchange, symbol: str) -> Optional[dict]:
     if q.prev_close:
         row["change"] = float(q.last - q.prev_close)
         row["change_pct"] = float((q.last - q.prev_close) / q.prev_close * 100)
+    note = ex.feed.quote_note(symbol) if ex.is_stock(symbol) else None
+    if note:  # a live feed explains a one-sided book or a price that is not from today
+        row.update(stale=note["stale"], note=note["note"])
     return row
+
+
+def symbol_rows(ex: Exchange, q: str, limit: int, asset_class: str = "") -> list:
+    info = ex.feed.symbols()
+    if asset_class:
+        info = {s: i for s, i in info.items() if ex.asset_class(s) == asset_class}
+    row = lambda s: {"symbol": s, "name": info[s]["name"], "sector": info[s].get("sector", ""),
+                     "type": info[s].get("type", "stock"), "asset_class": ex.asset_class(s)}
+    q = q.upper().strip()
+    if not q:
+        # Called without the exchange lock: watchlists, positions and orders only order the list, so a
+        # change while they are read just drops that ordering (alphabetical instead); nothing is written.
+        try:
+            first = [s for wl in list(ex.watchlists.values()) for s in list(wl)]
+            for a in list(ex.accounts.values()):
+                first += [(parse_option(s).underlying if parse_option(s) else s) for s in list(a.lots)]
+            first += [o.symbol for o in ex.engine.active_orders()]
+        except RuntimeError:  # a dict or list changed size while it was read
+            first = []
+        picked = [s for s in dict.fromkeys(first) if s in info][:limit]
+        seen = set(picked)
+        rest = sorted(s for s in info if s not in seen)[:max(limit - len(picked), 0)]
+        return [row(s) for s in picked + rest]
+    # exact symbol, then symbols starting with q, then symbols containing it, then company names
+    ranked = []
+    for s, i in info.items():
+        name = (i.get("name") or "").upper()
+        if s == q:
+            rank = 0
+        elif s.startswith(q):
+            rank = 1
+        elif q in s:
+            rank = 2
+        elif name.startswith(q):
+            rank = 3
+        elif q in name:
+            rank = 4
+        else:
+            continue
+        ranked.append((rank, len(s), s))
+    ranked.sort()
+    return [row(s) for _, _, s in ranked[:limit]]
 
 
 def order_row(o) -> dict:
     row = plain(o)
     row["description"] = describe(o.symbol)
+    row["asset_class"] = asset_class(o.symbol)
     return row
+
+
+def create_default_accounts(ex: Exchange) -> None:
+    ex.create_account("Margin account", "margin", Decimal("100000"))
+    ex.create_account("Cash account", "cash", Decimal("25000"))
 
 
 def default_exchange() -> Exchange:
     from ..core import envfile
     from ..marketdata.config import attach, select_feed
+    from ..storage.lock import DataDirLock
     envfile.load_settings()  # the .env file first, so every setting below honours it
     data_dir = os.environ.get("PAPERDESK_DATA", os.path.join(os.getcwd(), "data"))
+    lock = DataDirLock(data_dir).acquire()  # raises DataDirLocked when another server uses this folder
     hardening.private_dir(data_dir)
     from ..marketdata.config import project_root
     for warning in hardening.permission_warnings([data_dir, str(project_root() / ".env")]):
         print(f"warning: {warning}")
     # Feed selection (docs/DATA_PROVIDERS.md): reads .env, uses Alpaca when keys exist, else synthetic.
-    sel = select_feed(time.time(), data_dir, synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
-    ex = Exchange(sel.feed, data_dir=sel.data_dir, session_mode=sel.session_mode)
+    # PAPERDESK_CLOCK_START (tests and demos, simulated prices only): run the clock from another time,
+    # for example a weekend, at normal speed.
+    from ..core.clock import OffsetClock, parse_start
+    start = os.environ.get("PAPERDESK_CLOCK_START", "").strip()
+    clock = OffsetClock(parse_start(start)) if start else None
+    sel = select_feed(clock.now() if clock else time.time(), data_dir,
+                      synthetic_seed=int(os.environ.get("PAPERDESK_SEED", "7")))
+    if clock is not None and not sel.feed.simulated:
+        clock = None  # real market data always runs on real time
+    ex = Exchange(sel.feed, clock=clock, data_dir=sel.data_dir, session_mode=sel.session_mode)
+    ex.data_lock = lock
     attach(sel, ex)
-    if not ex.load() or not ex.accounts:
-        ex.create_account("Margin account", "margin", Decimal("100000"))
-        ex.create_account("Cash account", "cash", Decimal("25000"))
+    loaded = ex.load()
+    recovering = ex.store is not None and ex.store.blocked  # damaged or newer state: wait for the user's choice
+    if not recovering and (not loaded or not ex.accounts):
+        create_default_accounts(ex)
     if not ex.watchlists:
         ex.watchlists = {"Main": sel.watchlist or ["MKTX", "TECX", "NVLX", "ORBT", "PXLR", "AUTO", "FNBK", "ENRG", "RETL", "STRM"]}
     return ex
+
+
+def storage_brief(live: Exchange) -> Optional[dict]:
+    """Save health of the live data folder, for every status message (details: /api/data/status)."""
+    st = live.store
+    if st is None:
+        return None
+    r = st.recovery
+    return {"last_save": st.last_save, "saving_failed": st.error is not None, "error": st.error,
+            "recovery": {"kind": r["kind"], "reason": r["reason"]} if r else None}
 
 
 class AppContext:
@@ -164,10 +242,39 @@ class AppContext:
             pass
 
 
+def warm_option_listings(feed, request) -> None:
+    """Fetch the provider's option listings for the option symbols in a request, before the exchange lock is taken:
+    _check_symbol only reads the cache under the lock. Bounded (at most 5 underlyings) and never raises."""
+    if not getattr(feed, "lists_options", False):
+        return
+    found: list = []
+
+    def walk(x, depth=0):
+        if depth > 4 or len(found) >= 5:
+            return
+        if isinstance(x, dict):
+            for v in list(x.values())[:50]:
+                walk(v, depth + 1)
+        elif isinstance(x, list):
+            for v in x[:50]:
+                walk(v, depth + 1)
+        elif isinstance(x, str) and len(x) <= 40:
+            c = parse_option(x.strip().upper())
+            if c is not None and c.underlying not in found:
+                found.append(c.underlying)
+    walk(request)
+    for u in found:
+        try:
+            feed.option_listing(u)
+        except Exception as e:  # noqa: BLE001 - _check_symbol answers "still loading" if this failed
+            print(f"option listing {u}: {e!r}")
+
+
 def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_seconds: float = 1.0,
                replay_tick_seconds: float = 0.25) -> FastAPI:
     clients: dict[WebSocket, dict] = {}
     ctx = AppContext(ex or default_exchange(), clients)
+    ctx.before_lock = lambda kwargs: warm_option_listings(ctx.ex.feed, kwargs.get("body"))
     del ex  # every route looks the active exchange up through ctx.ex
     dist = os.environ.get("PAPERDESK_UI", os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "dist"))
     ui_stale = os.path.isdir(dist) and ui_build.check(dist)  # silent without the sources (ZIP, Docker)
@@ -181,7 +288,9 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 "paper": True, **plain(ex.feed.status_info()), "price_note": price_source(ex.feed)["price_note"],
                 "mode": ctx.mode, "replay": rp.status() if rp is not None else None, "ui_stale": ui_stale,
                 # Alpaca was configured but failed at start-up, so the live exchange runs on simulated data
-                "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None)}
+                "live_unavailable": getattr(ctx.live.feed, "live_unavailable", None),
+                "storage": storage_brief(ctx.live),
+                "day_roll_waiting": ex.lifecycle.waiting}  # set while the start of a day waits for corporate actions
 
     def messages(ex: Exchange) -> list:
         """One tick message per WebSocket client, built while the caller holds the exchange lock."""
@@ -218,7 +327,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     # The tick runs on its own thread, so the event loop never waits for the exchange lock, and state
     # files are written by a second thread, so no thread writes to disk while holding it.
-    work = {"tick": None, "save": None, "saving": None, "stuck": False}
+    work = {"tick": None, "save": None, "saving": None, "stuck": False, "planned": float("-inf")}
     metrics = ctx.metrics
 
     def turn(elapsed: float) -> tuple:
@@ -242,9 +351,12 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                 print(f"broadcast error: {e!r}")
                 out = []
             idle = work["saving"] is None or work["saving"].done()
+            due = got - work["planned"] >= SAVE_EVERY  # wall time paces saving only; business time is ex.now()
             # The last statement that can fail: once save_plan() has reset `dirty`, the plan must reach
             # the caller, or the changes it holds are not written until the next change.
-            files = ex.save_plan() if idle else []  # still dirty next turn when the last write is not done
+            files = ex.save_plan() if idle and due else None  # still dirty next turn when it is not saved now
+            if files is not None:
+                work["planned"] = got
         finally:
             ctx.lock.release()
         wait, took = got - asked, time.monotonic() - got
@@ -307,6 +419,9 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         for pool in (work["tick"], work["save"]):  # let a turn or a write that has started finish
             await running.run_in_executor(None, pool.shutdown)
         await running.run_in_executor(None, shutdown_save)
+        lock = getattr(ctx.live, "data_lock", None)  # the data-directory lock (storage.lock), released last
+        if lock is not None:
+            lock.release()
 
     # The interactive API docs list every route; they are off unless PAPERDESK_API_DOCS=1 asks for them.
     docs = os.environ.get("PAPERDESK_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
@@ -349,13 +464,13 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
     @app.get("/api/symbols")
     @unlocked(MARKET_DATA)
-    def symbols(q: str = ""):
+    def symbols(q: str = "", limit: int = Query(50, ge=1, le=500), asset_class: str = ""):
+        """Search every symbol; return at most `limit` rows. An empty query gives a short useful list
+        (watchlists, positions and open orders first, then the rest alphabetically), not every listing.
+        `asset_class` (stock, crypto) narrows it (PR 14). Runs without the exchange lock (symbol search must
+        answer while it is busy); see symbol_rows."""
         ex = ctx.ex
-        q = q.upper().strip()
-        rows = [{"symbol": s, "name": i["name"], "sector": i["sector"], "type": i.get("type", "stock")}
-                for s, i in ex.feed.symbols().items()
-                if not q or q in s or q in i["name"].upper()]
-        return sorted(rows, key=lambda r: (not r["symbol"].startswith(q), r["symbol"]))
+        return symbol_rows(ex, q, limit, asset_class)
 
     @app.get("/api/quotes")
     @unlocked(MARKET_DATA)
@@ -374,7 +489,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             raise NotFound(f"unknown symbol {symbol}")
         return symbol
 
-    @app.get("/api/bars/{symbol}")
+    @app.get("/api/bars/{symbol:path}")
     @unlocked(MARKET_DATA)
     def bars(symbol: str, tf: str = "1d", limit: int = Query(500, ge=1, le=5000)):
         ex = ctx.ex
@@ -382,19 +497,19 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             raise ValueError(f"timeframe must be one of {', '.join(TIMEFRAMES)}")
         return ex.feed.bars(_stock(ex, symbol), tf, limit)
 
-    @app.get("/api/depth/{symbol}")
+    @app.get("/api/depth/{symbol:path}")
     @unlocked(MARKET_DATA)
     def depth(symbol: str):
         ex = ctx.ex
         return plain(ex.feed.depth(_stock(ex, symbol)))
 
-    @app.get("/api/trades/{symbol}")
+    @app.get("/api/trades/{symbol:path}")
     @unlocked(MARKET_DATA)
     def trades(symbol: str, limit: int = Query(50, ge=1, le=200)):
         ex = ctx.ex
         return plain(ex.feed.trades(_stock(ex, symbol), limit))
 
-    @app.get("/api/fundamentals/{symbol}")
+    @app.get("/api/fundamentals/{symbol:path}")
     @unlocked(MARKET_DATA)
     def fundamentals(symbol: str):
         ex = ctx.ex
@@ -409,7 +524,9 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
         # A live quote has no high or low until the provider's daily bar arrives; use the bars alone then.
         highs = [b["high"] for b in daily] + ([float(q.high)] if q.high is not None else [])
         lows = [b["low"] for b in daily] + ([float(q.low)] if q.low is not None else [])
-        return {"symbol": symbol, "name": info["name"], "sector": info["sector"], "type": info.get("type", "stock"),
+        crypto = {k: info[k] for k in ("qty_increment", "price_increment", "min_order_size", "base") if k in info}
+        return {**crypto, "asset_class": ex.asset_class(symbol),
+                "symbol": symbol, "name": info["name"], "sector": info["sector"], "type": info.get("type", "stock"),
                 "market_cap": last * info.get("shares_outstanding", 0), "shares_outstanding": info.get("shares_outstanding"),
                 "eps": eps, "pe": last / eps if eps and eps > 0 else None, "dividend": div,
                 "dividend_yield_pct": div / last * 100 if last else None,
@@ -434,10 +551,12 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     def screener(sector: str = "", min_price: Optional[float] = None, max_price: Optional[float] = None,
                  min_change_pct: Optional[float] = None, max_change_pct: Optional[float] = None,
                  min_volume: Optional[float] = None, max_pe: Optional[float] = None,
-                 min_dividend_yield: Optional[float] = None):
+                 min_dividend_yield: Optional[float] = None, asset_class: str = ""):
         ex = ctx.ex
         out = []
         for s, info in ex.feed.symbols().items():
+            if asset_class and ex.asset_class(s) != asset_class:
+                continue
             r = quote_row(ex, s)
             if not r or r["last"] <= 0:  # no trade price yet
                 continue
@@ -459,6 +578,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
             if min_dividend_yield is not None and dy < min_dividend_yield:
                 continue
             out.append({"symbol": s, "name": info["name"], "sector": info["sector"], "last": r["last"],
+                        "asset_class": ex.asset_class(s),
                         "change_pct": r.get("change_pct"), "volume": r["volume"], "pe": pe, "dividend_yield_pct": dy,
                         "market_cap": r["last"] * info.get("shares_outstanding", 0)})
         return sorted(out, key=lambda r: r["market_cap"], reverse=True)
@@ -468,7 +588,7 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     @unlocked(MARKET_DATA)
     def expirations(symbol: str):
         ex = ctx.ex
-        _stock(ex, symbol)
+        _stock(ex, symbol)  # a BASE/USD pair never reaches here: the path has no slash (crypto has no options)
         today = cal.ny_date(ex.now())
         listed = ex.feed.option_expirations(symbol.upper()) or optchain.expirations(today)
         return [{"date": d.isoformat(), "dte": (d - today).days} for d in listed
@@ -511,21 +631,47 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
                                  parse_num(body.get("starting_cash", 100000), "starting cash"))
         return plain(ex.summary(acct.id))
 
+    # Reset and delete take a backup first (storage.service). Writing it under the exchange lock held every other
+    # request up while the file was written and synced (slow on Windows), so the backup is serialised under a short
+    # lock and written outside it; the action then runs under the lock. The backup can miss what changed in the
+    # moment between the two, never anything before it.
+    def backup_first(kind: str):
+        data = getattr(ctx, "data", None)
+        if data is not None:
+            data.backup_before(kind)
+
     @app.post("/api/accounts/{aid}/reset")
+    @unlocked("takes the safety backup outside the exchange lock, then resets under ctx.locked()")
     def reset_account(aid: str, body: dict = Body(default={})):
-        ex = ctx.ex
         from ..core.money import parse as parse_num
-        ex.account(aid)
+        from ..exchange import _starting_cash
         raw = body.get("starting_cash")
         cash = parse_num(raw, "starting cash") if raw not in (None, "") else None
-        ex.reset_account(aid, cash)
-        return plain(ex.summary(aid))
+        if cash is not None:
+            _starting_cash(cash)  # a bad value is refused before any backup is taken
+        with ctx.locked("reset check"):
+            ctx.ex.account(aid)
+        backup_first("pre-reset")
+        with ctx.locked("reset"):
+            ex = ctx.ex
+            with ex.backup_taken():
+                ex.reset_account(aid, cash)
+            return plain(ex.summary(aid))
 
     @app.delete("/api/accounts/{aid}")
+    @unlocked("takes the safety backup outside the exchange lock, then deletes under ctx.locked()")
     def delete_account(aid: str):
-        ex = ctx.ex
-        ex.delete_account(aid)
-        return {"ok": True}
+        with ctx.locked("delete check"):
+            ex = ctx.ex
+            ex.account(aid)
+            if len(ex.accounts) == 1:
+                raise ValueError("cannot delete the only account")
+        backup_first("pre-delete")
+        with ctx.locked("delete"):
+            ex = ctx.ex
+            with ex.backup_taken():
+                ex.delete_account(aid)
+            return {"ok": True}
 
     @app.get("/api/accounts/{aid}")
     def account(aid: str):
@@ -664,11 +810,15 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
     # ---- static UI -----------------------------------------------------------------
     if os.path.isdir(dist):
         app.mount("/assets", StaticFiles(directory=os.path.join(dist, "assets")), name="assets")
+        from .auth import PUBLIC_STATIC
 
         @app.get("/{path:path}", include_in_schema=False)
         def ui(path: str):
             if path.startswith("api/"):
                 raise HTTPException(404)
+            media = PUBLIC_STATIC.get("/" + path)  # manifest and icons: an exact allowlist, never a path lookup
+            if media and os.path.isfile(os.path.join(dist, path)):
+                return FileResponse(os.path.join(dist, path), media_type=media)
             return FileResponse(os.path.join(dist, "index.html"))
 
     return app
@@ -676,5 +826,11 @@ def create_app(ex: Optional[Exchange] = None, run_loop: bool = True, tick_second
 
 def app_factory() -> FastAPI:
     from ..core import envfile
+    from ..storage.lock import DataDirLocked
     envfile.load_settings()  # before anything reads a setting (data folder, seed, feed, access, UI folder)
-    return create_app()
+    try:
+        return create_app()
+    except DataDirLocked as e:
+        import sys
+        print(f"PaperDesk did not start: {e}", file=sys.stderr)
+        raise SystemExit(1) from None

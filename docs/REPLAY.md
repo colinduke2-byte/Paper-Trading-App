@@ -121,6 +121,9 @@ python -m app.marketdata.replay record --date 2026-03-13 --seed 11 --symbols NVL
 python -m app.marketdata.replay record --realtime 600 --feed package.module:ProviderClass --out live
 # Build a session from 1-minute bars
 python -m app.marketdata.replay build --bars minutes.csv --daily daily.csv --meta meta.json --out day
+# Build a session for a real past day from Alpaca's historical 1-minute bars (needs Alpaca keys;
+# see docs/DATA_PROVIDERS.md, "Practising on real past days")
+python -m app.marketdata.replay fetch --date 2026-03-13 --symbols SPY,AAPL --out real-day
 # Summarise a file
 python -m app.marketdata.replay inspect mine.pdsession.gz
 # Regenerate the bundled samples (byte-identical output)

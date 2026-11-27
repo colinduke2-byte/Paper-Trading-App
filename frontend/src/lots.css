@@ -1,0 +1,33 @@
+/* Tax lots: the Lots tab and the order ticket's lot section. Cards rather than wide tables, so they fit a phone. */
+.lots { padding: 6px 10px 10px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.lots-note { margin: 0; font-size: 11.5px; }
+.lot-pos { border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.lot-pos > header { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.lot-pos > header .muted { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.lot-row { padding: 6px 10px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lot-pos .lot-row:first-of-type { border-top: 0; }
+.lot-row.on { background: var(--panel2); }
+.lot-pick { display: flex; align-items: center; gap: 8px; min-height: 40px; cursor: pointer; min-width: 0; }
+.lot-pick > span { min-width: 0; overflow-wrap: anywhere; }
+.lot-pick input { flex: none; width: auto; }
+.lot-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 2px 12px; font-size: 12px; min-width: 0; }
+.lot-facts > div { display: flex; flex-direction: column; min-width: 0; }
+.lot-facts > div.wide { grid-column: 1 / -1; }
+.lot-facts span { color: var(--muted); font-size: 11px; }
+.lot-facts b { font-weight: 600; overflow-wrap: anywhere; }
+.lot-wash b { color: var(--warn); font-weight: 500; }
+.lot-choice { border: 1px solid var(--line); border-radius: 6px; padding: 0 8px; min-width: 0; }
+.lot-choice > summary { cursor: pointer; padding: 8px 0; min-height: 24px; }
+.lot-choice[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.lot-choice > p { margin: 4px 0; font-size: 11.5px; }
+.lot-choice .lot-row { padding: 4px 0; }
+.lot-choice .notice { margin: 6px 0; }
+.lot-choice > button { margin: 4px 0 8px; }
+.lot-qty { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--muted); }
+.rep-wash { font-size: 11.5px; }
+.m-shell .lot-choice > summary { padding: 10px 0; line-height: 24px; }
+.m-shell .lot-pick { min-height: 44px; }
+.m-shell .lot-facts { font-size: 13px; }
+.ticket .lot-choice label.lot-pick { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 12px; }
+.ticket .lot-choice label.lot-pick input { width: auto; }
+.m-shell .ticket .lot-choice label.lot-pick { font-size: 14px; }

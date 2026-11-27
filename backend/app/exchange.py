@@ -2,6 +2,7 @@
 import contextlib
 import copy
 import json
+import logging
 import os
 import re
 import tempfile
@@ -14,12 +15,15 @@ from itertools import count
 from typing import Optional
 
 from .alerts import Alerting
+from .core import assets
 from .core import calendar as cal
 from .core import models as m
 from .core.clock import Clock
+from .core.assets import is_crypto
 from .core.models import Fill, Order, Quote, from_plain, to_plain
-from .core.money import CENT, ZERO, D, cents, parse as parse_num
-from .ledger.account import Account
+from .core.money import CENT, ZERO, D, cents, parse as parse_num, px4
+from .ledger.account import Account, Lot, is_long_term
+from .lifecycle import settings as life_settings
 from .lifecycle.manager import LifecycleManager
 from .marketdata.feed import MarketDataProvider
 from .matching.engine import FillConfig, MatchingEngine
@@ -29,12 +33,15 @@ from .options.symbology import describe, multiplier, parse as parse_option
 from .risk import margin
 from .core.errors import NotFound
 
+log = logging.getLogger("paperdesk")
+
 OPTION_FEE = Decimal("0.65")  # per contract
 STOCK_FEE = ZERO  # per share
 MAX_QTY = Decimal(1_000_000)
 MAX_LINKED = 5  # orders in one one-cancels-other or one-triggers-other request
 MAX_GTD_DAYS = 366
 MAX_NUMBER = Decimal("1000000000")  # no price or quantity in a request may be larger than this
+MAX_ORDER_LOTS = 100  # tax lots one closing order may name
 MAX_ACCOUNTS = 1000     # entity limits: each one keeps the state file and every tick bounded
 MAX_OPEN_ORDERS = 1000  # working orders per account
 MAX_WATCHLISTS = 50
@@ -42,6 +49,13 @@ CLOSED_AT_EXPIRY = "closed at expiry"  # fill kind: an option closed for its int
 RUNNING_GAP = 120  # seconds: a longer gap between two ticks means the simulator was not running (or was paused)
 CLOSE_WAIT = 120  # seconds to wait for the provider's daily close before settling at an approximate price
 PROVIDER_CLOSE_WAIT = 1800  # seconds to wait for feed.closing_price to become ready before approximating
+# Crypto (docs/CRYPTO.md): 24/7, fully paid, a percentage fee on every fill (one rate, no maker/taker split).
+CRYPTO_TYPES = (m.MARKET, m.LIMIT, m.STOP, m.STOP_LIMIT)
+CRYPTO_TIFS = (m.DAY, m.GTC, m.IOC)
+
+
+def tidy_qty(q: Decimal) -> str:
+    return f"{q.normalize():f}"
 
 
 def _in_range(*values) -> None:
@@ -55,9 +69,23 @@ class OrderRejected(ValueError):
     pass
 
 
+class _CryptoTicks:
+    """What the matching engine asks for: a crypto pair's price increment, or None for anything else."""
+
+    def __init__(self, ex: "Exchange"):
+        self.ex = ex
+
+    def get(self, symbol: str, default=None):
+        return self.ex.crypto_spec(symbol).price_increment if is_crypto(symbol) else default
+
+
+def _amt(x: Decimal) -> str:
+    return f"{cents(x):,.2f}"
+
+
 FIELD_LABELS = {"qty": "quantity", "limit_price": "limit price", "stop_price": "stop price",
                 "trail_amount": "trail amount", "trail_percent": "trail percent", "take_profit": "take profit",
-                "stop_loss": "stop loss"}
+                "stop_loss": "stop loss", "notional": "dollar amount"}
 
 
 def _field(req: dict, key: str) -> Optional[Decimal]:
@@ -88,6 +116,7 @@ class Exchange:
         self.data_dir = data_dir
         self.session_mode = session_mode  # 'always' or 'us'
         self.engine = MatchingEngine(fill_config)
+        self.engine.ticks = _CryptoTicks(self)
         self._last_tick = None  # time of the previous tick in this run (None right after a start)
         self._due_open = set()  # on-open orders whose auction is this tick, once the feed has stepped
         self._session_quotes: dict[str, Quote] = {}  # last quote each symbol had in a regular session
@@ -101,14 +130,16 @@ class Exchange:
         self._fill_seq = 1
         self._expiry_seq = count(1)
         self._last_day = None
+        self._last_utc_day = None
         self._last_session = None
         self._last_equity_sample = 0.0
         self._last_market_save = 0.0
         self.dirty = False
+        self.load_result = None  # what the last load() found (app.storage.store.LoadResult)
+        self.before_destructive = None  # set by the data service: snapshot before a reset or delete
         self.faults: dict = {}  # account id -> why it cannot be valued right now (see isolated())
-        self._io_lock = threading.Lock()  # serialises file writes; never taken before the exchange lock is released
-        self._snapshot_seq = 0  # numbers snapshots so a late writer cannot overwrite a newer file
-        self._written: dict[str, int] = {}
+        self._booking: frozenset = frozenset()  # order ids whose fills _handle is booking (reserved_lots)
+        self.step_faults: dict = {}  # account id -> {step: why it failed}; cleared only when that step next works
         # Expiry settlement prices: (underlying, expiry ISO) -> (price, exact, note); fetches of the provider's
         # daily close in progress or finished: key -> {"started": ts, "done": bool}.
         self._settle_prices: dict = {}
@@ -129,8 +160,47 @@ class Exchange:
             return "regular"
         return cal.session(self.now() if now is None else now)
 
+    def session_for(self, symbol: str, now: Optional[float] = None) -> str:
+        """The session an order on this symbol trades in: crypto is always open."""
+        return "regular" if is_crypto(symbol) else self.session(now)
+
     def is_stock(self, symbol: str) -> bool:
+        """True for anything the feed lists (stocks, funds and crypto pairs); False for options."""
         return symbol in self.feed.symbols()
+
+    @staticmethod
+    def asset_class(symbol: str) -> str:
+        return assets.asset_class(symbol)
+
+    def crypto_spec(self, symbol: str) -> assets.CryptoSpec:
+        return assets.spec_from_info(symbol, self.feed.symbols().get(symbol))
+
+    def update_settings(self, account_id: str, changes: dict) -> Account:
+        """Apply a settings change. A higher crypto fee is refused while open crypto purchases could then
+        cost more than the cash (the fill-time cap would cut them; better to say so now)."""
+        a = self.account(account_id)
+        old = a.settings
+        new = life_settings.update(old, changes)
+        buys = [o for o in self.engine.orders.values() if o.account_id == a.id and o.active and o.side == m.BUY
+                and is_crypto(o.symbol)]
+        if buys and life_settings.number(new, "crypto_fee_rate") > life_settings.number(old, "crypto_fee_rate"):
+            a.settings = new
+            ok = self._worst_case(a, [], crypto_check=True).ok
+            a.settings = old
+            if not ok:
+                names = ", ".join(f"{o.id} ({o.side} {o.remaining.normalize():f} {o.symbol})" for o in buys)
+                raise ValueError(f"the crypto fee cannot be raised to {life_settings.number(new, 'crypto_fee_rate').normalize():f}% "
+                                 f"while your open crypto purchases would then cost more than your cash: {names}. "
+                                 f"Cancel or reduce them first.")
+        a.settings = new
+        self.dirty = True
+        return a
+
+    @staticmethod
+    def crypto_fee_rate(account: Optional[Account]) -> Decimal:
+        """Percent of the trade value charged on each crypto fill (an account setting)."""
+        settings = account.settings if account is not None else life_settings.defaults()
+        return life_settings.number(settings, "crypto_fee_rate")
 
     def quote(self, symbol: str) -> Optional[Quote]:
         if self.is_stock(symbol):
@@ -145,8 +215,15 @@ class Exchange:
         if u is None:
             return None
         now = self.now()
-        return optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), now,
-                                     self.feed.event_variance(c.underlying, c.expiry_ts, now))
+        oq = optchain.option_quote(c, float(u.last), self.feed.base_vol(c.underlying), now,
+                                   self.feed.event_variance(c.underlying, c.expiry_ts, now))
+        oq.stale = u.stale  # a model price from a stale underlying is stale too
+        return oq
+
+    @staticmethod
+    def _tradable(q: Optional[Quote]) -> Optional[Quote]:
+        """The quote an order may fill against now: None when there is none or it is stale (the order rests)."""
+        return None if q is None or q.stale else q
 
     def quote_source(self, symbol: str) -> str:
         """Where quote(symbol) comes from: the feed's name, or "model" for a modelled option price."""
@@ -158,7 +235,10 @@ class Exchange:
         q = self.quote(symbol)
         if q is None:
             return ZERO
-        return q.last if self.is_stock(symbol) else cents(q.mid)
+        if self.is_stock(symbol):
+            return q.last
+        # An option quote with no ask (a live feed with an empty book) is marked at its last trade, not at 0.
+        return cents(q.mid) if q.ask > 0 else q.last
 
     def price(self, symbol: str) -> Optional[Decimal]:
         """The mark, or None when there is no price (never a zero standing in for a missing price)."""
@@ -187,6 +267,15 @@ class Exchange:
         self.dirty = True
         return acct
 
+    @contextlib.contextmanager
+    def backup_taken(self):
+        """The caller has just backed the state up itself (outside the lock): do not take another one."""
+        hook, self.before_destructive = self.before_destructive, None
+        try:
+            yield
+        finally:
+            self.before_destructive = hook
+
     def reset_account(self, account_id: str, starting_cash=None) -> Account:
         """Start the account again with fresh cash. Its rule settings and tax-lot method are kept; positions,
         orders, history and the trade journal are cleared."""
@@ -203,6 +292,8 @@ class Exchange:
         new.settings = dict(old.settings)  # a reset keeps the account's rule settings
         new.lot_method = old.lot_method  # ... and its tax-lot method
         new.to_plain()  # the account must be saveable, or the next start-up could not load the state file
+        if self.before_destructive:  # backup (PR 19): only once the reset is known to be valid
+            self.before_destructive("pre-reset")
         for o in self.engine.active_orders():
             if o.account_id == account_id:
                 self.engine.cancel(o.id, self.now(), "account reset")
@@ -211,6 +302,8 @@ class Exchange:
         self._day_start_wanted.pop(old.id, None)
         self.accounts[old.id] = new
         self.faults.pop(old.id, None)
+        self.step_faults.pop(old.id, None)
+        self.lifecycle.accrual_retry.pop(old.id, None)  # a fresh account owes nothing for old days
         self.dirty = True
         return new
 
@@ -218,10 +311,14 @@ class Exchange:
         self.account(account_id)
         if len(self.accounts) == 1:
             raise ValueError("cannot delete the only account")
+        if self.before_destructive:
+            self.before_destructive("pre-delete")
         self.engine.orders = {k: o for k, o in self.engine.orders.items() if o.account_id != account_id}
         self.engine.reindex()
         del self.accounts[account_id]
         self.faults.pop(account_id, None)
+        self.step_faults.pop(account_id, None)
+        self.lifecycle.accrual_retry.pop(account_id, None)
         self.dirty = True
 
     def account(self, account_id: str) -> Account:
@@ -230,30 +327,52 @@ class Exchange:
         except KeyError:
             raise NotFound(f"no such account {account_id}")
 
-    def isolated(self, account, fn, what: str):
+    def isolated(self, account, fn, what: str, step: bool = False):
         """Run fn(); if it fails, record a fault on this account and return None instead of raising.
 
         One damaged account (an impossible number from an old state file, say) must not stop the tick,
         the stream or the account list for every other account. The fault is shown in the account list
         so the user can reset or delete that account.
+
+        Two kinds of fault are kept apart (release review, PR 32): valuing the account (`faults`, cleared
+        when a valuation works) and a step of the day (`step=True`: the margin check, interest accrual;
+        `step_faults`, cleared only when that same step works again). A new step fault is logged with its
+        traceback, written to the account's log and sent to the notifications once.
         """
         try:
-            return fn()
+            out = fn()
         except Exception as e:  # noqa: BLE001 - any failure of one account is contained
             reason = f"{what} failed: {type(e).__name__}"
-            if self.faults.get(account.id) != reason:
-                print(f"account {account.id}: {reason}: {e!r}"[:300])
-            self.faults[account.id] = reason
+            book = self.step_faults.setdefault(account.id, {}) if step else self.faults
+            key = what if step else account.id
+            if book.get(key) != reason:
+                log.exception("account %s: %s", account.id, reason)
+                if step:
+                    try:
+                        self.lifecycle._log(account, self.now(), "account_fault",
+                                            f"{what[:1].upper()}{what[1:]} is failing for this account "
+                                            f"({type(e).__name__}). Reset or delete the account if it keeps failing.")
+                    except Exception:  # noqa: BLE001 - reporting must not raise from here
+                        pass
+            book[key] = reason
             return None
+        if step:
+            left = self.step_faults.get(account.id)
+            if left and left.pop(what, None) is not None and not left:
+                del self.step_faults[account.id]
+        return out
 
     def safe_summary(self, account_id: str) -> dict:
         """summary(), or a flagged row for an account that cannot be valued."""
         a = self.account(account_id)
         out = self.isolated(a, lambda: self.summary(account_id), "valuing the account")
+        steps = sorted(self.step_faults.get(account_id, {}).values())
         if out is not None:
-            self.faults.pop(account_id, None)
+            self.faults.pop(account_id, None)  # only a valuation fault clears here; step faults stay
+            if steps:
+                out["faults"] = steps
             return out
-        return {"id": a.id, "name": a.name, "type": a.type, "broken": True,
+        return {"id": a.id, "name": a.name, "type": a.type, "broken": True, "faults": steps,
                 "error": "This account cannot be valued (" + self.faults.get(a.id, "unknown error")
                          + "). Reset it with a new starting cash or delete it."}
 
@@ -285,6 +404,10 @@ class Exchange:
                 "total_pnl": cents(eq - a.starting_cash), "day_pnl": cents(eq - a.day_start_equity),
                 "margin_call": a.margin_call}
         self.lifecycle.extend_summary(a, out)
+        # Crypto is fully paid: the cash on hand (never a loan), net of the fee on the purchase.
+        # (margin: what a new crypto purchase may spend once the open purchases have filled, within the excess)
+        cash_bp = out["buying_power"] if a.type == "cash" else max(min(max(worst.excess, ZERO), worst.buy_cash), ZERO)
+        out["crypto_buying_power"] = (cash_bp / (1 + self.crypto_fee_rate(a) / 100)).quantize(CENT, "ROUND_FLOOR")
         return out
 
     def positions(self, account_id: str) -> list:
@@ -303,7 +426,7 @@ class Exchange:
             row = {"symbol": sym, "description": describe(sym), "qty": qty, "avg_cost": a.avg_cost(sym), "mark": mark,
                    "market_value": mv, "cost_basis": cost, "unrealized_pnl": mv - cost if priced else None,
                    "unrealized_pct": (float((mv - cost) / abs(cost) * 100) if cost else 0.0) if priced else None,
-                   "multiplier": mult, "kind": "option" if mult == 100 else "stock", "day_pnl": None,
+                   "multiplier": mult, "kind": assets.asset_class(sym), "asset_class": assets.asset_class(sym), "day_pnl": None,
                    "price_unavailable": not priced}
             if c:
                 row.update(delta=None, theta=None, underlying=c.underlying, expiry=c.expiry.isoformat())
@@ -316,8 +439,42 @@ class Exchange:
                 if q and q.prev_close:
                     row["day_pnl"] = cents(qty * (q.last - q.prev_close))
                 row["delta"] = float(qty)
-            rows.append(row)
+            rows.append(self._annotate_position(row, sym, mark))
         return rows
+
+    def _annotate_position(self, row: dict, sym: str, mark: Optional[Decimal]) -> dict:
+        """Price source, price note and corporate action notices of a position row (only when there is one).
+        mark is None (or not positive) when the position has no price."""
+        mark = mark if mark is not None else ZERO
+        src = self.quote_source(sym)
+        if src != self.feed.name or mark <= 0:
+            row["price_source"] = src if mark > 0 else None
+        note = self._position_note(sym, src, mark)
+        if note:
+            row["price_note"] = note
+        q = self.quote(sym)
+        if q is not None and getattr(q, "stale", False):
+            row["stale"] = True
+        notices = self.lifecycle.position_notices(sym)
+        if notices:
+            row["notices"] = notices
+        return row
+
+    def _position_note(self, sym: str, src: str, mark: Decimal) -> Optional[str]:
+        """Why a position's mark is not a current market price, or None."""
+        if mark <= 0:
+            return f"Not valued: {self.feed.no_price_reason(sym)}"
+        c = parse_option(sym)
+        if c is not None:
+            if self.feed.simulated or src != "model":
+                return None
+            listing = self.feed.option_listing(c.underlying, fetch=False)  # never block a tick on the network
+            if listing is not None and c.strike not in listing.get(c.expiry, ()):
+                return (f"{self.feed.name.capitalize()} no longer lists this contract (expired, delisted or adjusted); "
+                        f"it is valued by the option model, not market data. It can still be closed.")
+            return "No option quote from the data provider; valued by the option model, not market data."
+        n = self.feed.quote_note(sym)
+        return n["note"] if n and n.get("stale") else None
 
     def orders(self, account_id: str, status: str = "all") -> list:
         self.account(account_id)
@@ -336,7 +493,7 @@ class Exchange:
         A submit can book several fills (every leg of a multi-leg order, a bracket entry) and a replace
         edits several fields; a fault half way must not leave an order without its fill, a fill without
         its ledger posting or half an edit. Restored on failure: the account's ledger, lots, fills, closed
-        trades, lifecycle state and notifications, its open orders (and any order added), the event queue
+        trades, lot id counter, lifecycle state and notifications, its open orders (and any order added), the event queue
         and the fill counter. Order ids used by a failed request are not reused.
         """
         a = self.accounts.get(account_id)
@@ -348,7 +505,9 @@ class Exchange:
         saved = [(o, dict(o.__dict__)) for o in self.engine.active_orders() if o.account_id == account_id]
         led = a.ledger
         n_txn, balances = len(led.transactions), dict(led.balances)
-        lots = {s: [copy.copy(l) for l in ls] for s, ls in a.lots.items()}
+        # The constructor, not copy.copy: several times faster, and an account can hold hundreds of lots.
+        lots = {s: [Lot(l.qty, l.price, l.ts, l.cost, l.fill_id, l.id) for l in ls] for s, ls in a.lots.items()}
+        lot_seq = a.lot_seq  # tax-lot ids (PR 13): a rolled-back fill must not use one up
         n_fills, n_closed, life = len(a.fills), len(a.closed), a.life.copy()
         # `dirty` is not put back: the save thread sets it when a write fails, and a rolled-back request
         # costs one extra save at most.
@@ -369,7 +528,7 @@ class Exchange:
             self.engine.reindex()  # orders open again, in their first order
             del led.transactions[n_txn:]
             led.balances = balances
-            a.lots = lots
+            a.lots, a.lot_seq = lots, lot_seq
             del a.fills[n_fills:], a.closed[n_closed:], self.events[n_events:]
             a.life = life
             notices.logs[account_id], notices.seq = notes, note_seq
@@ -387,12 +546,34 @@ class Exchange:
                 raise OrderRejected(f"unknown symbol {symbol or '(blank)'}")
             if contract.expiry_ts <= self.now():
                 raise OrderRejected("this option has expired")
-            # A position held at an unlisted strike (an option adjusted by a split) can still be closed.
-            if contract.strike <= 0 or ((contract.strike * 2) % 1 != 0 and account.position(symbol) == 0):
+            # A position held at an unlisted strike or expiry (an option adjusted by a split, a contract the
+            # provider no longer lists) can still be closed.
+            held = account.position(symbol) != 0
+            if contract.strike <= 0:
                 raise OrderRejected("strike is not listed")
-            if contract.expiry not in optchain.expirations(cal.ny_date(self.now())) and account.position(symbol) == 0:
+            # Never fetched here (this runs under the exchange lock): the order routes warm the listing before
+            # they take the lock (server.warm_option_listings); if it is still unknown, say so.
+            listing = self.feed.option_listing(contract.underlying, fetch=False)
+            if listing is None and getattr(self.feed, "lists_options", False) and not held:
+                raise OrderRejected(f"the list of {self.feed.name.capitalize()} option contracts for "
+                                    f"{contract.underlying} is still loading; try again in a few seconds")
+            if listing is not None:  # a live feed: its real contracts, not the model calendar
+                strikes = listing.get(contract.expiry)
+                if strikes is None and not held:
+                    raise OrderRejected(f"expiry is not listed: {self.feed.name.capitalize()} lists no "
+                                        f"{contract.underlying} options expiring {contract.expiry.isoformat()}")
+                if strikes is not None and contract.strike not in strikes and not held:
+                    raise OrderRejected(f"strike is not listed: {self.feed.name.capitalize()} lists no "
+                                        f"{contract.strike.normalize():f} strike for {contract.underlying} on "
+                                        f"{contract.expiry.isoformat()}")
+                return contract
+            if (contract.strike * 2) % 1 != 0 and not held:
+                raise OrderRejected("strike is not listed")
+            if contract.expiry not in optchain.expirations(cal.ny_date(self.now())) and not held:
                 raise OrderRejected("expiry is not listed")
             return contract
+        if is_crypto(symbol) and self.feed.symbols()[symbol].get("tradable") is False:
+            raise OrderRejected(f"{symbol} is not tradable right now (the data provider lists it as not tradable)")
         return None
 
     def _good_till(self, req: dict, tif: str) -> tuple:
@@ -437,6 +618,8 @@ class Exchange:
         if not isinstance(req, dict):
             raise OrderRejected("an order must be a JSON object")
         if req.get("legs") is not None:
+            if req.get("lots") is not None:
+                raise OrderRejected("tax lots can be chosen on single closing orders only, not on multi-leg orders")
             return [self._validate_multileg(account, req)]
         if req.get("oco") is not None:
             return self._validate_oco(account, req)
@@ -499,24 +682,29 @@ class Exchange:
             c.oco_group = entry.id if oco else None
             children.append(c)
         if not oco and sum(c.role == m.EXIT for c in children) > 1:
-            raise OrderRejected("several exits for one entry must be one-cancels-other: set triggers_oco")
+            raise OrderRejected("several exit orders for one entry must cancel each other: choose "
+                                "\"Cancel the others when one fills\" (triggers_oco in the API)")
         return [entry] + children
 
     def _validate_one(self, account: Account, req: dict, linked: Optional[str] = None) -> list:
         """One order, plus its bracket children when take_profit or stop_loss is given."""
         if linked and any(req.get(k) is not None for k in ("legs", "oco", "triggers")):
             raise OrderRejected("a linked order cannot itself be multi-leg or linked")
+        if linked and req.get("lots") is not None:
+            raise OrderRejected(f"tax lots can be chosen on single closing orders only, not on {linked} orders")
         try:
             symbol = str(req.get("symbol", "")).upper().strip()
             side, typ = req.get("side"), req.get("type", m.MARKET)
             tif = req.get("tif", m.DAY)
-            qty = parse_num(req.get("qty"), FIELD_LABELS["qty"])
+            notional = _field(req, "notional")  # crypto only: a dollar amount instead of a quantity
+            qty = (parse_num(req.get("qty"), FIELD_LABELS["qty"]) if req.get("qty") not in (None, "") or notional is None
+                   else None)
             limit, stop = _field(req, "limit_price"), _field(req, "stop_price")
             trail_amt, trail_pct = _field(req, "trail_amount"), _field(req, "trail_percent")
             take_profit, stop_loss = _field(req, "take_profit"), _field(req, "stop_loss")
         except (ValueError, ArithmeticError) as e:
             raise OrderRejected(f"invalid number in order: {e}")
-        _in_range(qty, limit, stop, trail_amt, trail_pct, take_profit, stop_loss)
+        _in_range(qty, notional, limit, stop, trail_amt, trail_pct, take_profit, stop_loss)
         contract = self._check_symbol(account, symbol)
         if side not in (m.BUY, m.SELL):
             raise OrderRejected("side must be buy or sell")
@@ -524,6 +712,12 @@ class Exchange:
             raise OrderRejected(f"unknown order type {typ}")
         if tif not in m.TIFS:
             raise OrderRejected(f"unknown time in force {tif}")
+        crypto = is_crypto(symbol)
+        if crypto:
+            qty = self._crypto_rules(account, req, symbol, side, typ, tif, qty, notional, limit, stop, linked,
+                                     take_profit is not None or stop_loss is not None)
+        elif notional is not None:
+            raise OrderRejected("a dollar amount can only be given for crypto; enter a quantity")
         auction = typ in m.AUCTION_TYPES
         if auction:
             if contract:
@@ -537,20 +731,20 @@ class Exchange:
         if linked and tif in (m.IOC, m.FOK):
             raise OrderRejected(f"{linked} orders cannot be immediate-or-cancel or fill-or-kill")
         expire_at, good_till = self._good_till(req, tif)
-        if qty <= 0 or qty > MAX_QTY:
+        if not crypto and (qty <= 0 or qty > MAX_QTY):
             raise OrderRejected("quantity must be positive and at most 1,000,000")
         if contract and qty != qty.to_integral_value():
             raise OrderRejected("options trade in whole contracts")
-        if qty != qty.quantize(Decimal("0.0001")):
+        if not crypto and qty != qty.quantize(Decimal("0.0001")):
             raise OrderRejected("quantity supports at most 4 decimal places")
-        if qty != qty.to_integral_value() and (typ not in (m.MARKET, m.LIMIT) or tif != m.DAY):
+        if not crypto and qty != qty.to_integral_value() and (typ not in (m.MARKET, m.LIMIT) or tif != m.DAY):
             raise OrderRejected("fractional shares are limited to market and limit day orders")
         for label, v in (("limit price", limit), ("stop price", stop), ("trail amount", trail_amt),
                          ("trail percent", trail_pct), ("take profit", take_profit), ("stop loss", stop_loss)):
             if v is not None and v <= 0:
                 raise OrderRejected(f"{label} must be positive")
         for label, v in (("limit price", limit), ("stop price", stop), ("take profit", take_profit), ("stop loss", stop_loss)):
-            if v is not None and v != v.quantize(CENT if v >= 1 else Decimal("0.0001")):
+            if not crypto and v is not None and v != v.quantize(CENT if v >= 1 else Decimal("0.0001")):
                 raise OrderRejected(f"{label} has too many decimal places")
         if typ in (m.LIMIT, m.STOP_LIMIT, m.LOO, m.LOC) and limit is None:
             raise OrderRejected("limit price is required")
@@ -577,6 +771,10 @@ class Exchange:
                       client_id=client_id, expire_at=expire_at, good_till=good_till,
                       auction_at=self._next_auction(typ) if auction else None)
         orders = [entry]
+        if req.get("lots") is not None:
+            if take_profit is not None or stop_loss is not None:
+                raise OrderRejected("tax lots can be chosen on single closing orders only, not on bracket orders")
+            entry.lots = self.validate_lots(account, symbol, side, qty, req["lots"])
         if take_profit is not None or stop_loss is not None:
             if typ not in (m.MARKET, m.LIMIT) or tif in (m.IOC, m.FOK) or qty != qty.to_integral_value():
                 raise OrderRejected("bracket orders need a whole-share market or limit entry (day, GTC or GTD)")
@@ -599,27 +797,246 @@ class Exchange:
                 c.status = m.HELD
         return orders
 
-    def _estimate_price(self, o: Order) -> Decimal:
+    # ---- tax lots ----------------------------------------------------------
+    def reserved_lots(self, account_id: str, exclude: Optional[str] = None) -> dict:
+        """Lot id -> quantity still to be closed by the account's open orders that named it."""
+        out: dict = {}
+        # Open orders, plus the orders whose fills are being booked right now (see _handle): never the whole
+        # order history, which grows with every order and made each fill slower.
+        orders = self.engine.orders
+        candidates = list(self.engine.active_orders()) + [orders[i] for i in sorted(self._booking) if i in orders]
+        for o in {c.id: c for c in candidates}.values():
+            if o.account_id != account_id or not o.lots or o.id == exclude:
+                continue
+            wants = [(e["lot_id"], D(e["qty"]) - D(e.get("filled", "0"))) for e in o.lots]
+            wants = [(lid, w) for lid, w in wants if w > 0]
+            if not wants:
+                continue
+            if not o.active:
+                # The engine marks an order filled before its fills are booked: within one batch of
+                # events its lots stay reserved for the fills still to come.
+                if o.status != m.FILLED:
+                    continue
+                acct = self.accounts.get(account_id)
+                pending = o.filled_qty - sum((f.qty for f in (acct.fills if acct else ()) if f.order_id == o.id), ZERO)
+                if pending <= 0:
+                    continue
+                capped = []
+                for lid, w in wants:
+                    capped.append((lid, min(w, pending)))
+                    pending -= min(w, pending)
+                wants = capped
+            for lid, w in wants:
+                if w > 0:
+                    out[lid] = out.get(lid, ZERO) + w
+        return out
+
+    def _cancel_broken_lot_orders(self, account: Account, now: float) -> None:
+        """Cancel open orders whose named lots no longer hold what they still need to close.
+
+        Lots named by an order are skipped by other trades while unnamed lots remain, but a larger
+        sale, an assignment or an exercise can still close them. The order is then canceled rather
+        than left to close lots nobody chose (or to open a short position).
+        """
+        mine = [o for o in self.engine.active_orders() if o.account_id == account.id and o.lots]
+        if not mine:
+            return  # nothing names a lot: no need to look at every lot on every fill
+        held = {l.id: abs(l.qty) for ls in account.lots.values() for l in ls}
+        # Several orders can each name part of one lot, so what they still need is counted together:
+        # the oldest orders keep their claim and the newest ones that no longer fit are canceled.
+        claimed: dict = {}
+        for o in sorted(mine, key=lambda o: (o.created_at, o.id)):
+            need: dict = {}
+            for e in o.lots:
+                need[e["lot_id"]] = need.get(e["lot_id"], ZERO) + max(D(e["qty"]) - D(e.get("filled", "0")), ZERO)
+            short = [lid for lid, q in need.items() if q > 0 and claimed.get(lid, ZERO) + q > held.get(lid, ZERO)]
+            if short:
+                self._handle(self.engine.cancel(o.id, now, f"Canceled: lot {', '.join(short)} named by this order "
+                                                           f"was closed by another trade"))
+            else:
+                for lid, q in need.items():
+                    claimed[lid] = claimed.get(lid, ZERO) + q
+
+    def validate_lots(self, account: Account, symbol: str, side: str, qty: Decimal, raw) -> list:
+        """Check a closing order's chosen lots. Returns the plan stored on the order."""
+        if not isinstance(raw, list) or not all(isinstance(e, dict) for e in raw):
+            raise OrderRejected("lots must be a list like [{\"lot_id\": \"L1\", \"qty\": 5}]")
+        if not raw:
+            raise OrderRejected("lots is empty: name at least one lot, or leave lots out to use the account's lot method")
+        if len(raw) > MAX_ORDER_LOTS:
+            raise OrderRejected(f"an order can name at most {MAX_ORDER_LOTS} lots")
+        held = {l.id: l for l in account.lots.get(symbol, ())}
+        reserved = self.reserved_lots(account.id)
+        plan, seen, total = [], set(), ZERO
+        for e in raw:
+            lot_id = str(e.get("lot_id", "")).strip()
+            try:
+                q = parse_num(e.get("qty"))
+            except (ValueError, ArithmeticError):
+                raise OrderRejected(f"lot {lot_id or '(blank)'}: quantity is not a number")
+            if lot_id in seen:
+                raise OrderRejected(f"lot {lot_id} is named twice")
+            seen.add(lot_id)
+            lot = held.get(lot_id)
+            if lot is None:
+                other, _ = account.find_lot(lot_id)
+                raise OrderRejected(f"lot {lot_id or '(blank)'} is not an open lot of {symbol}" +
+                                    (f" (it belongs to {other})" if other else ""))
+            if (lot.qty > 0) == (side == m.BUY):
+                raise OrderRejected(f"lot {lot_id} is a {'long' if lot.qty > 0 else 'short'} lot; "
+                                    f"{'sell' if lot.qty > 0 else 'buy'} to close it")
+            if is_crypto(symbol):  # crypto lots (PR 14) are named in the coin's own quantity step
+                step = self.crypto_spec(symbol).qty_increment
+                if q <= 0 or q > MAX_QTY or not assets.on_step(q, step):
+                    raise OrderRejected(f"lot {lot_id}: quantity must be positive, at most 1,000,000, and a multiple "
+                                        f"of {step.normalize():f}")
+            elif q <= 0 or q > MAX_QTY or q != q.quantize(Decimal("0.0001")):
+                raise OrderRejected(f"lot {lot_id}: quantity must be positive, at most 1,000,000, with at most "
+                                    f"4 decimal places")
+            free = abs(lot.qty) - reserved.get(lot_id, ZERO)
+            if q > free:
+                taken = reserved.get(lot_id, ZERO)
+                raise OrderRejected(f"lot {lot_id} has {tidy_qty(abs(lot.qty))} open" +
+                                    (f", of which {tidy_qty(taken)} is already named by another open order" if taken else "") +
+                                    f"; {tidy_qty(q)} is more than the {tidy_qty(max(free, ZERO))} available")
+            total += q
+            plan.append({"lot_id": lot_id, "qty": str(q), "filled": "0"})
+        if total != qty:
+            raise OrderRejected(f"the chosen lots add up to {tidy_qty(total)}, but the order is for {tidy_qty(qty)}")
+        return plan
+
+    def lot_preview(self, account: Account, o: Order, price: Decimal) -> list:
+        """The lots a closing order would close if it filled now at `price` (estimates)."""
+        if o.legs:
+            return []
+        plan = [dict(e) for e in o.lots] if o.lots else None
+        picks = account.select_lots(o.symbol, o.side, o.qty, price, self.now(), plan,
+                                    self.reserved_lots(account.id, exclude=o.id))
+        lots, mult, out = account.lots.get(o.symbol, []), multiplier(o.symbol), []
+        for idx, take, method, fallback in picks:
+            lot = lots[idx]
+            cost = lot.cost if take == abs(lot.qty) else cents(lot.cost * take / abs(lot.qty))
+            value = cents(take * price * mult)
+            gain = value - cost if lot.qty > 0 else cost - value
+            out.append({"lot_id": lot.id, "qty": take, "opened_at": lot.ts, "open_price": lot.price,
+                        "cost_basis": cost, "estimated_proceeds": value, "estimated_gain": gain,
+                        "term": "long" if is_long_term(lot, self.now()) else "short", "method": method})
+        return out
+
+    def _crypto_rules(self, account: Account, req: dict, symbol: str, side: str, typ: str, tif: str,
+                      qty: Optional[Decimal], notional: Optional[Decimal], limit, stop, linked, bracket: bool) -> Decimal:
+        """Crypto order rules. Returns the quantity (worked out from a dollar amount when one is given)."""
+        if linked or bracket:
+            raise OrderRejected("crypto orders cannot be bracket, one-cancels-other or one-triggers-other orders")
+        if typ in m.AUCTION_TYPES:
+            raise OrderRejected("on-open and on-close orders do not apply to crypto, which trades 24 hours a day")
+        if typ not in CRYPTO_TYPES:
+            raise OrderRejected("crypto orders can be market, limit, stop or stop-limit orders")
+        if typ == m.STOP and side == m.BUY:
+            raise OrderRejected("a crypto stop order to buy needs a limit price (use stop-limit): a market fill above "
+                                "the stop could cost more than your cash")
+        if tif not in CRYPTO_TIFS:
+            raise OrderRejected("crypto orders can be day, good-till-canceled or immediate-or-cancel orders")
+        if req.get("extended_hours"):
+            raise OrderRejected("extended hours do not apply to crypto, which trades 24 hours a day")
+        spec = self.crypto_spec(symbol)
+        for label, v in (("limit price", limit), ("stop price", stop)):
+            if v is not None and v > 0 and not assets.on_step(v, spec.price_increment):
+                raise OrderRejected(f"the {label} for {symbol} must be a multiple of {spec.price_increment.normalize():f}")
+        for label, v in (("limit price", limit), ("stop price", stop)):
+            if v is not None and v <= 0:
+                raise OrderRejected(f"the {label} must be positive")
+        if qty is not None and notional is not None:
+            raise OrderRejected("give a quantity or a dollar amount, not both")
+        if notional is not None:
+            if notional <= 0:
+                raise OrderRejected("the dollar amount must be positive")
+            if notional != notional.quantize(CENT):
+                raise OrderRejected("the dollar amount has more than 2 decimal places")
+            if typ not in (m.MARKET, m.LIMIT):
+                raise OrderRejected("a dollar amount can be given for market and limit orders; enter a quantity for stop orders")
+            q = self.quote(symbol)
+            ref = limit if typ == m.LIMIT and limit is not None else (q.ask if side == m.BUY else q.bid) if q else None
+            if ref is None or ref <= 0:
+                raise OrderRejected(f"no quote available for {symbol}, so the dollar amount cannot be converted")
+            step = spec.qty_increment
+            qty = assets.floor_to(notional / ref, step)
+            if typ == m.MARKET and side == m.BUY:
+                # A market buy walks the book, so size it on the walked price: the spend never exceeds the amount.
+                while qty > 0 and cents(qty * self.engine._walk(q, side, qty)) > notional:
+                    smaller = assets.floor_to(notional / self.engine._walk(q, side, qty), step)
+                    qty = smaller if smaller < qty else qty - step
+        if qty is None or qty <= 0:
+            raise OrderRejected("quantity must be positive")
+        whole = side == m.SELL and qty == account.position(symbol)  # selling all of it is always allowed
+        if not whole and not assets.on_step(qty, spec.qty_increment):
+            raise OrderRejected(f"the quantity of {symbol} must be a multiple of {spec.qty_increment.normalize():f}")
+        if qty < spec.min_order_size and not whole:
+            extra = f" (that amount buys {qty.normalize():f})" if notional is not None else ""
+            raise OrderRejected(f"the minimum order for {symbol} is {spec.min_order_size.normalize():f}{extra}")
+        if side == m.SELL:
+            self._no_crypto_short(account, symbol, qty)
+        return qty
+
+    def _no_crypto_short(self, account: Account, symbol: str, qty: Decimal, ignore: Optional[str] = None) -> None:
+        held = account.position(symbol)
+        selling = sum((o.remaining for o in self.engine.orders.values() if o.account_id == account.id and o.active
+                       and o.symbol == symbol and o.side == m.SELL and o.id != ignore), ZERO)
+        if qty + selling > held:
+            have = f"you hold {held.normalize():f}" if held > 0 else "you hold none"
+            if selling > 0:
+                have += f" and open orders already sell {selling.normalize():f}"
+            raise OrderRejected(f"crypto cannot be sold short: {have}")
+
+    def _estimate_price(self, o: Order, strict: bool = True) -> Decimal:
+        """Price used for the risk check. `strict` (a new order) rejects when there is nothing to price
+        against, naming the cause; for orders already working the best available reference is used."""
         q = self.quote(o.symbol)
-        if q is None or q.ask <= 0:
-            raise OrderRejected(f"no quote available for {o.symbol}")
+        if q is None or q.last <= 0:
+            if not strict:
+                return o.limit_price or o.stop_price or self.mark(o.symbol)
+            raise OrderRejected(self.feed.no_price_reason(o.symbol))
+        if q.stale and strict and o.type == m.MARKET and self.session() == "regular":
+            n = self.feed.quote_note(o.symbol)
+            raise OrderRejected(f"The quote for {describe(o.symbol)} is stale, so a market order has no current price "
+                                f"to fill at. Use a limit order, or wait for a new quote."
+                                + (f" {n['note']}" if n and n.get("note") else ""))
         if o.limit_price is not None:
             if o.side == m.BUY:
                 return o.limit_price
             return max(o.limit_price, q.bid)
-        px = self.engine._walk(q, o.side, o.remaining)
+        top = q.ask if o.side == m.BUY else q.bid
+        if top <= 0 and q.provider_book:  # a simulated or model quote with a zero bid still walks its book
+            if strict and o.type == m.MARKET and self.session() == "regular":
+                raise OrderRejected(self._one_sided_reason(o.symbol, o.side))
+            px = q.last  # a stop is priced at the last trade until it triggers; it waits for a real quote to fill
+        else:
+            px = self.engine._walk(q, o.side, o.remaining)
         if o.stop_price is not None:
             return max(px, o.stop_price) if o.side == m.BUY else min(px, o.stop_price)
         return px
 
-    def _fee(self, symbol: str, qty: Decimal) -> Decimal:
+    def _one_sided_reason(self, symbol: str, side: str) -> str:
+        want = "ask" if side == m.BUY else "bid"
+        verb = "buy" if side == m.BUY else "sell"
+        n = self.feed.quote_note(symbol)
+        tail = f" {n['note']}" if n and n.get("note") else ""
+        return (f"No {want} for {describe(symbol)} right now, so a market {verb} has no price to fill at. "
+                f"Use a limit order, or wait for {'a' if want == 'bid' else 'an'} {want}.{tail}")
+
+    def _fee(self, symbol: str, qty: Decimal, price: Optional[Decimal] = None, account: Optional[Account] = None) -> Decimal:
+        """Commission on a fill. Crypto pays a percentage of the trade value, rounded to the cent."""
+        if is_crypto(symbol):
+            if price is None:
+                raise ValueError("a crypto fee needs the price")
+            return cents(qty * price * self.crypto_fee_rate(account) / 100)
         return cents(qty * (OPTION_FEE if multiplier(symbol) == 100 else STOCK_FEE))
 
     class _Worst:
         def __init__(self, ok, reason, excess, requirement, cash_after):
             self.ok, self.reason, self.excess, self.requirement, self.cash_after = ok, reason, excess, requirement, cash_after
 
-    def _worst_case(self, account: Account, new_orders: list) -> "_Worst":
+    def _worst_case(self, account: Account, new_orders: list, crypto_check: bool = False) -> "_Worst":
         """Check the account under every scenario: all open buys fill, all open sells fill, neither.
 
         One-cancels-other groups count once per symbol. Held bracket and exit children are
@@ -629,10 +1046,17 @@ class Exchange:
         scenario is checked with no multi-leg order filled, with all of them filled and
         with each one filled alone.
 
+        Crypto is never bought with borrowed money: when the request being checked is a crypto
+        purchase (or `crypto_check` is set), a margin account must also keep cash at or above zero
+        once all its open purchases have filled. Other requests are not held to that, so a resting
+        crypto purchase does not change what a stock order may do (the fill-time cap in _handle
+        keeps crypto fills within cash whatever fills first). `buy_cash` on the result is the cash
+        left when every open purchase fills: what a new crypto purchase may spend.
         Cash accounts use `_cash_worst` instead, a reservation that holds for every subset of fills.
         """
         if account.type == "cash":
             return self._cash_worst(account, new_orders)
+        crypto_check = crypto_check or any(is_crypto(o.symbol) and o.side == m.BUY and not o.legs for o in new_orders)
         live = [o for o in self.engine.orders.values() if o.account_id == account.id
                 and (o.status in (m.WORKING, m.PARTIAL) or (o.status == m.HELD and o.role == m.TRIGGERED))]
         live += [o for o in new_orders if o.id not in self.engine.orders]
@@ -641,7 +1065,7 @@ class Exchange:
         by_id = {o.id: o for o in singles}
         combo_sets = [[]] + ([combos] if combos else []) + ([[c] for c in combos] if len(combos) > 1 else [])
         base = account.positions()
-        result = None
+        result, buy_cash = None, None
         for side in (None, m.BUY, m.SELL):
             for combo_set in combo_sets:
                 pos, cash, seen, applied = dict(base), account.cash, {}, set()
@@ -657,8 +1081,11 @@ class Exchange:
                         seen[(o.oco_group, o.symbol)], qty = qty, qty - prior
                     sign = 1 if o.side == m.BUY else -1
                     pos[o.symbol] = pos.get(o.symbol, ZERO) + sign * qty
-                    cash -= self._fee(o.symbol, qty)
-                    cash -= sign * cents(qty * self._estimate_price(o) * multiplier(o.symbol))
+                    strict = o.id not in self.engine.orders  # a new order; working ones never fail here
+                    crypto = is_crypto(o.symbol)
+                    px = self._estimate_price(o, strict) if crypto else None
+                    cash -= self._fee(o.symbol, qty, px, account)
+                    cash -= sign * cents(qty * (px or self._estimate_price(o, strict)) * multiplier(o.symbol))
 
                 for o in singles if side is not None else ():
                     if o.side != side or o.id in applied:
@@ -675,8 +1102,15 @@ class Exchange:
                 pos = {s: q for s, q in pos.items() if q != 0}
                 ev = margin.evaluate(account.type, cash, pos, self._marks(pos))
                 w = Exchange._Worst(ev.ok, ev.reason, ev.excess, ev.requirement, cash)
+                if side == m.BUY and not combo_set:
+                    buy_cash = cash if buy_cash is None else min(buy_cash, cash)
+                if crypto_check and side == m.BUY and cash < 0 and account.type == "margin":
+                    w = Exchange._Worst(False, f"crypto is not bought on margin: this order and your open purchases "
+                                               f"need {_amt(account.cash - cash)} but cash is {_amt(account.cash)}",
+                                        ev.excess, ev.requirement, cash)
                 if result is None or (result.ok and not w.ok) or (w.ok == result.ok and w.excess < result.excess):
                     result = w
+        result.buy_cash = account.cash if buy_cash is None else buy_cash
         return result
 
     def _cash_worst(self, account: Account, new_orders: list, exclude=frozenset()) -> "_Worst":
@@ -732,7 +1166,9 @@ class Exchange:
         def one(symbol, side, qty, px, credit_write=True):
             """(net cash, requirement this order adds, requirement it frees) of trading qty."""
             mult, k = multiplier(symbol), put_cash(symbol)
-            fee = self._fee(symbol, qty)
+            # A crypto fee (PR 14) is a share of the trade value; an unpriced order cannot fill until priced.
+            fee = (self._fee(symbol, qty, px, account) if px is not None else ZERO) if is_crypto(symbol) \
+                else self._fee(symbol, qty)
             if side == m.BUY:
                 freed = min(qty, release_left.get(symbol, ZERO))
                 release_left[symbol] = release_left.get(symbol, ZERO) - freed
@@ -772,15 +1208,20 @@ class Exchange:
                 o = members[0]
                 return one(o.symbol, o.side, o.remaining, price(o)), sold
             # Fills on one take the same quantity off the others, so the group fills at most `cap`. Per
-            # symbol, count that much of its most expensive member there; different symbols are added
-            # up. A write in a group does not offset itself.
+            # symbol, count that much of its most expensive member there. A write in a group does not
+            # offset itself.
             per_symbol: dict = {}
             for o in members:
                 n = min(cap, sum((x.remaining for x in members if x.symbol == o.symbol), ZERO))
                 net, adds, freed = one(o.symbol, o.side, n, price(o), credit_write=False)
                 if o.symbol not in per_symbol or net + freed < sum(per_symbol[o.symbol][::2]):
                     per_symbol[o.symbol] = (net, adds, freed)
-            return tuple(sum((v[i] for v in per_symbol.values()), ZERO) for i in range(3)), sold
+            if len(per_symbol) == 1:
+                return next(iter(per_symbol.values())), sold
+            # Different symbols are added up, but only what each may take: what one member brings in (a
+            # sale's proceeds) is never there when another fills, because filling one cancels the rest.
+            # (Adding the nets let a sale at 8.00 pay for a stop buy that filled at once: cash -163.30.)
+            return (sum((value(*v) for v in per_symbol.values()), ZERO), ZERO, ZERO), sold
 
         def own_cover(deltas, freed=None):
             """A unit that fills as a whole may cover the calls it writes with the shares it buys itself,
@@ -940,7 +1381,8 @@ class Exchange:
         if not self._closes(account, o.symbol, o.side, o.qty, exclude):
             return False
         sign = 1 if o.side == m.BUY else -1
-        paid = sign * cents(o.qty * self._estimate_price(o) * multiplier(o.symbol)) + self._fee(o.symbol, o.qty)
+        px = self._estimate_price(o)
+        paid = sign * cents(o.qty * px * multiplier(o.symbol)) + self._fee(o.symbol, o.qty, px, account)
         return self._not_riskier(account, {o.symbol: sign * o.qty}, -paid, exclude)
 
     def _risk_check(self, account: Account, orders: list) -> "_Worst":
@@ -1009,7 +1451,8 @@ class Exchange:
         price = self._estimate_price(entry)
         mult = multiplier(entry.symbol)
         notional = cents(entry.qty * price * mult)
-        fee = self._fee(entry.symbol, entry.qty)
+        fee = self._fee(entry.symbol, entry.qty, price, a)
+        crypto = is_crypto(entry.symbol)
         before = self.summary(account_id)
         worst = self._risk_check(a, orders)
         closing = worst.closing
@@ -1029,15 +1472,30 @@ class Exchange:
             warnings.append("This order writes (sells to open) option contracts.")
         if entry.type == m.MARKET:
             warnings.append("Market orders fill at the available price, which can differ from the estimate.")
+        q = self.quote(entry.symbol)
+        if q is not None and q.provider_book and entry.type in (m.MARKET, m.STOP, m.TRAILING_STOP) and \
+                (q.ask if entry.side == m.BUY else q.bid) <= 0:
+            want = "ask" if entry.side == m.BUY else "bid"
+            warnings.append(f"There is no {want} for {describe(entry.symbol)} right now; the order cannot fill until "
+                            f"there is one, and the estimate uses the last price.")
+        n = self.feed.quote_note(entry.symbol)
+        if n and n.get("stale") and n.get("note"):
+            warnings.append(n["note"])
         if entry.type in m.AUCTION_TYPES:
-            which = "open" if entry.type in m.OPEN_TYPES else "close"
-            warnings.append(f"This order waits for the next market {which} and trades once, at the {which}ing price."
+            which, word = ("open", "opening") if entry.type in m.OPEN_TYPES else ("close", "closing")
+            warnings.append(f"This order waits for the next market {which} and trades once, at the {word} price."
                             + (" In this session mode the market never closes, so that is the next UTC midnight."
                                if self.session_mode == "always" else ""))
             if entry.limit_price is not None:
-                warnings.append(f"If the {which}ing price is worse than the limit, the order expires unfilled.")
-        elif self.session() != "regular" and not entry.extended_hours:
+                warnings.append(f"If the {word} price is worse than the limit, the order expires unfilled.")
+        elif self.session_for(entry.symbol) != "regular" and not entry.extended_hours:
             warnings.append("The market is closed; the order will wait for the regular session.")
+        if crypto:
+            rate = self.crypto_fee_rate(a).normalize()
+            warnings.append(f"Crypto is fully paid (no margin, no short selling). A fee of {rate:f}% of the trade value "
+                            f"is charged on each fill.")
+            if entry.tif == m.DAY:
+                warnings.append("Crypto trades 24 hours a day, 7 days a week; a day order expires at midnight UTC.")
         if entry.good_till:
             warnings.append(f"This order expires at the close on {entry.good_till} if it has not filled.")
         if len(orders) > 1 and orders[1].parent_id != entry.id:
@@ -1046,10 +1504,13 @@ class Exchange:
             warnings.append("The triggered orders stay on hold until this order fills.")
         return {"ok": ok, "reason": None if ok else rule or self._shortfall(a, worst, entry), "symbol": entry.symbol,
                 "description": describe(entry.symbol), "side": entry.side, "qty": entry.qty,
+                "asset_class": assets.asset_class(entry.symbol),
+                "fee_rate": self.crypto_fee_rate(a) if crypto else None,
                 "estimated_price": price, "estimated_notional": notional, "estimated_fees": fee,
                 "estimated_total": notional + fee if entry.side == m.BUY else notional - fee,
                 "position_before": pos, "position_after": after_pos, "buying_power_before": before["buying_power"],
                 "buying_power_after": bp_after if not closing else None, "closing": closing, "warnings": warnings,
+                "lots": self.lot_preview(a, entry, price),
                 "linked_orders": [{"symbol": o.symbol, "description": describe(o.symbol), "side": o.side, "qty": o.qty,
                                    "type": o.type, "role": o.role} for o in orders[1:]]}
 
@@ -1081,15 +1542,16 @@ class Exchange:
     def _place(self, orders: list) -> None:
         entry = orders[0]
         now = self.now()
-        sess, q = self.session(now), self.quote(entry.symbol)
+        sess, q = self.session_for(entry.symbol, now), self._tradable(self.quote(entry.symbol))  # a stale quote fills nothing
         if entry.legs:
-            events = self.engine.submit_multileg(entry, self._leg_quotes(entry.legs), now, sess)
+            events = self.engine.submit_multileg(entry, self._leg_quotes(entry.legs, tradable=True), now, sess)
         elif len(orders) == 1:
             events = self.engine.submit(entry, q, now, sess)
         elif orders[1].parent_id == entry.id:  # bracket or one-triggers-other
             events = self.engine.submit_linked(entry, orders[1:], q, now, sess, oco=orders[1].oco_group == entry.id)
         else:  # standalone one-cancels-other
-            events = self.engine.submit_oco(orders, {o.symbol: self.quote(o.symbol) for o in orders}, now, sess)
+            events = self.engine.submit_oco(orders, {o.symbol: self._tradable(self.quote(o.symbol)) for o in orders},
+                                            now, sess)
         self._handle(events)
 
     def cancel(self, account_id: str, order_id: str) -> Order:
@@ -1134,8 +1596,23 @@ class Exchange:
             # the group's size is what its orders had when it was entered; fills on one have
             # already been taken off the others, and raising one would let the group over-fill
             raise OrderRejected("the quantity of a one-cancels-other order cannot be raised")
-        if qty is not None and (qty > MAX_QTY or qty != qty.quantize(Decimal("0.0001"))):
+        if is_crypto(o.symbol):
+            spec = self.crypto_spec(o.symbol)
+            rest = None if qty is None else qty - o.filled_qty  # what the changed order still has to fill
+            whole = qty is not None and o.side == m.SELL and rest == a.position(o.symbol)
+            if rest is not None and rest > 0 and not whole and (not assets.on_step(rest, spec.qty_increment)
+                                                                or rest < spec.min_order_size):
+                raise OrderRejected(f"what is left to fill of {o.symbol} must be a multiple of "
+                                    f"{spec.qty_increment.normalize():f} and at least {spec.min_order_size.normalize():f}")
+            for label, v in (("limit price", limit), ("stop price", stop)):
+                if v is not None and not assets.on_step(v, spec.price_increment):
+                    raise OrderRejected(f"the {label} for {o.symbol} must be a multiple of {spec.price_increment.normalize():f}")
+            if qty is not None and o.side == m.SELL and qty > o.qty:
+                self._no_crypto_short(a, o.symbol, qty - o.filled_qty, ignore=o.id)
+        elif qty is not None and (qty > MAX_QTY or qty != qty.quantize(Decimal("0.0001"))):
             raise ValueError("invalid quantity")
+        if qty is not None and qty != o.qty and o.lots:
+            raise OrderRejected("this order closes chosen tax lots; cancel it and enter a new one to change its quantity")
         old = (o.qty, o.limit_price, o.stop_price)
         self._handle(self.engine.replace(order_id, self.now(), qty, limit, stop))
         # Held bracket and exit children are re-sized to what their entry filled when they are
@@ -1193,6 +1670,8 @@ class Exchange:
         legs, underlying, stock_legs = [], None, 0
         for l, ratio in zip(raw, ratios):
             symbol = str(l.get("symbol", "")).upper().strip()
+            if is_crypto(symbol):
+                raise OrderRejected("multi-leg orders are for options and their underlying stock, not crypto")
             contract = self._check_symbol(account, symbol)
             if l.get("side") not in (m.BUY, m.SELL):
                 raise OrderRejected("each leg needs a side: buy or sell")
@@ -1226,7 +1705,9 @@ class Exchange:
                      qty=qty, type=m.MULTILEG, limit_price=limit, tif=tif, legs=legs, expire_at=expire_at,
                      good_till=good_till, client_id=str(req["client_id"])[:64] if req.get("client_id") else None)
 
-    def _leg_quotes(self, legs: list) -> dict:
+    def _leg_quotes(self, legs: list, tradable: bool = False) -> dict:
+        if tradable:  # for matching: a stale leg quote counts as none, so the order waits
+            return {l["symbol"]: self._tradable(self.quote(l["symbol"])) for l in legs}
         return {l["symbol"]: self.quote(l["symbol"]) for l in legs}
 
     @staticmethod
@@ -1392,25 +1873,115 @@ class Exchange:
             if any(c is not None and c.expiry_ts <= now for c in (parse_option(l["symbol"]) for l in o.legs)):
                 self._handle(self.engine.cancel(o.id, now, "option expired", status=m.EXPIRED))
             elif o.symbol in changed:
-                self._handle(self.engine.on_multileg(o.id, self._leg_quotes(o.legs), now, sess))
+                self._handle(self.engine.on_multileg(o.id, self._leg_quotes(o.legs, tradable=True), now, sess))
 
     # ---- event handling ----------------------------------------------------
+    def _names_lots(self, fill) -> Optional[Order]:
+        order = self.engine.orders.get(fill.order_id)
+        return order if order is not None and order.lots and order.symbol == fill.symbol else None
+
+    def _clip_lot_fill(self, acct: Account, order: Order, fill: Fill) -> list:
+        """Limit a lot order's fill to what its named lots still hold. Returns the lots that fell short.
+
+        The engine has already counted the whole fill on the order; the part the named lots cannot
+        cover is taken off again, so the order never closes a lot it did not name or opens a short.
+        """
+        closing_long = fill.side == m.SELL
+        held = {l.id: abs(l.qty) for l in acct.lots.get(fill.symbol, ()) if (l.qty > 0) == closing_long}
+        can, short = ZERO, []
+        for e in order.lots:
+            want = max(D(e["qty"]) - D(e.get("filled", "0")), ZERO)
+            have = held.get(e["lot_id"], ZERO)
+            can += min(want, have)
+            if want > have:
+                short.append(e["lot_id"])
+        if fill.qty <= can:
+            return []
+        order.filled_qty -= fill.qty - can
+        order.status = m.PARTIAL if order.filled_qty > 0 else m.WORKING
+        fill.qty = can
+        return short or [e["lot_id"] for e in order.lots]
+
     def _handle(self, events: list) -> None:
+        outer = self._booking
+        self._booking = outer | {ev[1].order_id for ev in events if ev[0] == "fill" and ev[1].order_id}
+        try:
+            self._handle_batch(events)
+        finally:
+            self._booking = outer
+
+    def _handle_batch(self, events: list) -> None:
+        # Within one batch, fills of orders that name lots are booked first, so a plain order filling
+        # in the same step cannot take lots another order named before that order's fill is booked.
+        first = [ev for ev in events if ev[0] == "fill" and self._names_lots(ev[1]) is not None]
+        if first:
+            ids = {id(ev) for ev in first}
+            events = first + [ev for ev in events if id(ev) not in ids]
         for kind, obj in events:
             if kind == "fill":
                 acct = self.accounts.get(obj.account_id)
                 if acct is None:
                     continue
-                obj.fee = self._fee(obj.symbol, obj.qty)
-                acct.apply_fill(obj, multiplier(obj.symbol))
-                self.lifecycle.on_fill(acct, obj)
+                if is_crypto(obj.symbol) and obj.side == m.BUY and obj.kind == "trade" and not self._cap_crypto_buy(acct, obj):
+                    continue
                 order = self.engine.orders.get(obj.order_id)
-                if order:
-                    order.fees += obj.fee
-                self.events.append({"type": "fill", "account_id": obj.account_id, "fill": obj})
+                lot_order = self._names_lots(obj)
+                cut = self._clip_lot_fill(acct, lot_order, obj) if lot_order is not None else []
+                if obj.qty > 0:
+                    obj.fee = self._fee(obj.symbol, obj.qty, obj.price, acct)
+                    acct.apply_fill(obj, multiplier(obj.symbol), lot_order.lots if lot_order else None,
+                                    self.reserved_lots(acct.id, exclude=obj.order_id))
+                    self.lifecycle.on_fill(acct, obj)
+                    if order:
+                        order.fees += obj.fee
+                    self.events.append({"type": "fill", "account_id": obj.account_id, "fill": obj})
+                if cut:
+                    booked = [f for f in acct.fills if f.order_id == lot_order.id]
+                    q = sum((f.qty for f in booked), ZERO)
+                    lot_order.avg_fill_price = px4(sum((f.price * f.qty for f in booked), ZERO) / q) if q else None
+                    self._handle(self.engine.cancel(lot_order.id, obj.ts, f"Canceled: lot {', '.join(cut)} named by this "
+                                                                          f"order was closed by another trade"))
+                self._cancel_broken_lot_orders(acct, obj.ts)
             else:
                 self.events.append({"type": "order", "account_id": obj.account_id, "order": obj})
             self.dirty = True
+
+    def _affordable(self, acct: Account, symbol: str, price: Decimal) -> Decimal:
+        """The most of a crypto pair cash can pay for at this price, fee included (never a loan)."""
+        step = self.crypto_spec(symbol).qty_increment
+        cash = max(acct.cash, ZERO)
+        if price <= 0:
+            return ZERO
+        q = assets.floor_to(cash / (price * (1 + self.crypto_fee_rate(acct) / 100)), step)
+        while q > 0 and cents(q * price) + self._fee(symbol, q, price, acct) > cash:
+            q -= step
+        return max(q, ZERO)
+
+    def _cap_crypto_buy(self, acct: Account, fill: Fill) -> bool:
+        """Fill-time guard: a crypto purchase never takes cash below zero, whatever happened since entry.
+
+        A fill larger than the cash affords is cut to what it affords and the rest of the order is canceled.
+        Returns False when nothing at all can be bought (the fill is dropped).
+        """
+        can = self._affordable(acct, fill.symbol, fill.price)
+        if fill.qty <= can:
+            return True
+        order = self.engine.orders.get(fill.order_id)
+        cut = fill.qty - can
+        fill.qty = can
+        if order is not None:
+            order.filled_qty -= cut
+            notional = sum((f.qty * f.price for f in acct.fills if f.order_id == order.id), ZERO) + can * fill.price
+            order.avg_fill_price = (notional / order.filled_qty).quantize(Decimal("1e-9")).normalize() if order.filled_qty else None
+            if order.avg_fill_price is not None and order.avg_fill_price.as_tuple().exponent > 0:
+                order.avg_fill_price = order.avg_fill_price.quantize(Decimal(1))
+            order.status = m.PARTIAL if order.filled_qty > 0 else m.WORKING
+            reason = (f"canceled: the price moved to {fill.price.normalize():f} and cash ({_amt(acct.cash)}) pays for "
+                      f"{'only ' + format(can.normalize(), 'f') if can > 0 else 'none'} of the remaining "
+                      f"{(can + cut).normalize():f} including the fee; crypto is never bought with borrowed money")
+            self.engine.cancel(order.id, fill.ts, reason)
+            self.events.append({"type": "order", "account_id": order.account_id, "order": order})
+        return can > 0
 
     # ---- the heartbeat -----------------------------------------------------
     def tick(self) -> list:
@@ -1426,13 +1997,13 @@ class Exchange:
         self._orders_after_feed(quotes, now, sess)
         active_symbols = {o.symbol for o in self.engine.orders.values() if o.status in (m.WORKING, m.PARTIAL)}
         for q in quotes:
-            if q.symbol in active_symbols:
-                self._handle(self.engine.on_quote(q, now, sess))
+            if q.symbol in active_symbols and not q.stale:  # never fill against a stale quote
+                self._handle(self.engine.on_quote(q, now, "regular" if is_crypto(q.symbol) else sess))
         changed = {q.symbol for q in quotes}
         for sym in sorted(active_symbols):  # a set's order changes with the hash seed; fills must not
             c = parse_option(sym)
-            if c and c.underlying in changed and c.expiry_ts > now:
-                self._handle(self.engine.on_quote(self.quote(sym), now, sess))
+            if c and c.underlying in changed and c.expiry_ts > now and (oq := self._tradable(self.quote(sym))):
+                self._handle(self.engine.on_quote(oq, now, sess))
         self._process_expirations(now, prev_tick)
         self._settle_day_start(now)
         self.lifecycle.after_step(now)  # margin calls and liquidation
@@ -1462,11 +2033,17 @@ class Exchange:
                 self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None))
             self.dirty = True
         self._last_day = day
+        utc_day = int(now // 86400)  # crypto day orders end at the UTC day roll, whatever the stock session does
+        if self.session_mode != "always" and self._last_utc_day is not None and utc_day != self._last_utc_day:
+            self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None and is_crypto(o.symbol)))
+        self._last_utc_day = utc_day
         if self.session_mode != "always" and self._last_session is not None and sess != self._last_session:
             if self._last_session == "regular":
-                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and not o.extended_hours and o.parent_id is None))
+                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and not o.extended_hours and o.parent_id is None
+                                                and not is_crypto(o.symbol)))
             if sess == "closed":
-                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None))
+                self._handle(self.engine.expire(now, lambda o: o.tif == m.DAY and o.parent_id is None
+                                                and not is_crypto(o.symbol)))
         self._last_session = sess
 
     # ---- the first tick after a start or a pause ------------------------------------------------
@@ -1658,10 +2235,11 @@ class Exchange:
                 def book(symbol, side, q, price, kind):
                     f = Fill(id=f"X{next(self._expiry_seq):08d}", order_id=None, account_id=a.id, symbol=symbol,
                              side=side, qty=q, price=price, ts=now, kind=kind)
-                    a.apply_fill(f, multiplier(symbol))
+                    a.apply_fill(f, multiplier(symbol), reserved=self.reserved_lots(a.id))
                     a.ledger.transactions[-1].memo += f" (settlement: {note})"
                     self.lifecycle.on_fill(a, f)  # exercise and assignment proceeds settle T+1
                     self.events.append({"type": "fill", "account_id": a.id, "fill": f})
+                    self._cancel_broken_lot_orders(a, now)
 
                 if itm >= CENT:
                     kind = "exercise" if long else "assignment"
@@ -1791,111 +2369,95 @@ class Exchange:
         return out
 
     # ---- persistence -----------------------------------------------------------
+    # app/storage does the file work (format, segments, recovery, backups): docs/STATE_FORMAT.md.
     def _path(self, name: str) -> str:
         return os.path.join(self.data_dir, name)
 
+    @property
+    def store(self):
+        """The StateStore of this exchange's data directory (None without one)."""
+        if not self.data_dir:
+            return None
+        st = getattr(self, "_store", None)
+        if st is None or st.dir != self.data_dir:
+            from .storage.store import StateStore
+            st = self._store = StateStore(self.data_dir)
+        return st
+
     @staticmethod
     def _write(path: str, data: dict) -> None:
-        Exchange._write_text(path, json.dumps(data))
+        from .storage.fsutil import atomic_write_bytes
+        atomic_write_bytes(path, json.dumps(data).encode("utf-8"))
 
     @staticmethod
     def _read_text(path: str) -> str:
-        """The whole file, opened, read and closed in one step.
+        """The whole file in one open-read-close (with the Windows retry of storage.fsutil.read_bytes)."""
+        from .storage.fsutil import read_bytes
+        return read_bytes(path).decode("utf-8")
 
-        On Windows, opening a file raises PermissionError while it is being replaced (our own save
-        thread) or held open by another program (a virus scanner, a backup tool), so retry briefly
-        there; elsewhere PermissionError is a real permission problem and is raised at once.
-        """
-        attempts = 10 if os.name == "nt" else 1
-        for attempt in range(attempts):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    return f.read()
-            except PermissionError:
-                if attempt == attempts - 1:
-                    raise
-                _time.sleep(0.02 * (attempt + 1))
-        raise AssertionError("unreachable")
+    def document_head(self) -> dict:
+        """Everything in the state document except the accounts and orders."""
+        return {"watchlists": self.watchlists, "alerts": self.alerting.to_plain(),
+                "notifications": self.alerting.notices.to_plain(), "seq": self._peek_sequences(),
+                "lifecycle": self.lifecycle.to_plain()}
 
-    @staticmethod
-    def _write_text(path: str, text: str) -> None:
-        # The temp file is created in the target directory, so the replace never crosses volumes.
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            # On Windows os.replace raises PermissionError while another process (a virus scanner, an
-            # editor, a backup tool) briefly holds the target open, so retry for a short while.
-            for attempt in range(10):
-                try:
-                    os.replace(tmp, path)
-                    return
-                except PermissionError:
-                    if attempt == 9:
-                        raise
-                    _time.sleep(0.05 * (attempt + 1))
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+    def to_document(self) -> dict:
+        """The complete state as one self-contained document (backups, archives, migrations)."""
+        from .storage.schema import CURRENT_VERSION
+        return {"version": CURRENT_VERSION, "accounts": [a.to_plain() for a in self.accounts.values()],
+                "orders": [to_plain(o) for o in self.engine.orders.values()], **self.document_head()}
 
-    def save_plan(self, force: bool = False) -> list:
-        """What save() would write now, already serialised: [(file name, JSON text, sequence number)].
-
-        Call it while holding the exchange lock (it reads all state and resets `dirty`), then hand the
-        result to write_plan() after releasing the lock, so no disk I/O happens under it.
-        """
-        if not self.data_dir:
-            return []
-        files = []
+    def save_plan(self, force: bool = False):
+        """Serialise what needs saving (pure: no file I/O). Call under the exchange lock; hand the result to
+        self.store.write() outside it. None when there is nothing to save or saving must wait."""
+        st = self.store
+        if st is None or st.should_wait(force):
+            return None
+        state = None
+        accounts = orders = head = None
         if self.dirty or force:
             # Cleared before the state is gathered (a change made meanwhile marks it dirty again) and set
             # back if the write fails, so a failed write is retried on the next save.
             self.dirty = False
-            try:
-                files.append(("state.json", json.dumps({
-                    "version": 1,
-                    "accounts": [a.to_plain() for a in self.accounts.values()],
-                    "orders": [to_plain(o) for o in self.engine.orders.values()],
-                    "watchlists": self.watchlists, "alerts": self.alerting.to_plain(),
-                    "notifications": self.alerting.notices.to_plain(),
-                    "seq": self._peek_sequences(), "lifecycle": self.lifecycle.to_plain()})))
-            except BaseException:
-                self.dirty = True
-                raise
+            accounts, orders, head = list(self.accounts.values()), list(self.engine.orders.values()), self.document_head()
+        market = None
         now = self.now()
         if force or now - self._last_market_save >= 60:
             self._last_market_save = now
-            snap = self.feed.snapshot()
-            if snap:
-                files.append(("market.json", json.dumps(snap)))
-        self._snapshot_seq += 1
-        return [(name, text, self._snapshot_seq) for name, text in files]
+            market = self.feed.snapshot() or None
+        if accounts is None and market is None:
+            return None
+        from . import __version__ as app_version
+        if accounts is None:  # only the market is due
+            from .storage.store import SavePlan, encode
+            plan = SavePlan(0, market=encode(market))
+            with st._meta:
+                st._seq += 1
+                plan.seq = st._seq
+            return plan
+        return st.plan(accounts, orders, head, market, app_version)
 
-    def write_plan(self, files: list) -> None:
-        """Write the result of save_plan() to disk. Needs no exchange lock; an older snapshot never
-        replaces a newer one, whichever thread gets here first."""
-        if not files:
-            return
-        try:
-            os.makedirs(self.data_dir, exist_ok=True)
-            with self._io_lock:
-                for name, text, seq in files:
-                    if seq > self._written.get(name, 0):
-                        self._write_text(self._path(name), text)
-                        self._written[name] = seq
-        except BaseException:
-            self.dirty = True  # not on disk: the next save tries again
-            if any(name == "market.json" for name, _, _ in files):
-                self._last_market_save = 0.0  # ... and the market snapshot too, not a minute later
-            raise
+    def write_plan(self, plan) -> bool:
+        """Write a plan from save_plan(). On failure the state stays marked as changed, so it is saved again."""
+        if plan is None:
+            return True
+        ok = self.store.write(plan)
+        if not ok:
+            self.dirty = True
+            if plan.market is not None:
+                self._last_market_save = float("-inf")
+        return ok
 
-    def save(self, force: bool = False) -> None:
-        self.write_plan(self.save_plan(force))
+    def save(self, force: bool = False) -> bool:
+        st = self.store
+        if st is None:
+            return True
+        if st.blocked:
+            return False  # recovery: the files on disk must not be overwritten
+        if st.should_wait(force):
+            return st.error is None  # waiting out the back-off after a failed save
+        os.makedirs(self.data_dir, exist_ok=True)
+        return self.write_plan(self.save_plan(force))
 
     @staticmethod
     def _drop_unpriced_samples(a: Account) -> int:
@@ -1941,23 +2503,14 @@ class Exchange:
             out[key] = n
         return out
 
-    def load(self) -> bool:
-        if not self.data_dir:
-            return False
-        try:
-            self.feed.restore(json.loads(self._read_text(self._path("market.json"))))
-        except (OSError, ValueError):
-            pass
-        try:
-            data = json.loads(self._read_text(self._path("state.json")))
-        except (OSError, ValueError):
-            return False
-        # Parse everything first: a file that turns out to be unusable changes nothing.
+    def apply_document(self, data: dict) -> None:
+        """Replace the whole state with a validated, current-version document. Builds the accounts and orders
+        first, so a document that fails there leaves the exchange as it was."""
         accounts = {a["id"]: Account.from_plain(a) for a in data["accounts"]}
-        orders = [from_plain(Order, o) for o in data["orders"]]
-        seq = {k: int(data["seq"][k]) for k in ("order", "account", "alert", "fill", "expiry")}
         for a in accounts.values():
             self._drop_unpriced_samples(a)
+        seq = data["seq"]
+        orders = [from_plain(Order, o) for o in data["orders"]]
         self.accounts = accounts
         self.engine.restore(orders, seq["fill"])
         self.watchlists = data.get("watchlists", {})
@@ -1965,4 +2518,30 @@ class Exchange:
         self._order_seq, self._acct_seq = count(seq["order"]), count(seq["account"])
         self._alert_seq, self._expiry_seq = count(seq["alert"]), count(seq["expiry"])
         self.lifecycle.restore(data.get("lifecycle"))
+
+    def load(self) -> bool:
+        """Load the saved state. False when there is none, or when it is damaged or from a newer version:
+        then self.store.recovery says what happened, and nothing is saved until it is resolved."""
+        st = self.store
+        if st is None:
+            return False
+        res = st.load()
+        self.load_result = res
+        if res.market is not None:
+            self.feed.restore(res.market)
+        if res.market_problem:
+            st.warnings.append(res.market_problem)
+        if res.status != "ok":
+            return False
+        try:
+            self.apply_document(res.doc)
+        except (KeyError, TypeError, ValueError, ArithmeticError, AttributeError, IndexError) as e:
+            st._damaged(f"state.json could not be loaded ({type(e).__name__}: {e})", None, "")
+            self.accounts, self.engine.orders = {}, {}
+            return False
+        st.adopt(self.accounts.values())
+        from .storage.schema import account_problems
+        for a in self.accounts.values():
+            for p in account_problems(a):
+                st.warnings.append(p)
         return True

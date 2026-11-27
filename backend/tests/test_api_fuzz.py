@@ -110,12 +110,35 @@ def baselines(aid, oid, jid, calls):
         ("DELETE", "/api/alert-rules/ALID"): None,
         ("POST", "/api/notifications/read"): {"account_id": aid, "ids": ["n1"], "read": True},
         ("DELETE", "/api/notifications"): None,
+        # data and backups (routes_data.py); this exchange has no data folder, so most answer 409
+        ("POST", "/api/data/backups"): None,
+        ("DELETE", "/api/data/backups/BKNAME"): None,
+        ("POST", "/api/data/restore/preview"): {"backup": "paperdesk-manual-20261124T000000Z.zip"},
+        ("POST", "/api/data/restore/apply"): {"token": "t"},
+        ("POST", "/api/data/accounts/import/preview"): {"format": "paperdesk-account", "format_version": 1},
+        ("POST", "/api/data/accounts/import/apply"): {"token": "t", "name": "n"},
+        ("POST", "/api/data/recovery/restore"): {"backup": "paperdesk-manual-20261124T000000Z.zip"},
+        ("POST", "/api/data/recovery/fresh"): None,
+        ("POST", "/api/data/recovery/quit"): None,
+        # discovery (routes_discovery.py, PR 20)
+        ("POST", "/api/watchlist-sets"): {"name": "Fuzz", "symbols": ["NVLX"], "layout": {}},
+        ("PATCH", "/api/watchlist-sets/Fuzz"): {"name": "Fuzz", "symbols": ["NVLX"], "columns": ["last"]},
+        ("POST", "/api/watchlist-sets/Fuzz/duplicate"): {"name": "Fuzz copy"},
+        ("DELETE", "/api/watchlist-sets/Fuzz"): None,
+        ("PUT", "/api/watchlist-order"): ["Main"],
+        ("POST", "/api/watchlist-sets/Fuzz/symbols"): {"symbols": ["NVLX"], "at": "end"},
+        ("POST", "/api/search/recent"): {"symbol": "NVLX"},
+        ("POST", "/api/screener/run"): {"filters": [{"field": "last", "min": 1}], "sort": "symbol", "desc": False, "limit": 10},
+        ("POST", "/api/screens"): {"name": "S", "filters": [], "sort": None, "desc": True, "columns": []},
+        ("PUT", "/api/screens/SCID"): {"name": "S", "filters": [], "sort": None, "desc": True, "columns": []},
+        ("DELETE", "/api/screens/SCID"): None,
     }
 
 
 def _template(path, aid, oid, jid):
     return path.replace(aid, "{aid}").replace(oid, "{oid}").replace(jid, "{jid}").replace("/Fuzz", "/{name}") \
-        .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym}")
+        .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym:path}") \
+        .replace("/backups/BKNAME", "/backups/{name}").replace("/screens/SCID", "/screens/{sid}")
 
 
 def variants(body):

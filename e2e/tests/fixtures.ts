@@ -20,12 +20,42 @@ type Fixtures = {
   open: (account?: Account, symbol?: string) => Promise<void>;
 };
 
+// Browser messages that are not errors in the app. WebKit logs one at error level for the viewport meta key
+// interactive-widget, which index.html sets on purpose for Chrome and Firefox on Android (the layout shrinks
+// when the on-screen keyboard opens) and which Safari ignores.
+export const BENIGN = [/^Viewport argument key "interactive-widget" not recognized and ignored\.$/];
+
+/**
+ * A refused request (HTTP 4xx) is expected in some tests. Chromium and WebKit log each one as a failed resource
+ * load at error level; Firefox logs nothing for it. Check the engine's own count and drop those entries.
+ */
+export function expectRefusals(page: Page, problems: string[], status: number, n: number) {
+  const found = problems.filter((p) => new RegExp(`Failed to load resource: .*\\b${status}\\b`).test(p));
+  const engine = page.context().browser()?.browserType().name();
+  expect(found, `refused requests (HTTP ${status}) logged by ${engine}`).toHaveLength(engine === "firefox" ? 0 : n);
+  for (const f of found) problems.splice(problems.indexOf(f), 1);
+}
+
+/**
+ * Navigation in every test waits for the document (DOMContentLoaded), not the load event, and then for the real UI
+ * the test checks. Firefox sometimes never fires load for a page whose script has run and whose WebSocket is open
+ * (about once per CI run, in a different test each time), which hung page.goto for the whole test timeout.
+ * Applied to the page fixture; a page made in another context goes through navDefaults too.
+ */
+export function navDefaults(p: Page): Page {
+  const goto = p.goto.bind(p), reload = p.reload.bind(p);
+  p.goto = (url, options) => goto(url, { waitUntil: "domcontentloaded", ...options });
+  p.reload = (options) => reload({ waitUntil: "domcontentloaded", ...options });
+  return p;
+}
+
 // Every test fails if the page logs a console error or throws. A fresh account is created for each
 // test, so tests do not depend on each other's orders or positions.
 export const test = base.extend<Fixtures>({
+  page: async ({ page }, use) => { await use(navDefaults(page)); },
   problems: [async ({ page }, use) => {
     const problems: string[] = [];
-    page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()}`); });
+    page.on("console", (m) => { if (m.type() === "error" && !BENIGN.some((b) => b.test(m.text()))) problems.push(`console: ${m.text()}`); });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     await use(problems);
     expect(problems, "console errors or page errors").toEqual([]);
@@ -33,10 +63,18 @@ export const test = base.extend<Fixtures>({
   account: async ({ request }, use) => { await use(await createAccount(request)); },
   open: async ({ page, account }, use) => {
     await use(async (acc = account, symbol = "MKTX") => {
-      await page.addInitScript(([a, s]) => {
+      await page.addInitScript(([a, s, token]) => {
         localStorage.setItem("pd.account", a);
         localStorage.setItem("pd.symbol", s);
-      }, [acc.id, symbol]);
+        // The first-run welcome card has its own test (ux.spec.ts); it is dismissed for every other test.
+        if (localStorage.getItem("pd.welcomed") === null) localStorage.setItem("pd.welcomed", "1");
+        // The phone layout remembers its last view; each open() starts on the Chart view, as documented, while a
+        // reload later in the test keeps what the test chose (only the first load after this open() clears it).
+        if (sessionStorage.getItem("e2e.opened") !== token) {
+          localStorage.removeItem("pd.screen");
+          sessionStorage.setItem("e2e.opened", token);
+        }
+      }, [acc.id, symbol, `${Date.now()}-${Math.random()}`]);
       await page.goto("/");
       // The phone layout keeps the account picker in its menu, so check the account on the root element there.
       if ((page.viewportSize()?.width ?? 1440) < 900) await expect(page.locator(".m-shell")).toHaveAttribute("data-account", acc.id);
@@ -55,6 +93,15 @@ export async function review(page: Page, shares: string) {
   const t = ticket(page);
   await t.getByLabel("Shares").fill(shares);
   await t.getByRole("button", { name: /^Review/ }).click();
+}
+
+// Exiting a replay asks for confirmation first (Confirm.tsx).
+export async function confirmDialog(page: Page, button: string | RegExp, tap = false) {
+  const dlg = page.getByRole("alertdialog");
+  await expect(dlg).toBeVisible();
+  const b = dlg.getByRole("button", { name: button });
+  if (tap) await b.tap(); else await b.click();
+  await expect(dlg).toHaveCount(0);
 }
 
 export async function place(page: Page) {

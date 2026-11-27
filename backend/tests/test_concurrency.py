@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.api import locking as api_locking
 from app.api.server import create_app
 from app.core.clock import SimClock
+from app.storage.fsutil import read_bytes
 from app.core.locking import Busy, StateLock, held
 from app.exchange import Exchange
 from app.marketdata.replay.control import ReplayController
@@ -138,8 +139,8 @@ def test_a_waiter_that_gives_up_does_not_block_the_queue():
 # Routes that do not run under the lock, each for a stated reason. A new route is locked by default;
 # adding one here is a decision to review (see docs/CONCURRENCY.md, "Adding a route").
 UNLOCKED_READS = {
-    "/api/symbols", "/api/quotes", "/api/bars/{symbol}", "/api/depth/{symbol}", "/api/trades/{symbol}",
-    "/api/fundamentals/{symbol}", "/api/movers", "/api/screener", "/api/options/expirations/{symbol}",
+    "/api/symbols", "/api/quotes", "/api/bars/{symbol:path}", "/api/depth/{symbol:path}", "/api/trades/{symbol:path}",
+    "/api/fundamentals/{symbol:path}", "/api/movers", "/api/screener", "/api/options/expirations/{symbol}",
     "/api/options/chain/{symbol}",  # market data: the feed only, and a live feed asks the provider
     "/api/accounts/{aid}/analytics", "/api/accounts/{aid}/statements/{month}",
     "/api/accounts/{aid}/statements/{month}/html",  # fetch price history, then read the account under ctx.locked()
@@ -150,14 +151,29 @@ UNLOCKED_READS = {
     "/api/research/corporate-actions/{symbol}", "/api/research/fundamentals/{symbol}",
     "/api/research/news", "/api/research/economic-calendar", "/api/research/earnings-calendar",
     "/api/research/statements/{symbol}",
-    "/api/chartstate", "/api/chartstate/drawings/{sym}",  # chart settings: their own file and lock, no exchange state
+    "/api/chartstate", "/api/chartstate/drawings/{sym:path}",  # chart settings: their own file and lock, no exchange state
+    # backups (PR 19): file I/O must not run under the lock; they take ctx.locked() only to serialise
+    "/api/data/status", "/api/data/backups", "/api/data/backups/{name}", "/api/data/export",
+    "/api/data/accounts/{aid}/export", "/api/data/recovery",
+    # discovery (PR 20): may ask the provider, or reads its own file; exchange state under a short ctx.locked()
+    "/api/watchlist-sets/{name}/rows", "/api/search", "/api/search/recent", "/api/screener/fields", "/api/screens",
+    "/api/markets/overview", "/api/compare",
 }
 SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_every_changing_route_answers_busy...
     ("POST", "/api/replay/start"), ("POST", "/api/replay/step"), ("POST", "/api/replay/seek"), ("POST", "/api/replay/exit"),
+    # backups and restore: serialise or replace state under ctx.locked() in DataService, write files outside it.
+    # Proven by test_data_routes_answer_busy_and_never_block_the_event_loop_while_the_lock_is_stuck.
+    ("POST", "/api/accounts/{aid}/reset"), ("DELETE", "/api/accounts/{aid}"),  # backup outside the lock, then the action
+    ("POST", "/api/data/backups"), ("DELETE", "/api/data/backups/{name}"), ("POST", "/api/data/restore/preview"),
+    ("POST", "/api/data/restore/apply"), ("POST", "/api/data/accounts/import/preview"),
+    ("POST", "/api/data/accounts/import/apply"), ("POST", "/api/data/recovery/restore"),
+    ("POST", "/api/data/recovery/fresh"), ("POST", "/api/data/recovery/quit"),
 }
 NO_EXCHANGE_STATE = {  # the session store and the chart-state file have their own locks
     ("POST", "/api/auth/login"), ("POST", "/api/auth/logout"),
-    ("PUT", "/api/chartstate/settings"), ("PUT", "/api/chartstate/drawings/{sym}"), ("DELETE", "/api/chartstate"),
+    ("POST", "/api/search/recent"), ("POST", "/api/screener/run"), ("POST", "/api/screens"),  # discovery's own store
+    ("PUT", "/api/screens/{sid}"), ("DELETE", "/api/screens/{sid}"),
+    ("PUT", "/api/chartstate/settings"), ("PUT", "/api/chartstate/drawings/{sym:path}"), ("DELETE", "/api/chartstate"),
 }
 
 
@@ -190,8 +206,8 @@ def test_every_api_route_runs_under_the_lock_unless_listed_here():
 
 def fill_path(path: str, aid: str) -> str:
     for name, value in (("{aid}", aid), ("{symbol}", "MKTX"), ("{oid}", "O00000001"), ("{month}", "2026-11"),
-                        ("{kind}", "fills"), ("{jid}", "J1"), ("{alert_id}", "AL00001"), ("{name}", "Main"),
-                        ("{sym}", "MKTX")):
+                        ("{kind}", "fills"), ("{jid}", "J1"), ("{alert_id}", "AL00001"), ("{name}", "Main"), ("{sid}", "S1"),
+                        ("{sym:path}", "MKTX"), ("{symbol:path}", "MKTX"), ("{sym}", "MKTX")):
         path = path.replace(name, value)
     assert "{" not in path, f"give fill_path a value for {path}"
     return path
@@ -213,10 +229,13 @@ def test_every_changing_route_answers_busy_while_the_lock_is_stuck(monkeypatch, 
                 continue
             url = fill_path(path, sandbox)
             body = {"session": SESSION.split(".")[0], "offset": 600, "seconds": 5}
-            r = c.request(method, url, json=[] if path.startswith("/api/watchlists") else body,
+            r = c.request(method, url, json=[] if path.startswith(("/api/watchlists", "/api/watchlist-order")) else body,
                           params={"account_id": sandbox})
             if path == "/api/replay/start":  # refused before it needs the lock; checked without a replay below
                 assert r.status_code == 409
+                continue
+            if path.startswith("/api/data/"):  # refused during a replay; checked without one in the data test
+                assert r.status_code in (404, 409, 503), f"{method} {path} answered {r.status_code}"
                 continue
             assert r.status_code == 503 and r.json()["busy"] is True and r.headers["retry-after"] == "1", \
                 f"{method} {path} answered {r.status_code} {r.text[:200]} while the lock was held"
@@ -327,6 +346,9 @@ def test_no_route_asks_the_data_provider_while_holding_the_lock():
     ex = Exchange(feed, SimClock(ts(t)), session_mode="us")
     aid = ex.create_account("Margin", "margin").id
     feed.apply_snapshots(json.loads(raw("alpaca/stock_snapshots.json"), parse_float=D))
+    # The saved snapshot's quote is from 2022, which counts as stale (market orders are refused): a fresh one
+    feed._on_stream([{"T": "q", "S": "AAPL", "bp": D("172.60"), "bs": 1, "ap": D("172.70"), "as": 1, "t": t},
+                     {"T": "t", "S": "AAPL", "p": D("172.65"), "s": 100, "t": t}])
     ex.tick()
     app = create_app(ex, run_loop=False)
     c = TestClient(app, raise_server_exceptions=False)
@@ -344,9 +366,25 @@ def test_no_route_asks_the_data_provider_while_holding_the_lock():
     assert c.post(f"/api/accounts/{aid}/orders/preview", json={"symbol": "AAPL", "side": "buy", "qty": 1}).status_code == 200
     assert asked >= 6, "the routes that fetch from the provider were not exercised"
     assert under_lock == []
+    # An option order with the provider's contract list not cached (or over an hour old): the list is fetched
+    # before the lock is taken, never inside the order routes (release review finding 2).
+    listing = feed.option_listing("AAPL")
+    expiry = sorted(listing)[0]
+    contract = build("AAPL", expiry, "C", sorted(listing[expiry])[len(listing[expiry]) // 2])
+    for path in ("orders/preview", "orders"):
+        feed._exp_cache.clear()
+        n = len(tr.requests)
+        r = c.post(f"/api/accounts/{aid}/{path}", json={"symbol": contract, "side": "buy", "qty": 1, "type": "limit",
+                                                       "limit_price": "0.05", "tif": "day"})
+        assert r.status_code == 200, r.text
+        assert any(q["path"] == "/v2/options/contracts" for q in tr.requests[n:]), "the listing was not fetched at all"
+    assert under_lock == []
     # The poller thread learns what to fetch through the lock, and gets the last list while the lock is busy.
     ctx = app.state.ctx
     assert feed.interest_source == ctx.live_interest and "AAPL" in feed.wanted()
+    # Discovery (PR 20) streams only lists shown recently while any is shown; the route sweep above showed
+    # "Main", so forget that here: this test is about the lock, not about which lists are streamed.
+    app.state.discovery["shown"].clear()
     with Holder(ctx.lock):
         ex.watchlists["Later"] = ["MSFT"]
         t0 = time.monotonic()
@@ -564,8 +602,8 @@ def test_a_fault_while_building_the_broadcast_does_not_cost_the_snapshot(tmp_pat
         assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
 
         def saved():
-            with open(path, encoding="utf-8") as f:
-                return len(json.load(f)["orders"])
+            # The save thread replaces the file; on Windows a plain open() during that raises PermissionError.
+            return len(json.loads(read_bytes(path))["orders"])
         assert wait_for(lambda: os.path.exists(path) and saved() == 1), "the order never reached state.json"
         assert ctx.metrics["errors"] > 0
 
@@ -581,7 +619,7 @@ def test_a_bad_account_from_a_websocket_client_breaks_nothing(tmp_path):
         assert wait_for(lambda: len(ctx.clients) == 2 and aid in [v["account"] for v in ctx.clients.values()])
         assert None in [v["account"] for v in ctx.clients.values()]
         assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": "MKTX", "side": "buy", "qty": 1}).status_code == 200
-        assert wait_for(lambda: os.path.exists(path) and len(json.load(open(path, encoding="utf-8"))["orders"]) == 1)
+        assert wait_for(lambda: os.path.exists(path) and len(json.loads(read_bytes(path))["orders"]) == 1)
         for _ in range(50):
             msg = good.receive_json()
             if msg.get("positions"):
@@ -614,34 +652,39 @@ def test_a_turn_that_fails_after_the_replay_advanced_does_not_run_the_replay_fas
 
 
 def test_snapshot_is_taken_in_memory_and_an_older_one_never_overwrites_a_newer_one(tmp_path):
+    # Merged with PR 19: a plan is a storage.store.SavePlan (state document + segment lines), not file texts.
     ex, feed, clock = make_exchange(str(tmp_path))
     a = ex.create_account("t", "margin", D("100000"))
     first = ex.save_plan(force=True)
     assert not os.path.exists(tmp_path / "state.json"), "save_plan() must not touch the disk"
-    assert [name for name, _, _ in first] == ["state.json"] and not ex.dirty
-    # the snapshot is text: later changes to live state cannot leak into it
+    assert first.state is not None and not ex.dirty
+    # the snapshot is bytes: later changes to live state cannot leak into it
     ex.submit(a.id, {"symbol": "ABC", "side": "buy", "qty": 10})
-    assert json.loads(first[0][1])["orders"] == [] and ex.dirty
+    written = first.state + b"".join(line for seg in first.segments for line in seg.lines)
+    assert b"ABC" not in written
+    assert ex.dirty
     second = ex.save_plan()
-    ex.write_plan(second)
-    ex.write_plan(first)  # a slow writer arriving late
-    saved = json.loads((tmp_path / "state.json").read_text())
-    assert len(saved["orders"]) == 1 and len(saved["accounts"][0]["fills"]) == 1
-    assert ex.save_plan() == []  # nothing changed, nothing to write
-    ex.save(force=True)
-    assert json.loads((tmp_path / "state.json").read_text()) == saved
+    assert ex.write_plan(second)
+    assert ex.write_plan(first)  # a slow writer arriving late: skipped
+    back = Exchange(feed, clock, data_dir=str(tmp_path))
+    assert back.load()
+    assert len(back.engine.orders) == 1 and len(back.accounts[a.id].fills) == 1
+    assert ex.save_plan() is None  # nothing changed, nothing to write
+    assert ex.save(force=True)
+    again = Exchange(feed, clock, data_dir=str(tmp_path))
+    assert again.load() and again.to_document()["orders"] == back.to_document()["orders"]
 
 
 def test_a_failed_write_leaves_the_exchange_dirty_so_the_next_save_retries(tmp_path, monkeypatch):
+    from app.storage import fsutil
     ex, feed, clock = make_exchange(str(tmp_path))
     ex.create_account("t", "margin", D("100000"))
     files = ex.save_plan()
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(lambda path, text: (_ for _ in ()).throw(OSError("disk full"))))
-    with pytest.raises(OSError):
-        ex.write_plan(files)
-    assert ex.dirty
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", lambda path, data: (_ for _ in ()).throw(OSError("disk full")))
+    assert ex.write_plan(files) is False  # PR 19: a failed write answers False and shows in the save status
+    assert ex.dirty and ex.store.status()["saving_failed"]
     monkeypatch.undo()
-    ex.save()
+    assert ex.save(force=True)
     assert json.loads((tmp_path / "state.json").read_text())["accounts"]
 
 
@@ -650,12 +693,12 @@ def test_load_changes_nothing_when_the_file_is_unusable(tmp_path):
     a = ex.create_account("t", "margin", D("100000"))
     ex.save(force=True)
     data = json.loads((tmp_path / "state.json").read_text())
-    del data["seq"]["expiry"]
+    data["accounts"][0]["starting_cash"] = "lots"  # PR 19 migrates a missing counter; this cannot be repaired
     (tmp_path / "state.json").write_text(json.dumps(data))
     ex2, _, _ = make_exchange(str(tmp_path))
     keep = ex2.create_account("mine", "cash", D("5"))
-    with pytest.raises(KeyError):
-        ex2.load()
+    assert ex2.load() is False  # PR 19: a damaged file puts the store in recovery instead of raising
+    assert ex2.store.blocked
     assert list(ex2.accounts) == [keep.id] and a.id == keep.id  # still the account it had, not half of the file
 
 
@@ -696,11 +739,11 @@ def test_a_multi_leg_submit_that_fails_on_its_second_leg_leaves_nothing_behind()
     before = book(ex, a)
     apply_fill, n = a.apply_fill, []
 
-    def second_leg_fails(fill, mult):
+    def second_leg_fails(fill, mult, *args, **kw):  # PR 13 passes the named and reserved lots too
         n.append(fill)
         if len(n) == 2:
             raise RuntimeError("fault while booking the second leg")
-        return apply_fill(fill, mult)
+        return apply_fill(fill, mult, *args, **kw)
 
     a.apply_fill = second_leg_fails
     with pytest.raises(RuntimeError):
@@ -799,23 +842,23 @@ def test_a_rolled_back_request_keeps_a_failed_write_mark():
 
 
 def test_a_failed_market_snapshot_write_is_retried_on_the_next_turn(tmp_path, monkeypatch):
+    from app.storage import fsutil
     ex = Exchange(SyntheticFeed(seed=3, now=T0), SimClock(T0), data_dir=str(tmp_path))
     ex.create_account("t", "margin", D("1000"))
     ex.tick()
     plan = ex.save_plan(force=True)
-    assert "market.json" in [name for name, _, _ in plan]
-    real = Exchange._write_text
+    assert plan.market is not None
+    real = fsutil.atomic_write_bytes
 
-    def full(path, text):
+    def full(path, data):
         raise OSError("disk full")
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(full))
-    with pytest.raises(OSError):
-        ex.write_plan(plan)
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(real))
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", full)
+    assert ex.write_plan(plan) is False
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", real)
     assert ex.dirty
-    again = ex.save_plan()  # no simulated time has passed
-    assert {name for name, _, _ in again} == {"state.json", "market.json"}
-    ex.write_plan(again)
+    again = ex.save_plan(force=True)  # no simulated time has passed; forced past the back-off of the failed save
+    assert again.state is not None and again.market is not None
+    assert ex.write_plan(again)
     assert os.path.exists(os.path.join(str(tmp_path), "market.json"))
 
 
@@ -895,7 +938,17 @@ def test_a_long_seek_holds_the_lock_only_in_short_slices(tmp_path, monkeypatch):
     assert rp.guard is ctx.lock
     tick = rp.ex.tick
     rp.ex.tick = lambda: (time.sleep(0.0001), tick())[1]  # a market slow enough that the seek takes a while
-    ctx.lock.longest = (0.0, None)
+    # Every hold is recorded with its holder. The bound applies to the seek's own slices ("replay command"): a CI
+    # runner that stalls during one of the requests below (seen on macOS: an order held the lock 0.61 s) says
+    # nothing about the seek; the requests must still all succeed while it runs.
+    holds = []
+    real_release = type(ctx.lock).release
+
+    def release(lock):
+        if lock is ctx.lock and lock._depth == 1 and lock.owned():
+            holds.append((time.monotonic() - lock.since, lock.label))
+        real_release(lock)
+    monkeypatch.setattr(type(ctx.lock), "release", release)
     t, out = in_thread(lambda: c.post("/api/replay/seek", json={"offset": 3600}))
     served = 0
     while t.is_alive():  # other requests are answered while the seek runs
@@ -905,7 +958,9 @@ def test_a_long_seek_holds_the_lock_only_in_short_slices(tmp_path, monkeypatch):
     t.join(30)
     assert out["value"].status_code == 200 and rp.now() == rp.start + 3600
     assert served >= 3, "the seek shut every other request out"
-    assert ctx.lock.longest[0] < 0.5, ctx.lock.longest
+    seek = [h for h, label in holds if label == "replay command"]
+    assert len(seek) > 1, "the seek ran in one piece"
+    assert max(seek) < 0.5, (max(seek), sorted(holds, reverse=True)[:3])
     assert problems(ctx.ex) == []
 
 

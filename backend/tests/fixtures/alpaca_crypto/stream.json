@@ -1,0 +1,8 @@
+{"trade": {"T":"t","S":"AVAX/USD","p":47.299,"s":29.205707815,"t":"2024-03-12T10:27:48.858228144Z","i":3447222699101865076,"tks":"S"},
+ "quote": {"T":"q","S":"BAT/USD","bp":0.35718,"bs":13445.46,"ap":0.3581,"as":13561.902,"t":"2024-03-12T10:29:43.111588173Z"},
+ "bar": {"T":"b","S":"BTC/USD","o":71856.1435,"h":71856.1435,"l":71856.1435,"c":71856.1435,"v":0,"t":"2024-03-12T10:37:00Z","n":0,"vw":0},
+ "orderbook": {"T":"o","S":"MKR/USD","t":"2024-03-12T10:39:39.445492807Z","b":[],"a":[{"p":2614.587,"s":12.5308}]},
+ "connected": [{"T":"success","msg":"connected"}],
+ "authenticated": [{"T":"success","msg":"authenticated"}],
+ "subscription": [{"T":"subscription","trades":[],"quotes":[],"orderbooks":[],"bars":[],"updatedBars":[],"dailyBars":[]}],
+ "error_406": [{"T":"error","code":406,"msg":"connection limit exceeded"}]}

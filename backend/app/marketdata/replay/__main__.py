@@ -3,6 +3,7 @@
     python -m app.marketdata.replay record --date 2026-03-13 --seed 11 --out my.pdsession.gz
     python -m app.marketdata.replay record --realtime 600 --out live.pdsession.gz
     python -m app.marketdata.replay build --bars minutes.csv --daily daily.csv --out day.pdsession.gz
+    python -m app.marketdata.replay fetch --date 2026-03-13 --symbols SPY,AAPL --out day   (real data, Alpaca keys)
     python -m app.marketdata.replay inspect my.pdsession.gz
     python -m app.marketdata.replay samples
 """
@@ -66,6 +67,45 @@ def cmd_build(a) -> int:
     return 0
 
 
+def alpaca_rest_from_env(environ=None):
+    """An AlpacaREST from APCA_API_KEY_ID / APCA_API_SECRET_KEY (environment or .env). Never prints the keys."""
+    import os
+    from ..alpaca import PAPER_TRADING_URL, AlpacaREST
+    from ..config import load_dotenv, project_root
+    environ = os.environ if environ is None else environ
+    load_dotenv(project_root() / ".env", environ)
+    key, secret = environ.get("APCA_API_KEY_ID", "").strip(), environ.get("APCA_API_SECRET_KEY", "").strip()
+    if not key or not secret:
+        return None
+    return AlpacaREST(key, secret, trading_url=environ.get("APCA_API_BASE_URL", PAPER_TRADING_URL).strip().rstrip("/"))
+
+
+def cmd_fetch(a, rest=None) -> int:
+    from ..http import ProviderError
+    from .provider import build_from_provider
+    rest = rest or alpaca_rest_from_env()
+    if rest is None:
+        print("APCA_API_KEY_ID and APCA_API_SECRET_KEY are not set (environment or .env); see docs/DATA_PROVIDERS.md.",
+              file=sys.stderr)
+        return 1
+    try:
+        day = date.fromisoformat(a.date)
+    except ValueError:
+        print("--date must look like 2026-03-13", file=sys.stderr)
+        return 1
+    try:
+        stats = build_from_provider(rest, day, a.symbols.split(","), _out(a.out), feed=a.feed, label=a.label or "",
+                                    spread_bps=a.spread_bps)
+    except (ProviderError, ValueError) as e:
+        print(f"Could not build the session: {getattr(e, 'message', e)}", file=sys.stderr)
+        return 1
+    feeds = ", ".join(f"{s} {f.upper()}" for s, f in sorted(stats["feeds"].items()))
+    print(f"Wrote {stats['events']} events for {stats['symbols']} symbols ({stats['date']}, {feeds}) to {stats['path']}")
+    if stats["skipped"]:
+        print(f"No bars that day for: {', '.join(stats['skipped'])}")
+    return 0
+
+
 def cmd_inspect(a) -> int:
     try:
         s = read_session(a.path)
@@ -118,13 +158,22 @@ def main(argv=None) -> int:
     b.add_argument("--source", default="bars")
     b.add_argument("--simulated", action="store_true", help="mark the data as simulated")
     b.add_argument("--spread-bps", type=float, default=2.0)
+    f = sub.add_parser("fetch", help="build a session for a past day from Alpaca's historical 1-minute bars")
+    f.add_argument("--date", required=True, help="trading date, e.g. 2026-03-13")
+    f.add_argument("--symbols", required=True, help="comma-separated symbols, e.g. SPY,AAPL")
+    f.add_argument("--out", required=True)
+    f.add_argument("--feed", default="sip", choices=["sip", "iex"],
+                   help="sip (all exchanges; free for past days) or iex; sip falls back to iex if refused")
+    f.add_argument("--label")
+    f.add_argument("--spread-bps", type=float, default=2.0)
     i = sub.add_parser("inspect", help="summarise a session file")
     i.add_argument("path")
     sub.add_parser("samples", help="regenerate the bundled sample sessions")
     a = p.parse_args(argv)
     if a.cmd == "record" and not a.date and not a.realtime:
         p.error("record needs --date (simulate a whole day) or --realtime SECONDS")
-    return {"record": cmd_record, "build": cmd_build, "inspect": cmd_inspect, "samples": cmd_samples}[a.cmd](a)
+    return {"record": cmd_record, "build": cmd_build, "fetch": cmd_fetch, "inspect": cmd_inspect,
+            "samples": cmd_samples}[a.cmd](a)
 
 
 if __name__ == "__main__":

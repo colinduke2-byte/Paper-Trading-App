@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
+from ..core.assets import base_currency
 from ..core.money import D, parse as parse_num
 from ..marketdata.feed import TIMEFRAMES
 from ..options.symbology import describe as describe_symbol, parse as parse_option
@@ -310,7 +311,8 @@ def describe(al: dict) -> str:
     if k == "volume":
         if p.get("mode") == "average":
             return f"{sym} volume today reaches {_fmt(al['value'])} times its 30-day average"
-        return f"{sym} volume today reaches {_fmt(al['value'], 0)} shares"
+        unit = base_currency(al["symbol"] or "") or "shares"  # a crypto pair counts coins
+        return f"{sym} volume today reaches {_fmt(al['value'], 0)} {unit}"
     if k == "indicator":
         tf = TF_LABEL.get(p.get("tf"), p.get("tf"))
         ind = p.get("indicator")

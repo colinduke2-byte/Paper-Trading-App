@@ -42,9 +42,9 @@ snapshots, not the websocket, because Alpaca's option stream only speaks msgpack
 | Options on Basic | "Indicative Pricing Feed", 200 option quote subscriptions. The indicative feed is "a free indicative feed where trades are delayed and quotes are modified". | about-market-data-api; [optionchain](https://docs.alpaca.markets/us/reference/optionchain.md) |
 | Option stream format | msgpack only (error 412 otherwise), no `*` wildcard for quotes | [real-time-option-data](https://docs.alpaca.markets/us/docs/real-time-option-data.md) |
 | Option chain endpoint | `GET /v1beta1/options/snapshots/{underlying}`: latest quote, latest trade, greeks and implied volatility per contract; filters for expiry and strike; up to 1000 per page | optionchain |
-| Listed contracts and open interest | `GET /v2/options/contracts` on the trading host (read-only) | [get-options-contracts](https://docs.alpaca.markets/us/reference/get-options-contracts.md) |
+| Listed contracts and open interest | `GET /v2/options/contracts` on the trading host (read-only). Only active contracts by default; `expiration_date_lte` defaults to the next weekend, so PaperDesk always sends it; `limit` up to 10000 per page. Each contract has `root_symbol`, `size` (shares delivered) and `multiplier`; adjusted (non-standard) contracts have another root or size. | [get-options-contracts](https://docs.alpaca.markets/us/reference/get-options-contracts.md) (updated 2026-05-27) |
 | News | `GET /v1beta1/news?symbols=` | [news-3](https://docs.alpaca.markets/us/reference/news-3.md) |
-| Corporate actions | `GET /v1/corporate-actions`: dividends, splits, spin-offs, mergers, name changes and more. Whether Basic restricts it is not stated (**UNVERIFIED**, assumed free). | [corporateactions-1](https://docs.alpaca.markets/us/reference/corporateactions-1.md) |
+| Corporate actions | `GET /v1/corporate-actions`: dividends, splits, spin-offs, mergers, name changes and more. Whether Basic restricts it is not stated (**UNVERIFIED**, assumed free). `start`/`end` are described as the interval of actions "sorted by their `process_date`" (default today); `limit` 1 to 1000 (default 100) counts records, not symbols; `data_quality=complete` (default) hides incomplete records not yet processed; the page warns that Alpaca "has no guarantees on the creation time of corporate actions" and records may appear late. Each record kind has a documented example (saved verbatim as a fixture). | [corporateactions-1](https://docs.alpaca.markets/us/reference/corporateactions-1.md) (updated 2026-05-27) |
 | Calendars | Market calendar and clock only. No earnings calendar. | llms.txt index |
 | Fundamentals | None | llms.txt index |
 | Symbol list | `GET /v2/assets` on the trading host | [get-v2-assets-1](https://docs.alpaca.markets/us/reference/get-v2-assets-1.md) |
@@ -98,7 +98,9 @@ Source: [finnhub.io/docs/api](https://finnhub.io/docs/api) (the endpoint data em
 6. Restart PaperDesk. The banner should read "real-time IEX prices via Alpaca".
 7. Optional check from `backend/`: `.venv/bin/python -m app.marketdata.alpaca --check` (on Windows
    `.venv\Scripts\python -m app.marketdata.alpaca --check`). It prints one PASS or FAIL line each
-   for the symbol list, a quote, daily bars, an option chain and the stream. It never prints keys.
+   for the symbol list, a quote, daily bars, an option chain, the option contract listing, a
+   corporate actions query, a snapshot of a thinly traded symbol, building a small replay session
+   and the stream. It never prints keys. See "First run with real keys" below.
 
 If you reset the paper account in Alpaca's dashboard, generate new keys and update `.env`.
 Only one program can use the stream for each key. If another tool is connected, PaperDesk
@@ -130,6 +132,7 @@ shows "connection limit exceeded" and falls back to polling.
 | `PAPERDESK_ALPACA_FEED` | `iex` | `iex` (free, real time), `sip` (paid), `delayed_sip` (15 minutes late; free availability UNVERIFIED). |
 | `PAPERDESK_ALPACA_OPTIONS_FEED` | `indicative` | `indicative` (free) or `opra` (paid). |
 | `PAPERDESK_ALPACA_RPM` | `190` | REST request budget per minute (the free plan allows 200). |
+| `PAPERDESK_ALPACA_CRYPTO_LOC` | `us` | Crypto data location: `us` (Alpaca US), `us-1` (Kraken US) or `eu-1` (Kraken EU). |
 | `FINNHUB_API_KEY` | — | Optional. Earnings calendar and fundamentals. |
 | `PAPERDESK_SESSIONS` | `us` with Alpaca, `always` with synthetic | `us` follows real market hours. |
 | `PAPERDESK_DATA` | `./data` | With Alpaca, state goes to the `alpaca` subfolder, so accounts holding fictional symbols never mix with real ones. |
@@ -156,29 +159,210 @@ falls back to synthetic, with the cause shown.
 - **Staleness.** `/api/status` sets `stale: true` during market hours when the stream has been
   silent for 2 minutes, or when it is down and REST has not succeeded for 90 seconds. The banner
   then says prices may be stale.
-- **Quotes with a missing side.** IEX often has no bid or no ask outside regular hours. A missing
-  side is filled from the last trade, so a price is never zero. A crossed quote is clamped to a
-  zero spread. During regular hours this can let a market order on a thinly traded symbol fill at
-  the last trade price.
+- **Quote age.** Every quote carries `stale` (in `Quote`, `/api/quotes`, the websocket ticks and
+  position rows). It is worked out each time the quote is read. While a session is open it counts
+  from the last time Alpaca **confirmed** the quote: a snapshot that returned the symbol (even with
+  the same quote) or a stream message for it. A quiet IEX symbol whose standing quote every poll
+  confirms stays tradeable, however long ago it last changed. It is stale when not confirmed for
+  more than **120 seconds** in the regular session, or **15 minutes** before the open or after the
+  close (4:00 to 9:30 and 16:00 to 20:00 New York time), or when the provider's own quote or trade
+  time is from before the session started (4:00 for pre-market, the regular open otherwise). While
+  the market is closed it is stale when it is from before the open of the latest session. A stale quote is never traded against: a new market order during the
+  regular session is refused with the cause, other orders are accepted but rest, the tick does not
+  match resting orders against it, a model option price from a stale underlying is stale too, and
+  margin call liquidation does not use it. It still values positions (better than no value):
+  the account summary lists such symbols in `stale_prices`, and `prices_unavailable` stays for
+  symbols with no price at all. The simulated feed never sets `stale`.
+- **Missing prices** (IEX is one exchange, so a book is often one-sided or empty). The rules are
+  deliberate and conservative:
+  - A missing (or crossed) side is filled from the last trade **only while that trade is at most 60
+    seconds old**. So a market order on a thin symbol can fill at a trade price from the last minute,
+    never at an old one. After 60 seconds the side is shown empty (0) again.
+  - With an empty side, a new market order during the regular session is rejected with the cause
+    ("No ask for X right now, so a market buy has no price to fill at. Use a limit order, or wait
+    for an ask."). Outside the session it is accepted and waits. A resting market or triggered stop
+    order never fills against an empty side: it waits (enforced in the matching engine for quotes
+    marked `provider_book`, which only the Alpaca adapter sets). Limit orders rest as usual. The
+    simulated feed and option-model quotes are not affected: a model option with a 0.00 bid still
+    fills a market sell by walking its modelled book, as before.
+  - Marks (position value, margin) use the last trade; before any trade the quote midpoint; with no
+    two-sided quote either, the previous close. Such prices carry `stale: true` and a `note` in
+    `/api/quotes`, and positions carry `price_note`, so a price from an earlier session is labelled.
+  - `prices_unavailable` (margin checks paused) engages only when there is no price at all: no trade,
+    quote or previous close for a stock, and for an option neither a provider quote nor an
+    underlying price for the model. An option quote with no bid or ask is marked at its last trade.
+  - Unknown symbols are rejected as unknown; a listed symbol with no data yet says "No quote has
+    arrived from Alpaca for X yet. It may be halted, not trading on IEX yet today, or the first
+    request is still in progress."
+  - An option that expires while its underlying has no price waits (exercise is not guessed from
+    a zero price) and is settled on the first tick with a price; an event says so.
 - **Rate limiting.** A token bucket shared by all threads (190 per minute by default). On 429
   it blocks until `X-RateLimit-Reset`. A web request waits at most 5 to 10 seconds, then shows
   cached data or an error. 5xx responses and network errors are retried twice with backoff.
 - **Charts.** Every UI timeframe maps to Alpaca bars: 1m→`1Min`, 5m→`5Min`, 15m→`15Min`,
   1h→`1Hour`, 1d→`1Day`, 1w→`1Week`. Bars are fetched newest first with `sort=desc` and cached for
   30 seconds (1m) up to 1 hour (1w). Intraday bars use IEX. Daily and weekly bars use
-  split-adjusted consolidated (SIP) history ending 16 minutes ago, which is free and has full
-  volume. If that is refused, they use IEX.
-- **Options.** Expiries come from `/v2/options/contracts`, which also gives open interest. The
-  chain comes from the option-chain snapshot within ±30% of spot. A contract the provider does
-  not quote is priced by the model and marked `source: "model"`. The chain shows "Alpaca
-  indicative option feed …" in place of "model prices". Option orders fill against the provider
-  quote when it is less than 15 minutes old, and against the model otherwise. Contracts you hold or
-  have orders on are polled every 5 seconds.
+  consolidated (SIP) history ending 16 minutes ago, which is free and has full volume. If that is
+  refused, they use IEX. Every timeframe is requested split-adjusted (`adjustment=split`), so a
+  chart that spans a split has no jump.
+- **Options.** The listed contracts come from `/v2/options/contracts` (active, the next 800 days,
+  cached for an hour; a failed refresh keeps the last list). Only standard contracts are used: root
+  equal to the underlying, 100 shares, multiplier 100; adjusted contracts are left out because the
+  simulator only knows 100-share deliverables. That listing, not the model calendar, drives order
+  validation (single orders and every multi-leg leg), the expirations route, and the chain's
+  strikes: an expiry the provider lists is tradable even when it is not a Friday, and an expiry or
+  strike it does not list is rejected ("expiry is not listed: Alpaca lists no SPY options expiring
+  …", "strike is not listed: …"). The chain shows every listed strike within ±30% of spot; legs the
+  option-chain snapshot quotes are marked with the feed, the rest `source: "model"`. If no option
+  quote arrives at all, the chain is still built on the listed strikes, labelled "model prices on
+  the strikes Alpaca lists … not market data". Option orders fill against the provider quote when it
+  is less than 15 minutes old, and against the model otherwise. Contracts you hold or have orders on
+  are polled every 5 seconds. Expiry and exercise use the contract's own date (from its OCC symbol,
+  which is the provider's expiration date) and that day's real close (early closes included).
+  A held contract the provider no longer lists (expired, delisted, or adjusted after a split) can
+  still be closed; it is valued by the option model and its position row says so (`price_source:
+  "model"`, `price_note`). If the listing cannot be loaded at all, the model calendar applies.
+- **Corporate actions** (dividends and splits applied to accounts). See the section below.
 - **Symbol list.** Active, tradable US equities except OTC, cached for a day in
   `alpaca_assets.json` in the data folder. Alpaca has no ETF flag, so names containing "ETF" are
-  shown as funds.
+  shown as funds. `/api/symbols` returns at most `limit` rows (default 50, at most 500): with an
+  empty query, the watchlist, held and open-order symbols first, then the rest alphabetically; with a
+  query, every symbol is searched (exact symbol, then prefix, then contains, then company name).
+  `/api/symbols/lookup?symbols=A,B` returns the ones the active feed knows. The UI uses it at start
+  and on a live/replay switch, so a browser that last showed a fictional symbol (remembered in
+  localStorage) moves to the first watchlist symbol before anything is requested for it.
 - **Never trades.** The HTTP layer implements only GET. No order endpoint exists in the code, and a
   test checks for that.
+
+## Crypto
+
+Alpaca's crypto market data (USD pairs, 24/7) is added to the stock feed by `AlpacaCryptoFeed`. The
+verified facts, how it works and what has not been tested against the live service are in
+[CRYPTO.md](CRYPTO.md#alpaca-crypto-data).
+
+## Corporate actions applied to accounts
+
+The lifecycle package (`backend/app/lifecycle/`) pays dividends and applies splits. With Alpaca
+these come from `/v1/corporate-actions` (code: `backend/app/marketdata/alpaca_actions.py`).
+
+- **Which symbols.** Only stocks the accounts hold (directly or as the underlying of an option)
+  or have open orders in, 50 per request, through the same rate limiter as everything else.
+- **When.** Fetched on the poller thread, never on the tick: once per New York day per symbol
+  (and at once for a symbol that starts being held), over the earliest date the lifecycle asked
+  for (at least 10 days back) to 120 days ahead. Because the documentation describes `start`/`end`
+  by process date (a dividend's process date is its pay date), the query runs from a week before to
+  120 days after, and records are matched on ex-date.
+- **Waiting, not skipping.** At each New York midnight the lifecycle asks for the new day. If that
+  day's data has not been fetched on that date yet (for example the request is in flight or Alpaca
+  answers 5xx or 429), the day roll stops before the day: no interest accrual, settlement, dividend
+  or split for it is done, so nothing happens twice, and it is retried on the next tick. The wait
+  lasts at most an hour (`ACTIONS_WAIT`): after that the day starts without the missing data, with
+  a notice ("Corporate action data for … did not arrive within 60 minutes …"), and while the outage
+  lasts later days do not wait again. Actions that arrive afterwards are applied as late records
+  (below). Failed requests are retried after 30 s, 60 s, 2, 5 and then every 15 minutes. `/api/status` shows
+  `day_roll_waiting` and `corporate_actions` (state, message); the event stream says why it waits.
+  An error that retrying will not fix (HTTP 400, 401, 403, 404, 422, for example a plan without
+  corporate actions) is reported once ("Corporate actions are not available …") and the days roll
+  on without them; it is retried hourly.
+- **What is applied.** Cash dividends (ex-date, pay date; a missing or earlier pay date becomes the
+  ex-date; a special dividend counts separately from a regular one) and capital gains distributions
+  (long + short term rate, paid as a cash dividend). Forward and reverse splits with their ratio
+  (decimal rates become an exact ratio, 1.5 for 1 is 3-for-2). Dividends in a currency other than
+  USD, and every other kind (stock dividends, spin-offs, mergers, name changes, redemptions, unit
+  splits, worthless removals, rights, partial calls, reorganisations) are **not** applied: they are
+  shown as a "corporate action" notice on the affected position (`notices` in the position row,
+  with the reason) and in the account log. The position is left as it is.
+- **Late records.** Alpaca warns that records can appear after the fact. A dividend or split found
+  up to 10 days after its ex-date (never before the day the accounts started) is applied on the
+  next day roll and logged as late, only to the accounts that held the symbol (or options on it) at
+  the start of its ex-date. The lifecycle keeps a snapshot of every account's positions at the start
+  of each day for 12 days (`held` in `state.json`). A late split adjusts only the lots opened before
+  that snapshot (lots bought later were traded at post-split prices); a late dividend is owed on the
+  quantity held then. A late action no account held over its ex-date is logged ("… so it is not
+  applied") and never reconsidered; the live quote is not rescaled for it.
+- **Exactly once.** Every action has the id `alpaca:<Alpaca id>` and a revision key (symbol, kind,
+  ex-date, regular or special). Both are saved with the accounts (`state.json`). A record seen
+  again, re-issued under a new id, or amended after it was applied (different rate or ratio) is
+  never applied a second time; an amendment is logged ("The data provider changed the … The
+  original terms were kept"). Whether Alpaca keeps the id when it amends a record is **UNVERIFIED**;
+  the revision key covers both cases.
+- **Prices after a split.** Bars are requested split-adjusted, so the cached bars are dropped and
+  fetched again. The current quote, the stored state and recent prints are scaled by old/new at the
+  split so nothing shows the old price until the next update. The previous close: whether Alpaca's
+  snapshot adjusts the previous daily bar on the ex-date is **UNVERIFIED**, so when a split took
+  effect after that bar, PaperDesk keeps whichever of the raw or the adjusted value is closer to
+  today's trades or quote (a split ratio is far from 1, so they are easy to tell apart); before any
+  trade or quote from today, the previous close already held on the adjusted basis is the
+  reference. Only a value a snapshot just supplied is a candidate, so a previous close is never
+  scaled twice. Option
+  listings and option quotes on the old strikes are dropped and reloaded. The feed remembers the
+  splits it has reflected in `market.json`, so a restart neither repeats nor forgets them.
+
+### Margin checks around corporate actions
+
+A real split changes the price before or without the positions changing (if the day roll waits, or
+Alpaca publishes the split late). So, per account:
+- While a held symbol has a split Alpaca has published (ex-date in the last 10 days, after the
+  accounts started) that is not applied to the account yet, and will be (the account held the
+  symbol at the start of the ex-date, or the ex-date has not started yet), no margin call is
+  started, cleared or enforced. The summary's
+  `margin_paused` says why, and an event is sent once.
+- While the start of a day waits for corporate action data (at most an hour), margin calls go on
+  but liquidation waits.
+- For 5 days after an action PaperDesk cannot apply (merger, spin-off, ...) on a held symbol,
+  margin calls are still shown but liquidation does not run ("Margin call liquidation paused: …"),
+  because the price change may not be a real loss.
+
+### Closing price for a date
+
+`feed.closing_price(symbol, day)` returns `ClosePrice(ready, price, note)` (in `marketdata/feed.py`).
+On Alpaca it is the unadjusted daily bar close (SIP, IEX if refused), fetched by the poller thread
+through the shared rate limiter once the day's close is 16 minutes past, and cached for good. It
+never blocks: until the answer is in it returns `ready=False`; `ready=True, price=None` means there is
+no bar for that day. Option expiry settlement (`Exchange._settlement_price`) uses it and waits for
+it at most `PROVIDER_CLOSE_WAIT` (30 minutes) before settling at an approximate price, with a notice.
+Feeds without the method (the simulated and replay feeds) settle from their stored daily bars.
+
+## Practising on real past days
+
+`python -m app.marketdata.replay fetch --date 2026-03-13 --symbols SPY,AAPL --out real-day` (from
+`backend/`, with the Alpaca keys in `.env`) builds a replay session from Alpaca's historical 1-minute
+bars for that day's regular session, and saves `real-day.pdsession.gz`. Put it in
+`<PAPERDESK_DATA>/sessions/` to see it in the Replay list.
+
+- Bars come from the consolidated feed (`--feed sip`, the default; free for past days because the
+  end is more than 15 minutes old). If SIP is refused, IEX bars are used and the session says so.
+- Prices are as traded that day (`adjustment=raw`). The 260 earlier daily bars for the chart are
+  fetched split-adjusted and rescaled to that day's basis, so a later split shows no jump.
+- The session header says exactly what it is: `simulated: false`, `source` "Alpaca historical
+  1-minute bars, SIP feed; prices as traded on …", `built_from: "1-minute bars"`, and a
+  description of the approximation (four prints per bar and quotes one spread wide, from
+  docs/REPLAY.md): it is not tick data, so fills inside a minute are approximate.
+
+## First run with real keys: checklist
+
+Nothing here has run against Alpaca with a real key. Please do this once and send back the output
+if anything says FAIL or looks wrong.
+
+1. Put `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` in `.env` (see "Sign-up and setup" above).
+2. From `backend/` run `.venv/bin/python -m app.marketdata.alpaca --check` (on Windows
+   `.venv\Scripts\python -m app.marketdata.alpaca --check`). Best during market hours, and once
+   outside them. Optional: `--thin=SYMBOL` picks the thinly traded symbol (default IEP).
+3. Expect one line each: `assets`, `quote`, `bars`, `option chain`, `option contracts`,
+   `corporate actions`, `thin symbol snapshot`, `replay session from bars`, `stream`. The output
+   never contains your keys (they are also masked in error text), so the whole output can be sent.
+4. Start PaperDesk with `./run.sh`. Check the banner says "real-time IEX prices via Alpaca", buy a
+   few shares of SPY, open the SPY option chain, and look at `/api/status` (the `stream`,
+   `corporate_actions` and `day_roll_waiting` fields).
+5. After the first New York midnight with positions open, check `/api/status` again:
+   `day_roll_waiting` should be `null` within a minute or so, and `corporate_actions.state` `ok`.
+6. Build one replay day: `.venv/bin/python -m app.marketdata.replay fetch --date <a recent trading
+   day> --symbols SPY --out check-day`, then `.venv/bin/python -m app.marketdata.replay inspect
+   check-day.pdsession.gz`.
+
+If something fails, send: the complete `--check` output; the `/api/status` JSON; the last lines
+the server printed (they never include keys); for the replay step, the command and its output; and
+whether the market was open at the time.
 
 ## Research data shapes
 
@@ -216,13 +400,19 @@ author, created_at, symbols, image, provider}`.
 
 ## Tests and fixtures
 
+`backend/tests/test_provider_actions.py` covers corporate actions through the adapter end to end
+(dividend, split and unsupported notice; provider late or failing; plan without the endpoint;
+restart, amended and re-issued records), real option listings (validation, chain, expirations,
+multi-leg, Wednesday expiry and exercise, delisted held contracts), missing prices, symbol list
+bounds, replay sessions from provider bars and the check script.
 `backend/tests/test_alpaca.py` and `backend/tests/test_data_sources.py` cover parsing to
 Decimal, stream handling (auth failure, symbol limit, connection limit, disconnect and
 resubscribe), the rate limiter and 429 backoff, fallback to synthetic, research routes, and
 full order round trips against adapter quotes. Saved responses are in
 `backend/tests/fixtures/`. `SOURCES.txt` there names the documentation page each one came from.
-Two fixtures, the asset list and corporate actions, are constructed from the documented schema
-because the pages have no example. Two Finnhub samples had a trailing comma that made the
+Two fixtures, the asset list and `corporate_actions.json`, are constructed from the documented
+schema; `corporate_actions_examples.json` holds the per-kind examples the corporate actions page now
+documents, verbatim. Two Finnhub samples had a trailing comma that made the
 published sample invalid JSON; it was removed.
 
 ## What has not been tested against the live service
@@ -238,4 +428,22 @@ published sample invalid JSON; it was removed.
   older than 15 minutes for daily bars. The adapter falls back to IEX bars if SIP is refused.
 - Units of Alpaca's greeks (assumed per day for theta and per volatility point for vega, matching
   the model).
+- Corporate actions with a real key: whether the free plan includes them; whether `start`/`end`
+  filter on process date or ex-date (the query is widened to cover either); whether an amended record
+  keeps its id; when records for a given ex-date first appear; the name-change and merger record
+  `symbols` matching (which symbol a query must name to see them).
+- The quote age thresholds against real IEX update rates: how often liquid symbols go 120 seconds
+  without a new quote or trade in the regular session (each such moment refuses market orders).
+- Daily bars requested for a single date (`start=day`, `end=day+1`) for `closing_price`: that the
+  bar's time stamp is that New York date was taken from the documentation example only.
+- Whether the stock snapshot's previous daily bar is split-adjusted on an ex-date (handled either
+  way by the closest-price rule, but not observed).
+- Option contracts on `paper-api.alpaca.markets`: real listing size per underlying (SPY has many
+  thousand contracts; PaperDesk reads up to 5 pages of 10000), the `root_symbol`/`size` of adjusted
+  contracts in practice, and whether expired contracts vanish from `status=active` on the expiry
+  date or the day after.
+- How often IEX books are one-sided in practice, and so how often market orders are refused or wait
+  under the 60-second rule; pre-market snapshots of thin symbols.
+- Historical 1-minute SIP bars for a past day on the free plan (assumed free because the end is
+  older than 15 minutes), and their volume compared with IEX.
 - Finnhub: every call, and the free per-minute limit.

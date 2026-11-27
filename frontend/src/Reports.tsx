@@ -1,21 +1,29 @@
 import { useEffect, useRef, useState } from "react";
+import { Info } from "./Info";
 import { ColorType, LineSeries, createChart } from "lightweight-charts";
 import { usePoll } from "./Market";
-import { api, dateTime, money, qty, signed, store, tone, usd } from "./util";
+import { api, dateTime, displayShift, money, qty, signed, signedUsd, store, tone, usd } from "./util";
 import "./reports.css";
+import { TaxYear, WashDetail } from "./TaxYear";
 
-const VIEWS = ["Overview", "Gains", "Statements", "Journal", "Export"] as const;
+const VIEWS = ["Overview", "Gains", "Tax year", "Statements", "Journal", "Export"] as const;
 type View = (typeof VIEWS)[number];
 
-const LOT_LABELS: Record<string, string> = { fifo: "First in, first out", lifo: "Last in, first out", highest_cost: "Highest cost first" };
+const LOT_LABELS: Record<string, string> = {
+  fifo: "First in, first out", lifo: "Last in, first out", highest_cost: "Highest cost first",
+  lowest_cost: "Lowest cost first", tax_loss: "Tax-efficient: largest loss first",
+};
+const METHOD_SHORT: Record<string, string> = { ...LOT_LABELS, specific: "Chosen lot" };
 const EXPORTS: [string, string][] = [
-  ["fills", "Fills"], ["orders", "Orders"], ["ledger", "Ledger"], ["positions", "Positions"], ["gains", "Realised gains"], ["journal", "Journal"],
+  ["fills", "Fills"], ["orders", "Orders"], ["ledger", "Ledger"], ["positions", "Positions"], ["gains", "Realized gains"], ["journal", "Journal"],
 ];
 
 const isNum = (v: any): v is number => typeof v === "number" && isFinite(v);
-const ratioPct = (v: any, dp = 2) => (isNum(v) ? (v > 0 ? "+" : "") + (v * 100).toFixed(dp) + "%" : "–");
-const plainPct = (v: any, dp = 1) => (isNum(v) ? (v * 100).toFixed(dp) + "%" : "–");
-const fixed = (v: any, dp = 2) => (isNum(v) ? v.toFixed(dp) : "–");
+// Rounded to the shown precision first, so a tiny negative never prints as "-0.00%".
+const clean = (v: number, dp: number) => { const r = Number(v.toFixed(dp)); return r === 0 ? 0 : r; };
+const ratioPct = (v: any, dp = 2) => { if (!isNum(v)) return "–"; const c = clean(v * 100, dp); return (c > 0 ? "+" : c < 0 ? "\u2212" : "") + Math.abs(c).toFixed(dp) + "%"; };
+const plainPct = (v: any, dp = 1) => { if (!isNum(v)) return "–"; const c = clean(v * 100, dp); return (c < 0 ? "\u2212" : "") + Math.abs(c).toFixed(dp) + "%"; };
+const fixed = (v: any, dp = 2) => { if (!isNum(v)) return "–"; const c = clean(v, dp); return (c < 0 ? "\u2212" : "") + Math.abs(c).toFixed(dp); };
 const day = (ts: any) => (isNum(ts) ? new Date(ts * 1000).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) : "–");
 
 function duration(sec: any) {
@@ -27,18 +35,28 @@ function duration(sec: any) {
 }
 
 export function Reports({ accountId, refreshKey, notify, orders }: { accountId: string; refreshKey: number; notify: (m: string, bad?: boolean) => void; orders: any[] }) {
-  const [view, setView] = useState<View>("Overview");
+  const [view, setViewState] = useState<View>(() => { const v = store("pd.reports") as View; return VIEWS.includes(v) ? v : "Overview"; });
+  const setView = (v: View) => { setViewState(v); store("pd.reports", v); };
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    if (!full) return;
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setFull(false); };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [full]);
   const [status] = usePoll<any>("/status", 15000);  // the same source as the top banner
   return (
-    <div className="reports">
+    <div className={full ? "reports reports-full" : "reports"} role={full ? "dialog" : undefined} aria-modal={full || undefined} aria-label={full ? "Reports" : undefined}>
       <div className="toolbar reports-nav">
         <div className="seg" role="group" aria-label="Report">
           {VIEWS.map((v) => <button key={v} className={v === view ? "on" : ""} aria-pressed={v === view} onClick={() => setView(v)}>{v}</button>)}
         </div>
         {status?.price_note && <span className="muted rep-label">{status.price_note}</span>}
+        <button className="ghost sm rep-full" onClick={() => setFull((f) => !f)} aria-pressed={full}>{full ? "Close full view" : "Open in full view"}</button>
       </div>
       {view === "Overview" && <Overview accountId={accountId} refreshKey={refreshKey} />}
       {view === "Gains" && <Gains accountId={accountId} refreshKey={refreshKey} notify={notify} />}
+      {view === "Tax year" && <TaxYear accountId={accountId} refreshKey={refreshKey} />}
       {view === "Statements" && <Statements accountId={accountId} refreshKey={refreshKey} />}
       {view === "Journal" && <Journal accountId={accountId} refreshKey={refreshKey} notify={notify} orders={orders} />}
       {view === "Export" && <Exports accountId={accountId} />}
@@ -57,6 +75,9 @@ function Overview({ accountId, refreshKey }: { accountId: string; refreshKey: nu
   if (bench) qs.set("benchmark", bench);
   if (rf.trim() && isFinite(Number(rf))) qs.set("risk_free", String(Number(rf) / 100));
   const [data, error] = usePoll<any>(`/accounts/${accountId}/analytics?${qs}`, 15000, [refreshKey]);
+  // An unknown benchmark should not hide the account's own statistics: drop it and say why.
+  const [badBench, setBadBench] = useState("");
+  useEffect(() => { if (error && bench) { setBadBench(bench); setBench(""); } }, [error, bench]);
   const controls = (
       <div className="toolbar">
         <label className="inline">Benchmark
@@ -64,7 +85,8 @@ function Overview({ accountId, refreshKey }: { accountId: string; refreshKey: nu
             onChange={(e) => setBenchInput(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && setBench(benchInput.trim())}
             onBlur={() => setBench(benchInput.trim())} />
         </label>
-        <label className="inline">Risk-free rate %
+        {badBench && !bench && <span className="rep-warn" role="status">There is no symbol "{badBench}"; showing results without a benchmark.</span>}
+        <label className="inline">Risk-free rate % a year
           <input value={rf} placeholder="0" inputMode="decimal" aria-label="Risk-free rate, percent per year" style={{ width: 70 }} onChange={(e) => setRf(e.target.value)} />
         </label>
       </div>
@@ -72,34 +94,37 @@ function Overview({ accountId, refreshKey }: { accountId: string; refreshKey: nu
   if (error) return <div className="rep-body">{controls}<div className="notice bad" role="alert">Could not load the account statistics: {error}</div></div>;
   if (!data) return <div className="rep-body">{controls}<p className="muted pad">Loading statistics…</p></div>;
   const r = data.returns, b = data.benchmark, t = data.trades.overall;
-  const stat = (k: string, v: string, cls = "", title?: string) => <div key={k} title={title}><span>{k}</span><b className={cls}>{v}</b></div>;
-  const dd = r.max_drawdown ? `${day(r.drawdown_peak_at)} to ${day(r.drawdown_trough_at)}${r.drawdown_recovered_at ? `, recovered ${day(r.drawdown_recovered_at)}` : ", not yet recovered"}` : "No drawdown yet";
+  const stat = (k: string, v: string, cls = "", title?: string, term?: string) => <div key={k} title={title}><span>{k}{term ? <> {info(term)}</> : null}</span><b className={cls}>{v}</b></div>;
+  const sameDay = day(r.drawdown_peak_at) === day(r.drawdown_trough_at);
+  const dd = r.max_drawdown ? `${sameDay ? `on ${day(r.drawdown_trough_at)}` : `${day(r.drawdown_peak_at)} to ${day(r.drawdown_trough_at)}`}${r.drawdown_recovered_at ? `, recovered ${day(r.drawdown_recovered_at)}` : ", not yet recovered"}` : "No drawdown yet";
+  const ddShown = r.max_drawdown >= 0.005; // ignore noise below 0.5%
+  const info = (term: string) => <Info term={term} />;
   return (
     <div className="rep-body">
       {controls}
       <h4 className="rep-h">Returns and risk</h4>
       <div className="facts">
-        {stat("Time-weighted return", ratioPct(r.time_weighted_return), tone(r.time_weighted_return), "Return with deposits and withdrawals taken out")}
+        {stat("Time-weighted return", ratioPct(r.time_weighted_return), tone(clean((r.time_weighted_return || 0) * 100, 2)), undefined, "twr")}
         {b && stat(`${b.symbol} return`, ratioPct(b.total_return), tone(b.total_return), b.name)}
         {b && stat("Versus benchmark", ratioPct(b.excess_return), tone(b.excess_return))}
         {stat("Volatility (annual)", plainPct(r.volatility), "", "Needs at least two days of history")}
-        {stat("Sharpe ratio", fixed(r.sharpe), "", "Needs at least two days of history")}
-        {stat("Max drawdown", plainPct(r.max_drawdown, 2), r.max_drawdown ? "down" : "", dd)}
+        {stat("Sharpe ratio", fixed(r.sharpe), "", undefined, "sharpe")}
+        {stat("Max drawdown", plainPct(-(r.max_drawdown || 0), 2), clean((r.max_drawdown || 0) * 100, 2) > 0 ? "down" : "", dd, "max_drawdown")}
         {b && stat("Beta", fixed(b.beta))}
         {stat("Days measured", String(r.trading_days))}
       </div>
-      {r.max_drawdown > 0 && <p className="muted rep-note">Largest drawdown: {dd}.</p>}
+      {ddShown && <p className="muted rep-note">Largest drop from a peak: {plainPct(r.max_drawdown, 2)}, {dd}.</p>}
       <ValueChart account={data.account_curve} bench={b?.curve} benchName={b?.symbol} />
       <h4 className="rep-h">Closed trades</h4>
       {t.trades === 0 ? <p className="muted pad">No closed trades yet. Statistics appear once a position is closed.</p> : (
         <>
           <div className="facts">
-            {stat("Closed lots", String(t.trades))}
+            {stat("Closed trades", String(t.trades), "", "Each lot (a buy and the sale that closed it) counts once")}
             {stat("Win rate", plainPct(t.win_rate, 0))}
             {stat("Average win", usd(t.average_win), "up")}
             {stat("Average loss", usd(t.average_loss), "down")}
             {stat("Profit factor", fixed(t.profit_factor))}
-            {stat("Expectancy", signed(t.expectancy), tone(t.expectancy), "Average gain per closed lot")}
+            {stat("Expectancy", signedUsd(t.expectancy), tone(t.expectancy), "Average gain per closed trade")}
             {stat("Largest win", usd(t.largest_win))}
             {stat("Largest loss", usd(t.largest_loss))}
             {stat("Average holding time", duration(t.average_holding_seconds))}
@@ -142,7 +167,7 @@ function Breakdown({ title, rows, label }: { title: string; rows: Record<string,
   return (
     <div className="rep-table">
       <table>
-        <thead><tr><th>{title}</th><th className="num">Lots</th><th className="num">Win rate</th><th className="num">Avg win</th><th className="num">Avg loss</th>
+        <thead><tr><th>{title}</th><th className="num">Trades</th><th className="num">Win rate</th><th className="num">Avg win</th><th className="num">Avg loss</th>
           <th className="num">Profit factor</th><th className="num">Total</th></tr></thead>
         <tbody>
           {keys.map((k) => {
@@ -150,7 +175,7 @@ function Breakdown({ title, rows, label }: { title: string; rows: Record<string,
             return (
               <tr key={k}><td>{label(k)}</td><td className="num">{s.trades}</td><td className="num">{plainPct(s.win_rate, 0)}</td>
                 <td className="num">{usd(s.average_win)}</td><td className="num">{usd(s.average_loss)}</td><td className="num">{fixed(s.profit_factor)}</td>
-                <td className={"num " + tone(s.total_gain)}>{signed(s.total_gain)}</td></tr>
+                <td className={"num " + tone(s.total_gain)}>{signedUsd(s.total_gain)}</td></tr>
             );
           })}
         </tbody>
@@ -172,7 +197,7 @@ function toLine(points: number[][] | undefined, shift: number) {
 function ValueChart({ account, bench, benchName }: { account: number[][]; bench?: number[][]; benchName?: string }) {
   const el = useRef<HTMLDivElement>(null);
   const ref = useRef<any>(null);
-  const shift = -new Date().getTimezoneOffset() * 60; // show local time on the axis
+  const shift = displayShift(); // the axis shows the display zone (this device, or ET in a replay)
   useEffect(() => {
     if (!el.current) return;
     const chart = createChart(el.current, {
@@ -203,8 +228,8 @@ function ValueChart({ account, bench, benchName }: { account: number[][]; bench?
         <span><i className="sw acct" />Account value</span>
         {bench && <span><i className="sw bench" />{benchName} scaled to the starting value</span>}
       </div>
-      <div className="rep-chart" ref={el} aria-label="Account value over time against the benchmark" role="img" />
-      {!enough && <p className="muted rep-note">The curve fills in as the account is sampled, about once a minute.</p>}
+      <div className="rep-chart" ref={el} aria-label="Account value over time against the benchmark" role="figure" />
+      {!enough && <p className="muted rep-note">The chart fills in as PaperDesk records the account value, about once a minute.</p>}
     </div>
   );
 }
@@ -221,8 +246,8 @@ function Gains({ accountId, refreshKey, notify }: { accountId: string; refreshKe
       reload();
     } catch (e: any) { notify(`Could not change the tax-lot method: ${e.message}`, true); }
   };
-  if (error) return <div className="notice bad" role="alert">Could not load realised gains: {error}</div>;
-  if (!data) return <p className="muted pad">Loading realised gains…</p>;
+  if (error) return <div className="notice bad" role="alert">Could not load realized gains: {error}</div>;
+  if (!data) return <p className="muted pad">Loading realized gains…</p>;
   const notes: Record<string, any[]> = {};
   for (const j of journal || []) (notes[j.target_id] ||= []).push(j);
   const tt = data.totals;
@@ -237,26 +262,29 @@ function Gains({ accountId, refreshKey, notify }: { accountId: string; refreshKe
         <a className="ghost sm btnlink" href={`/api/accounts/${accountId}/export/gains.csv`} download>Download CSV</a>
       </div>
       <div className="facts">
-        <div><span>Realised gain</span><b className={tone(tt.gain)}>{signed(tt.gain)}</b></div>
-        <div><span>Short-term</span><b className={tone(tt.short_term)}>{signed(tt.short_term)}</b></div>
-        <div><span>Long-term</span><b className={tone(tt.long_term)}>{signed(tt.long_term)}</b></div>
+        <div><span>Realized gain</span><b className={tone(tt.gain)}>{signedUsd(tt.gain)}</b></div>
+        <div><span>Short-term</span><b className={tone(tt.short_term)}>{signedUsd(tt.short_term)}</b></div>
+        <div><span>Long-term</span><b className={tone(tt.long_term)}>{signedUsd(tt.long_term)}</b></div>
         <div><span>Proceeds</span><b>{usd(tt.proceeds)}</b></div>
         <div><span>Cost</span><b>{usd(tt.cost)}</b></div>
-        <div><span>Wash-sale flags</span><b className={tt.wash_sale_lots ? "warn" : ""}>{tt.wash_sale_lots}</b></div>
+        <div><span>Wash-sale flags <Info term="wash_sale" /></span><b className={tt.wash_sale_lots ? "warn" : ""}>{tt.wash_sale_lots}</b></div>
+        <div><span>Wash-sale disallowed (informational)</span><b className={tt.wash_sale_disallowed ? "warn" : ""}>{usd(tt.wash_sale_disallowed)}</b></div>
       </div>
       {data.rows.length === 0 ? <p className="muted pad">No closed lots yet. Each lot appears here when a trade closes it.</p> : (
         <div className="rep-table">
           <table>
-            <thead><tr><th>Lot</th><th>Instrument</th><th>Side</th><th className="num">Qty</th><th>Opened</th><th>Closed</th><th className="num">Proceeds</th>
+            <thead><tr><th>Lot</th><th>Tax lot</th><th>Method</th><th>Instrument</th><th>Side</th><th className="num">Qty</th><th>Opened</th><th>Closed</th><th className="num">Proceeds</th>
               <th className="num">Cost</th><th className="num">Gain</th><th>Term</th><th>Wash sale</th><th>Journal</th></tr></thead>
             <tbody>
               {[...data.rows].reverse().map((r: any) => (
                 <tr key={r.id}>
-                  <td className="muted">{r.id}</td><td>{r.description}</td><td>{r.direction === "long" ? "Long" : "Short"}</td>
+                  <td className="muted">{r.id}</td><td>{r.lot_id || "–"}</td>
+                  <td title={r.lot_fallback ? "The chosen lot was no longer open when this filled, so the account's method chose" : undefined}>
+                    {METHOD_SHORT[r.lot_method] || r.lot_method}{r.lot_fallback ? " (fallback)" : ""}</td><td>{r.description}</td><td>{r.direction === "long" ? "Long" : "Short"}</td>
                   <td className="num">{qty(r.qty)}</td><td>{r.open_date}</td><td>{r.close_date}</td>
-                  <td className="num">{money(r.proceeds)}</td><td className="num">{money(r.cost)}</td>
-                  <td className={"num " + tone(r.gain)}>{signed(r.gain)}</td><td>{r.term === "long" ? "Long-term" : "Short-term"}</td>
-                  <td>{r.wash_sale ? <span className="flag" title="Loss closed within 30 days of another purchase of the same symbol. Informational only.">Flagged</span> : <span className="muted">–</span>}</td>
+                  <td className="num">{usd(r.proceeds)}</td><td className="num">{usd(r.cost)}</td>
+                  <td className={"num " + tone(r.gain)}>{signedUsd(r.gain)}</td><td>{r.term === "long" ? "Long-term" : "Short-term"}</td>
+                  <td><WashDetail row={r} /></td>
                   <td><button className="ghost sm" onClick={() => setNoting(noting === r.id ? null : r.id)}>
                     {notes[r.id]?.length ? `Notes (${notes[r.id].length})` : "Add note"}</button></td>
                 </tr>
@@ -304,11 +332,11 @@ function Statements({ accountId, refreshKey }: { accountId: string; refreshKey: 
             <table className="rep-summary">
               <tbody>
                 <tr><td>Opening account value</td><td className="num">{usd(st.opening.account_value)}</td></tr>
-                <tr><td>Deposits and withdrawals</td><td className="num">{signed(st.deposits_total)}</td></tr>
-                <tr><td>Realised profit and loss</td><td className={"num " + tone(st.realized_pnl)}>{signed(st.realized_pnl)}</td></tr>
-                <tr><td>Fees</td><td className="num">{signed(-st.fees)}</td></tr>
-                <tr><td>Other income and charges{Object.keys(st.other_by_kind).length ? ` (${Object.keys(st.other_by_kind).join(", ")})` : ""}</td><td className="num">{signed(st.other_total)}</td></tr>
-                <tr><td>Change in unrealised profit and loss</td><td className={"num " + tone(st.unrealized_change)}>{signed(st.unrealized_change)}</td></tr>
+                <tr><td>Deposits and withdrawals (including starting cash)</td><td className="num">{signedUsd(st.deposits_total)}</td></tr>
+                <tr><td>Realized profit and loss</td><td className={"num " + tone(st.realized_pnl)}>{signedUsd(st.realized_pnl)}</td></tr>
+                <tr><td>Fees</td><td className="num">{signedUsd(-st.fees)}</td></tr>
+                <tr><td>Other income and charges{Object.keys(st.other_by_kind).length ? ` (${Object.keys(st.other_by_kind).map((k) => k.replace(/_/g, " ")).join(", ")})` : ""}</td><td className="num">{signedUsd(st.other_total)}</td></tr>
+                <tr><td>Change in unrealized profit and loss</td><td className={"num " + tone(st.unrealized_change)}>{signedUsd(st.unrealized_change)}</td></tr>
                 <tr className="total"><td>Closing account value</td><td className="num">{usd(st.closing.account_value)}</td></tr>
               </tbody>
             </table>
@@ -324,11 +352,11 @@ function Statements({ accountId, refreshKey }: { accountId: string; refreshKey: 
           {st.positions.length === 0 ? <p className="muted pad">No positions at the end of this month.</p> : (
             <div className="rep-table">
               <table>
-                <thead><tr><th>Instrument</th><th className="num">Qty</th><th className="num">Cost basis</th><th className="num">Mark</th><th className="num">Market value</th><th className="num">Unrealised</th></tr></thead>
+                <thead><tr><th>Instrument</th><th className="num">Qty</th><th className="num">Cost basis</th><th className="num">Mark</th><th className="num">Market value</th><th className="num">Unrealized</th></tr></thead>
                 <tbody>
                   {st.positions.map((p: any) => (
                     <tr key={p.symbol}><td>{p.description}</td><td className="num">{qty(p.qty)}</td><td className="num">{usd(p.cost_basis)}</td>
-                      <td className="num">{money(p.mark)}</td><td className="num">{usd(p.market_value)}</td><td className={"num " + tone(p.unrealized_pnl)}>{signed(p.unrealized_pnl)}</td></tr>
+                      <td className="num">{money(p.mark)}</td><td className="num">{usd(p.market_value)}</td><td className={"num " + tone(p.unrealized_pnl)}>{signedUsd(p.unrealized_pnl)}</td></tr>
                   ))}
                 </tbody>
               </table>
@@ -451,7 +479,7 @@ function Entry({ accountId, entry, notify, onChanged, showTarget }: { accountId:
 function Exports({ accountId }: { accountId: string }) {
   return (
     <div className="rep-body">
-      <p className="muted rep-note">Each file is comma-separated text with times in UTC (ISO 8601) and exact amounts, ready for a spreadsheet.</p>
+      <p className="muted rep-note">Each file opens in Excel or any spreadsheet program. Times in the files are in UTC, and amounts are exact.</p>
       <div className="rep-downloads">
         {EXPORTS.map(([k, label]) => (
           <a key={k} className="ghost btnlink" href={`/api/accounts/${accountId}/export/${k}.csv`} download>{label} (CSV)</a>

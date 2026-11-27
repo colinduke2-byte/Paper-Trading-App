@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, bottomTab, review, place } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, bottomTab, review, place, confirmDialog } from "./fixtures";
 
 test("page loads with the paper trading banner", async ({ page, open }) => {
   await open();
@@ -12,7 +12,7 @@ test("selecting a symbol shows its quote and renders the chart", async ({ page, 
   await open();
   await page.getByRole("region", { name: "Watchlist" }).getByRole("cell", { name: "TECX", exact: true }).click();
   await expect(page.getByRole("heading", { name: "TECX", level: 2 })).toBeVisible();
-  const chart = page.getByRole("img", { name: "TECX price chart" });
+  const chart = page.getByRole("figure", { name: "TECX price chart" });
   await expect(chart).toBeVisible();
   await expect(chart.locator("canvas").first()).toBeVisible();
   await expect.poll(async () => (await chart.boundingBox())?.height ?? 0).toBeGreaterThan(100);
@@ -99,7 +99,7 @@ test("switching account changes the figures", async ({ page, request, open }) =>
   const select = page.getByRole("combobox", { name: "Account" });
   await select.selectOption(big.id);
   await expect(top).toContainText("$56,789.00");
-  await expect(top).toContainText("Margin required");
+  await expect(top).toContainText("Maintenance margin");
   await select.selectOption(small.id);
   await expect(top).toContainText("$1,234.00");
 });
@@ -113,7 +113,7 @@ test("create an account, then reset it", async ({ page, open }) => {
   await dialog.getByLabel("Type").selectOption("cash");
   await dialog.getByLabel("Starting cash").fill("5000");
   await dialog.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByText(`Account "${name}" created`)).toBeVisible();
+  await expect(page.getByText(`"${name}" created and selected.`)).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Account" }).locator("option:checked")).toContainText(name);
   await expect(page.locator(".top-stats")).toContainText("$5,000.00");
 
@@ -122,7 +122,7 @@ test("create an account, then reset it", async ({ page, open }) => {
   await expect(page.getByText(/Filled: buy 2 MKTX/)).toBeVisible();
   await expect(page.getByText("No open positions.")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await page.getByRole("button", { name: "Reset account", exact: true }).click();
   await page.getByRole("dialog").getByLabel("Starting cash").fill("7000");
   await page.getByRole("dialog").getByRole("button", { name: "Erase and reset" }).click();
   await expect(page.getByText(/reset to \$7,000\.00/)).toBeVisible();
@@ -195,11 +195,34 @@ test("the Replay button starts a replay and Exit returns to live", async ({ page
     const bar = page.getByRole("region", { name: "Replay controls" });
     await bar.getByRole("button", { name: "+1 min" }).click();
     await bar.getByRole("button", { name: "Exit replay" }).click();
+    await confirmDialog(page, "Exit replay");
     await expect(bar).toHaveCount(0);
     await expect(page.getByRole("note")).toContainText("Paper trading · no real money");
     await expect(page.getByRole("button", { name: "Replay", exact: true })).toBeVisible();
   } finally {
     await request.post("/api/replay/exit").catch(() => {});
+  }
+});
+
+test("narrow desktop window: the chart stays inside its panel and the bottom tabs can be clicked", async ({ page, open }) => {
+  // 900-1100 px (a small laptop window, an iPad in landscape): one column, the page scrolls. The chart once
+  // spilled over the bottom tabs here, and in WebKit resized itself in a loop.
+  await page.setViewportSize({ width: 1080, height: 810 });
+  await open();
+  for (const view of ["Chart", "Options", "Company", "Chart"]) {
+    await page.getByRole("tab", { name: view }).click();
+    await expect(page.getByRole("tab", { name: view })).toHaveAttribute("aria-selected", "true");
+    const fits = await page.evaluate(() => {
+      const panel = document.querySelector(".main-view")!.getBoundingClientRect();
+      const inner = [...document.querySelectorAll(".main-view .view, .main-view .chart")].map((e) => e.getBoundingClientRect().bottom);
+      return inner.every((b) => b <= panel.bottom + 0.5) && panel.bottom <= document.querySelector(".bottom")!.getBoundingClientRect().top;
+    });
+    expect(fits, `view ${view}: content inside the main panel, above the bottom panel`).toBe(true);
+  }
+  await expect(page.getByRole("figure", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
+  for (const tab of [/^Orders/, "Fills", /^Positions/]) {
+    await bottomTab(page, tab).click({ timeout: 5000 });
+    await expect(bottomTab(page, tab)).toHaveAttribute("aria-selected", "true");
   }
 });
 

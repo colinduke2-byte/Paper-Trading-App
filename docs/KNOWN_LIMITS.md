@@ -20,6 +20,9 @@ while writing this list.
   (`paper-api.alpaca.markets`), whether the free plan includes corporate actions, news and delayed
   SIP data, and the units of Alpaca's option greeks (assumed per day for theta and per volatility point
   for vega). The `--check` command was run only without a key and with a fake key (tested).
+- **Alpaca crypto data.** Built only against the example responses in Alpaca's documentation; never run
+  with a real key (plan coverage, rate limits, stream limits, listed increments vs quoted prices). See
+  [CRYPTO.md](CRYPTO.md#what-has-not-been-tested-against-the-live-service).
 - **Finnhub.** Not tested against the live service at all, including its free per-minute limit.
 - **Windows.** `run.bat` is started by an automated Windows test, but nobody has used the Windows
   instructions by hand on a real PC while this guide was written. The firewall and Wi-Fi network
@@ -30,6 +33,12 @@ while writing this list.
 
 ## Simulated prices and data
 
+- **Crypto (see [CRYPTO.md](CRYPTO.md)).** The simulated coins are invented. One fee rate for every fill
+  (no maker/taker split, always taken in dollars); no linked orders or trailing stops; only USD pairs; crypto
+  day orders end at midnight UTC. Annualised report statistics (volatility, Sharpe) assume 252 trading
+  periods a year and New York days, so they are slightly off for accounts that hold crypto, which trades
+  every day.
+
 - **The default market is fictional.** Prices follow a random walk with a fixed seed. Companies, their
   fundamentals, dividends and the yearly split are generated. Nothing about them predicts anything real.
 - **Simulated prices only move while PaperDesk runs.** Orders can only fill while it runs, in both
@@ -37,7 +46,7 @@ while writing this list.
 - **"Always open" is the default in simulated mode.** The market never closes. A "day" is a UTC day, so a
   Day order expires and T+1 settlement happens at midnight UTC (7 pm New York time in winter, 8 pm in
   summer).
-- **The depth ladder is always synthetic**, even with real data: it is built from the top-of-book quote.
+- **The depth ladder is synthetic for stocks**, even with real data (crypto pairs with Alpaca show Alpaca's order book): it is built from the top-of-book quote.
 - **Day P&L resets at midnight UTC in both session modes** (code reading), not at the market open, so with
   market hours it resets in the evening in New York.
 - **Replay sessions that come with the program are simulated.** Sessions built from one-minute bars are
@@ -92,8 +101,10 @@ while writing this list.
 - Dividends and splits are applied **only for the simulated feed**. With real data, the provider's
   dividends and splits appear in Research but are **not applied** to your accounts, and mergers,
   spin-offs, name changes and other corporate actions are not handled at all.
-- The **wash-sale flag is informational**: it does not look at similar securities, does not adjust cost
-  basis and does not defer losses. Nothing in the reports is tax advice.
+- **Wash-sale detail is informational**: it matches losses with replacement lots of the same symbol and shows
+  the disallowed loss and the basis and holding period the replacement would carry, but it never changes
+  realised gains or cost basis, does not look at similar securities or other accounts, and does not rescale
+  carried amounts after a later split. Nothing in the reports is tax advice.
 - There is no way in the screens to delete an account, deposit or withdraw cash.
 - **A corrupt `state.json` is replaced silently** with two fresh default accounts (tested): PaperDesk does
   not keep a backup of the unreadable file. Back up `backend\data` yourself.

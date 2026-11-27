@@ -26,7 +26,7 @@ FORMAT = "paperdesk-session"
 VERSION = 1
 SUFFIX = ".pdsession.gz"
 QUOTE, TRADE = "Q", "T"
-_SYMBOL = re.compile(r"^[A-Z0-9.\-]{1,12}$")
+_SYMBOL = re.compile(r"^(?:[A-Z0-9.\-]{1,12}|[A-Z0-9]{1,15}/USD)$")  # stocks, funds and BASE/USD crypto pairs
 # Read limits: a session file may come from anywhere, so a damaged or hostile one must fail with
 # SessionFormatError instead of exhausting memory or crashing on a wrong type.
 MAX_LINE = 8 * 1024 * 1024           # bytes in one line (a context line holds a symbol's bars)

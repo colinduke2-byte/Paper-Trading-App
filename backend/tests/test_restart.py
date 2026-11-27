@@ -503,17 +503,19 @@ def test_a_failed_save_stays_dirty_and_is_retried(monkeypatch):
     feed.set_quote("ABC", "99.99", "100.00", "100.00")
     ex.tick()
     ex.create_account("t", "margin", D("100000"))
-    real = Exchange._write_text  # every save goes through it (the text is serialised under the lock first)
+    # Saving goes through app/storage (PR 19): a failed write does not raise any more, save() answers False,
+    # the failure shows in the save status and the state stays marked as changed until a retry works.
+    from app.storage import fsutil
+    real = fsutil.atomic_write_bytes
 
     def broken(path, text):
         raise OSError("disk full")
 
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(broken))
-    with pytest.raises(OSError):
-        ex.save()
-    assert ex.dirty
-    monkeypatch.setattr(Exchange, "_write_text", staticmethod(real))
-    ex.save()
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", broken)
+    assert ex.save() is False
+    assert ex.dirty and ex.store.status()["saving_failed"]
+    monkeypatch.setattr(fsutil, "atomic_write_bytes", real)
+    assert ex.save(force=True)
     assert not ex.dirty
     ex2 = Exchange(SimFeed(INFO), SimClock(T0), data_dir=tmp)
     assert ex2.load() and len(ex2.accounts) == 1

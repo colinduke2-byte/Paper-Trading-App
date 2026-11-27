@@ -125,9 +125,13 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
   useEffect(() => { if (g?.alive) g.primitive.redraw(); }, [g, drawings, selected, drawMode]);
   useEffect(() => { setSelected(null); setMenu(null); setTextAt(null); }, [symbol]);
 
-  // Stream the latest price into the last bar and every indicator.
+  // Stream the latest price into the last bar and every indicator. A new chart already has the bars up to now, so
+  // the quote held when it was made is skipped: when a replay starts that quote is still the live one, hours after
+  // the recorded session, and streaming it appended a bar at the live time to the replay chart.
+  const streamedFor = useRef<Gen | null>(null);
   useEffect(() => {
     if (!g || !quote || quote.symbol !== symbol) return;
+    if (streamedFor.current !== g) { streamedFor.current = g; return; }
     streamPrice(g, quote.last, quote.ts);
   }, [g, quote?.ts, quote?.last]);
 
@@ -288,7 +292,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
     <div className="chart-wrap ct-wrap">
       <div className="ct-bar" role="toolbar" aria-label="Chart tools">
         <div className="ct-seg" role="group" aria-label="Timeframe">
-          {TFS.map((t) => <button key={t} type="button" className={t === tf ? "on" : ""} aria-pressed={t === tf} aria-label={TF_LABELS[t][1]} title={TF_LABELS[t][1]} onClick={() => setTf(t)}>{TF_LABELS[t][0]}</button>)}
+          {TFS.map((t) => <button key={t} type="button" className={t === tf ? "on" : ""} aria-pressed={t === tf} aria-label={`${TF_LABELS[t][0]}, ${TF_LABELS[t][1]}`} title={TF_LABELS[t][1]} onClick={() => setTf(t)}>{TF_LABELS[t][0]}</button>)}
         </div>
         <select className="ct-select" aria-label="Chart type" value={settings.type} onChange={(e) => setSettings({ ...settings, type: e.target.value as ChartType })}>
           {Object.entries(CHART_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
@@ -310,7 +314,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
         )}
         <button type="button" className={"ct-btn" + (drawMode ? " on" : "")} aria-pressed={drawMode}
           title="Draw mode: tap-drag draws instead of panning the chart" onClick={() => { setDrawMode(!drawMode); setTool("select"); setSelected(null); }}>Draw</button>
-        <button type="button" className="ct-btn" onClick={resetView} aria-label="Reset chart view" title="Reset chart view">Reset view</button>
+        <button type="button" className="ct-btn" onClick={resetView} title="Reset chart view">Reset view</button>
       </div>
       {drawMode && (
         <div className="ct-bar ct-draw-bar" role="toolbar" aria-label="Drawing tools">
@@ -336,7 +340,7 @@ export function Chart({ symbol, quote, position, orders, accountId, notify, onOr
       <div className="ct-stage" data-chart-type={settings.type} data-log={settings.log ? "1" : "0"} data-loaded={loadTick > 0 ? "1" : "0"}
         onPointerDown={stagePointerDown} onPointerMove={stagePointerMove} onPointerUp={stagePointerEnd} onPointerCancel={stagePointerEnd}
         onContextMenu={stageContextMenu}>
-        <div className="chart ct-host" ref={el} role="img" aria-label={`${symbol} price chart`} />
+        <div className="chart ct-host" ref={el} role="figure" aria-label={`${symbol} price chart`} />
         <Legend g={g} tick={[loadTick, quote?.ts]} />
         <OrderHandles g={g} lines={lines} draft={confirm ? { key: confirm.line.key, price: confirm.to } : draft}
           onDraft={(key, price) => { if (!confirm) setDraft(price == null ? null : { key, price }); }}

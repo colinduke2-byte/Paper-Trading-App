@@ -1,4 +1,4 @@
-import { test, expect, createAccount, lastPrice, ticket, bottomTab } from "./fixtures";
+import { test, expect, createAccount, lastPrice, ticket, bottomTab, confirmDialog } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 // Phone profiles (see playwright.config.ts). Every interaction here is a real tap, so a control that is
@@ -74,14 +74,14 @@ test("no horizontal page scroll on any view", async ({ page, open }) => {
 test("navigate all four views", async ({ page, open }) => {
   await open();
   await expect(navButton(page, "Chart")).toHaveAttribute("aria-current", "page");
-  await expect(page.getByRole("img", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
+  await expect(page.getByRole("figure", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
 
   await go(page, "Watchlist");
   await page.getByRole("region", { name: "Watchlist" }).getByRole("cell", { name: "TECX", exact: true }).tap();
   // Picking a symbol opens its chart.
   await expect(navButton(page, "Chart")).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("heading", { name: "TECX", level: 2 })).toBeVisible();
-  const chart = page.getByRole("img", { name: "TECX price chart" });
+  const chart = page.getByRole("figure", { name: "TECX price chart" });
   await expect.poll(async () => (await chart.boundingBox())?.height ?? 0).toBeGreaterThan(150);
 
   // The Buy button on the chart opens the ticket for that symbol.
@@ -261,7 +261,9 @@ test("option chain: puts and both sides", async ({ page, open }) => {
   await open();
   await page.getByRole("tab", { name: "Options" }).tap();
   await expect(page.getByTitle("Buy at the ask").first()).toBeVisible();
-  const visibleHeads = () => page.locator(".chain-table thead tr").last().locator("th:visible").allTextContents();
+  // Header text without the Info buttons ("i") that some headings carry.
+  const visibleHeads = () => page.locator(".chain-table thead tr").last().locator("th:visible").evaluateAll((ths) =>
+    ths.map((th) => [...th.childNodes].filter((n) => !(n instanceof Element && n.classList.contains("info"))).map((n) => n.textContent).join("").trim()));
   expect(await visibleHeads()).toEqual(["IV", "Delta", "Bid", "Ask", "Strike"]);
   await page.getByRole("button", { name: "Puts" }).tap();
   expect(await visibleHeads()).toEqual(["Strike", "Bid", "Ask", "Delta", "IV"]);
@@ -283,7 +285,7 @@ test("switching account from the menu changes the figures", async ({ page, reque
   await expect(top).toContainText("$56,789.00");
   await go(page, "Account");
   await expect(page.locator(".m-acct")).toContainText(big.name);
-  await expect(page.locator(".m-acct")).toContainText("Margin required");
+  await expect(page.locator(".m-acct")).toContainText("Maintenance margin");
   await page.getByRole("button", { name: "Menu" }).tap();
   await page.getByRole("dialog", { name: "Menu" }).getByRole("combobox", { name: "Account" }).selectOption(small.id);
   await expect(top).toContainText("$1,234.00");
@@ -298,7 +300,7 @@ test("create an account from the menu", async ({ page, open }) => {
   await dialog.getByLabel("Name").fill(name);
   await dialog.getByLabel("Starting cash").fill("5000");
   await dialog.getByRole("button", { name: "Create account" }).tap();
-  await expect(page.getByText(`Account "${name}" created`)).toBeVisible();
+  await expect(page.getByText(`"${name}" created and selected.`)).toBeVisible();
   await expect(page.locator(".m-stats")).toContainText("$5,000.00");
 });
 
@@ -306,7 +308,17 @@ test("landscape orientation fits without overflow", async ({ page, open }) => {
   const v = page.viewportSize()!;
   await open();
   await page.setViewportSize({ width: v.height + 100, height: v.width - 40 }); // rotate (browser bars take some height)
-  await expect(navButton(page, "Chart")).toBeVisible();
+  // Short landscape screens keep the phone layout; a rotated tablet (tall enough and wider than 900 px) gets the
+  // desktop layout, which must fit as well.
+  const desktop = page.getByRole("combobox", { name: "Account" });
+  await expect(navButton(page, "Chart").or(desktop)).toBeVisible();
+  if (await desktop.isVisible()) {
+    await expect(page.getByRole("navigation", { name: "Views" })).toHaveCount(0);
+    await expect(page.getByRole("figure", { name: "MKTX price chart" }).locator("canvas").first()).toBeVisible();
+    expect(await overflow(page), "rotated tablet: no horizontal page scroll").toBeLessThanOrEqual(0);
+    await page.setViewportSize(v);
+    return;
+  }
   for (const view of VIEWS) {
     await go(page, view);
     await fitsViewport(page, `landscape ${view}`);
@@ -314,7 +326,7 @@ test("landscape orientation fits without overflow", async ({ page, open }) => {
   }
   await go(page, "Chart");
   await expect(page.getByRole("note")).toBeVisible();
-  const chart = page.getByRole("img", { name: "MKTX price chart" });
+  const chart = page.getByRole("figure", { name: "MKTX price chart" });
   await expect.poll(async () => (await chart.boundingBox())?.height ?? 0).toBeGreaterThan(100);
   for (const view of ["Options", "Company"]) {
     await page.getByRole("tab", { name: view }).tap();
@@ -387,7 +399,7 @@ test.describe("replay", () => {
     await go(page, "Chart");
     const clock = bar.locator(".replay-clock");
     const before = await clock.textContent();
-    const chart = page.getByRole("img", { name: /price chart$/ });
+    const chart = page.getByRole("figure", { name: /price chart$/ });
     await chart.evaluate((e: any) => { e.__beforeStep = true; });
     await bar.getByRole("button", { name: "+1 min" }).tap();
     await expect(clock).not.toHaveText(before!);
@@ -405,6 +417,7 @@ test.describe("replay", () => {
 
     // Exit back to the live accounts.
     await bar.getByRole("button", { name: "Exit replay" }).tap();
+    await confirmDialog(page, "Exit replay", true);
     await expect(page.getByText("Replay closed. You are back on your paper accounts.")).toBeVisible();
     await expect(bar).toHaveCount(0);
     await expect(banner).toContainText("Paper trading · no real money");
@@ -423,7 +436,7 @@ test("Settings, Research and Reports work inside the phone shell", async ({ page
   await page.getByRole("button", { name: "Menu" }).tap();
   const menu = page.getByRole("dialog", { name: "Menu" });
   await expect(menu.getByRole("button", { name: "Sign out" })).toHaveCount(0);
-  await menu.getByRole("button", { name: "Settings" }).tap();
+  await menu.getByRole("button", { name: "Account rules" }).tap();
   const settings = page.getByRole("dialog");
   await expect(settings).toContainText("Account rules");
   found.push(...await smallTargets(page, "Settings dialog"));

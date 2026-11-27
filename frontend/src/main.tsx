@@ -1,6 +1,10 @@
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { AccessGate } from "./Login";
+import { RecoveryGate } from "./DataBackups";
 import "./styles.css";
+import { installDialogKeyboard } from "./dialogs";
 
-createRoot(document.getElementById("root")!).render(<AccessGate><App /></AccessGate>);
+installDialogKeyboard();
+
+createRoot(document.getElementById("root")!).render(<AccessGate><RecoveryGate><App /></RecoveryGate></AccessGate>);

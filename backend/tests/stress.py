@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
+from app.api import locking as api_locking
 from app.api.server import create_app
 from app.core import calendar as cal
 from app.core.clock import SimClock
@@ -104,35 +105,58 @@ def problems(ex: Exchange) -> list:
 
 
 def load_state(path: str, scratch: str, text: str = None) -> Exchange:
-    """A fresh exchange loaded from one state.json (copied first, so the server can keep replacing it).
+    """A fresh exchange loaded from a copy of the saved data (so the server can keep saving meanwhile).
 
-    The file is read the way the app reads it (`Exchange._read_text`: one open-read-close), so on
-    Windows a read that meets the save thread's replace behaves as the app's own load does."""
-    os.makedirs(scratch, exist_ok=True)
+    State format v2 (PR 19): state.json references append-only segment files. state.json is read first, the
+    way the app reads it (`Exchange._read_text`: one open-read-close, so on Windows a read that meets the save
+    thread's replace behaves as the app's own load does), then the segments: they only grow, and a state
+    file names how many entries of each it uses, so segments copied later than the state are consistent."""
+    import shutil
+    if os.path.isdir(scratch):
+        shutil.rmtree(scratch)
+    os.makedirs(scratch)
     if text is None:
         text = Exchange._read_text(path)
     with open(os.path.join(scratch, "state.json"), "w", encoding="utf-8") as f:
         f.write(text)
+    seg = os.path.join(os.path.dirname(path), "segments")
+    if os.path.isdir(seg):
+        os.makedirs(os.path.join(scratch, "segments"))
+        for n in os.listdir(seg):
+            try:
+                with open(os.path.join(seg, n), "rb") as src:
+                    data = src.read()
+            except FileNotFoundError:  # a finished generation removed meanwhile; the state no longer names it
+                continue
+            with open(os.path.join(scratch, "segments", n), "wb") as dst:
+                dst.write(data)
     ex = Exchange(SimFeed(), SimClock(T0), data_dir=scratch)
     if not ex.load():
-        raise ValueError("state.json could not be loaded")
+        raise ValueError(f"state.json could not be loaded: {getattr(ex.store, 'recovery', None)}")
     return ex
 
 
 def file_problems(path: str, scratch: str) -> list:
     """Problems of the state saved on disk, including ids a restart would hand out twice."""
-    try:
-        text = Exchange._read_text(path)  # one read: the parsed file and the loaded one are the same version
-        raw = json.loads(text)
-        ex = load_state(path, scratch, text)
-    except FileNotFoundError:
-        return []
-    except Exception as e:  # noqa: BLE001 - any failure to load is the finding
-        return [f"state.json does not load: {e!r}"]
+    # While the server runs, a copy can read state N and then find that the save of state N+1 has already
+    # deleted segments N used (store._collect): the copy, not the disk, is inconsistent. So try a few times;
+    # a file that is really damaged fails every time (and the final check runs after the server stopped).
+    for attempt in range(5):
+        try:
+            text = Exchange._read_text(path)  # one read: the parsed file and the loaded one are the same version
+            ex = load_state(path, scratch, text)
+            raw = json.loads(text)
+            break
+        except FileNotFoundError:
+            return []
+        except Exception as e:  # noqa: BLE001 - any failure to load is the finding
+            if attempt == 4:
+                return [f"state.json does not load: {e!r}"]
     out = problems(ex)
+    doc = ex.to_document()  # orders and fills come from the segments; the counters from the saved state
     number = lambda s: int("".join(ch for ch in s if ch.isdigit()))
-    orders = [number(o["id"]) for o in raw["orders"]]
-    fills = [number(f["id"]) for a in raw["accounts"] for f in a["fills"] if f["id"].startswith("F")]
+    orders = [number(o["id"]) for o in doc["orders"]]
+    fills = [number(f["id"]) for a in doc["accounts"] for f in a["fills"] if f["id"].startswith("F")]
     if orders and raw["seq"]["order"] <= max(orders):
         out.append(f"saved order counter {raw['seq']['order']} would reuse order id {max(orders)}")
     if fills and raw["seq"]["fill"] <= max(fills):
@@ -141,8 +165,19 @@ def file_problems(path: str, scratch: str) -> list:
 
 
 # ---- the server under load ------------------------------------------------------------------------
+RIG_LOCK_WAIT = 10.0  # seconds a request waits for the exchange lock in the stress rig (see Rig)
+
+
 class Rig:
-    """A server whose loop ticks as fast as it can; every tick moves the simulated clock `step` seconds."""
+    """A server whose loop ticks as fast as it can; every tick moves the simulated clock `step` seconds.
+
+    Requests wait up to RIG_LOCK_WAIT seconds for the exchange lock here, not the product's 2 s (ROUTE_WAIT). The CI
+    runners stall now and then for seconds at a time, every thread at once: on Windows the tick was measured waiting
+    2.62 s for the lock on its own 1 s timeout, so no thread held the lock that long; the process was not running.
+    With the product's bound such a stall turned a few requests into 503 "busy" and failed the run. What the stress
+    tests check is unchanged: no failed request, consistent books, a consistent state file. The 2 s "busy" bound
+    itself is covered by the busy tests in test_concurrency.py and test_integration_wave2.py.
+    """
 
     def __init__(self, tmp_path, seed: int = 7, step: float = 5.0, feed=None, accounts=(("margin", "1000000"),),
                  **app_kw):
@@ -176,6 +211,7 @@ class Rig:
         self._interval = sys.getswitchinterval()
 
     def __enter__(self):
+        self._route_wait, api_locking.ROUTE_WAIT = api_locking.ROUTE_WAIT, RIG_LOCK_WAIT
         sys.setswitchinterval(1e-5)  # switch threads often, so races that exist show up
         self.client.__enter__()
         return self
@@ -185,6 +221,7 @@ class Rig:
             return self.client.__exit__(*exc)
         finally:
             sys.setswitchinterval(self._interval)
+            api_locking.ROUTE_WAIT = self._route_wait
 
     def call(self, method: str, path: str, **kw):
         r = self.client.request(method, path, **kw)

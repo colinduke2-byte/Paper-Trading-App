@@ -15,7 +15,7 @@ def run(capfd, **kw):
     cap = capfd.readouterr()
     assert cap.out == "" and cap.err == "", (cap.out, cap.err)  # nothing but the lines below
     assert all(LINE.match(l) for l in lines[:-1]), lines
-    assert re.match(r"^SUMMARY: \d of 5 checks passed", lines[-1]), lines
+    assert re.match(r"^SUMMARY: \d of 9 checks passed", lines[-1]), lines
     assert "PK1" not in "\n".join(lines)
     return code, lines
 
@@ -26,7 +26,7 @@ def test_rejected_key_fails_every_check_cleanly(capfd):
     def refuse(url):
         raise ConnectionRefusedError("refused")
     code, lines = run(capfd, transport=tr, connector=refuse)
-    assert code == 1 and len(lines) == 6 and lines[-1].startswith("SUMMARY: 0 of 5")
+    assert code == 1 and len(lines) == 10 and lines[-1].startswith("SUMMARY: 0 of 9")
     assert lines[0].startswith("FAIL assets:")
 
 

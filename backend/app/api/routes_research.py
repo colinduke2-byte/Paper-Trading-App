@@ -32,8 +32,9 @@ def register(app, ctx):
             feed._ctx_hooked = ctx
         h = getattr(feed, "research", None)
         if h is None:
-            reason = ("The synthetic feed uses fictional companies, so there is no real news, calendar or "
-                      "fundamental data for them." if feed.simulated else "This feed has no research data.")
+            reason = ("News, earnings dates and fundamentals need real market data, and PaperDesk is showing simulated "
+                      "prices for fictional companies. docs/DATA_PROVIDERS.md explains how to connect a provider."
+                      if feed.simulated else "The market data provider in use has no news, calendar or fundamentals.")
             h = ResearchHub(simulated_reason=reason)
         if getattr(h, "simulated", False):
             h.clock = ctx.ex.now  # simulated research follows the exchange clock (also in a replay)

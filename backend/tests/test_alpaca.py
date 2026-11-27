@@ -530,7 +530,10 @@ def test_status_reports_source_and_staleness():
 
 # ---- the exchange round trip ------------------------------------------------------------------------
 def test_orders_fill_against_adapter_quotes():
-    feed, tr, wall = make_feed(t="2022-08-17T14:00:00Z")
+    # The documentation snapshot is from 06:18 New York time; re-timed to 09:59:58 so it is a current
+    # quote at the 10:00 test time (a 4-hour-old quote is stale and is not traded against).
+    snaps = raw("alpaca/stock_snapshots.json").replace("2022-08-17T10:18:27.052763263Z", "2022-08-17T13:59:58Z")
+    feed, tr, wall = make_feed(t="2022-08-17T14:00:00Z", routes=routes(**{"/v2/stocks/snapshots": snaps}))
     feed.load_assets()
     ex = Exchange(feed, SimClock(ts("2022-08-17T14:00:00Z")))
     acct = ex.create_account("Margin", "margin")

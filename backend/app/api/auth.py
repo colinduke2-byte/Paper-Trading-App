@@ -60,8 +60,25 @@ COOKIE = "paperdesk_session"
 MIN_PASSCODE = 8
 MAX_PASSCODE = 1024
 MAX_REQUEST_BODY = 1024 * 1024  # bytes; the largest legitimate body (chart state) is capped at 256 KB
+# Backup uploads (PR 19) are larger. Their routes stream the body with these hard limits themselves
+# (routes_data._body), so here only the declared length is checked and the body is not buffered twice.
+from ..storage.archive import MAX_ACCOUNT_UPLOAD, MAX_UPLOAD  # noqa: E402
+UPLOAD_LIMITS = {"/api/data/restore/preview": MAX_UPLOAD, "/api/data/accounts/import/preview": MAX_ACCOUNT_UPLOAD}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 PUBLIC_API = {"/api/auth/login", "/api/auth/logout", "/api/auth/state", "/print.js"}
+# Files of the UI build served at the site root for installing PaperDesk on a home screen, with their media types.
+# The only root files served besides index.html; public in every mode, because the browser fetches them without
+# cookies (the manifest) or before signing in (icons), and they hold nothing private: a fixed manifest and icons.
+PUBLIC_STATIC = {
+    "/manifest.webmanifest": "application/manifest+json",
+    "/favicon.ico": "image/x-icon",
+    "/favicon.svg": "image/svg+xml",
+    "/apple-touch-icon.png": "image/png",
+    **{f"/icons/{n}": "image/png" for n in ("icon-16.png", "icon-32.png", "icon-192.png", "icon-512.png",
+                                              "maskable-192.png", "maskable-512.png")},
+    "/icons/mark.svg": "image/svg+xml",
+    "/icons/mark-maskable.svg": "image/svg+xml",
+}
 # /print.js: the CSP forbids inline handlers (onclick=...), so server-rendered pages such as printable
 # statements use <button type="button" data-print>Print</button><script src="/print.js"></script>.
 PROXY_HEADERS = {b"forwarded", b"x-forwarded-for", b"x-real-ip", b"via", b"x-forwarded-host", b"x-forwarded-proto"}
@@ -598,11 +615,21 @@ class AccessMiddleware:
                 send = self._watch_session(send, token)
             return await self.app(scope, receive, send)
 
-        bounded = await self._bounded_body(receive, headers)
-        if bounded is None:
-            return await self._refuse(scope, receive, send, 413,
-                                      f"The request is too large: at most {MAX_REQUEST_BODY // 1024} KB is accepted.")
-        receive = bounded
+        upload = UPLOAD_LIMITS.get(path)
+        if upload is not None:
+            try:
+                declared = int(headers.get("content-length") or 0)
+            except ValueError:
+                declared = upload + 1
+            if declared > upload:
+                return await self._refuse(scope, receive, send, 413,
+                                          f"The file is too large: at most {upload // (1024 * 1024)} MB is accepted.")
+        else:
+            bounded = await self._bounded_body(receive, headers)
+            if bounded is None:
+                return await self._refuse(scope, receive, send, 413,
+                                          f"The request is too large: at most {MAX_REQUEST_BODY // 1024} KB is accepted.")
+            receive = bounded
 
         secure = scope.get("scheme") == "https"
         refresh = bool(token) and acc.sessions.needs_cookie_refresh(token)

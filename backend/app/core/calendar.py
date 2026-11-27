@@ -76,8 +76,17 @@ def close_time(d: date) -> time:
     return EARLY_CLOSE if is_early_close(d) else CLOSE
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def utc_datetime(ts: float) -> datetime:
+    """UTC datetime for a UNIX timestamp. Unlike datetime.fromtimestamp this works on Windows for
+    timestamps in the first day after the epoch and for negative ones."""
+    return _EPOCH + timedelta(seconds=ts)
+
+
 def ny_datetime(ts: float) -> datetime:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(NY)
+    return utc_datetime(ts).astimezone(NY)
 
 
 def ny_date(ts: float) -> date:

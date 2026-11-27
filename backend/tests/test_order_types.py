@@ -358,7 +358,7 @@ def test_new_order_type_validation_messages():
            (dict(o, triggers=[{"side": "buy", "type": "limit", "limit_price": "90"}]), "must close the entry"),
            (dict(o, triggers=[{"symbol": "XYZ", "type": "limit", "limit_price": "90"}]), "unknown symbol XYZ"),
            (dict(o, triggers=[{"type": "limit", "limit_price": "110"}, {"type": "stop", "stop_price": "90"}]),
-            "must be one-cancels-other"),
+            "must cancel each other"),
            (dict(o, take_profit="110", triggers=[lim]), "cannot also carry take profit"),
            ("nonsense", "must be a JSON object")]
     for req, msg in bad:

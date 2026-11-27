@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, navDefaults } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 // Chart state under passcode access (auth-desktop project; the second server has a passcode and no loopback
@@ -35,7 +35,7 @@ test("chart settings and drawings save and reload when signed in", async ({ page
 
   // Another browser profile (no local cache) signs in and gets the same state from the server.
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, baseURL: new URL(page.url()).origin });
-  const other = await ctx.newPage();
+  const other = navDefaults(await ctx.newPage());
   const errors: string[] = [];
   other.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
   await signIn(other);

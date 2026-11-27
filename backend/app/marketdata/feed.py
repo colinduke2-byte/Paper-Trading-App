@@ -2,8 +2,9 @@
 from collections import deque
 from dataclasses import replace
 from decimal import Decimal
-from typing import Optional
+from typing import NamedTuple, Optional
 
+from ..core.assets import round_to, spec_from_info
 from ..core.models import Quote
 from ..core.money import CENT, ZERO, D, cents
 
@@ -54,6 +55,14 @@ def _aggregate(rows: list, seconds: int, offset: int = 0) -> list:
         else:
             out.append([t, r[1], r[2], r[3], r[4], r[5]])
     return out
+
+
+class ClosePrice(NamedTuple):
+    """Result of MarketDataProvider.closing_price. `ready` False: asked for, not known yet (ask again later).
+    `ready` True with `price` None: there is no close for that day (not a trading day, no trades, no data)."""
+    ready: bool
+    price: Optional[Decimal]
+    note: str = ""
 
 
 class MarketDataProvider:
@@ -114,11 +123,18 @@ class MarketDataProvider:
         if q is None:
             return {"simulated": True, "bids": [], "asks": []}
         tick = CENT if q.last < 50 else CENT * (1 + int(q.last / 100))
+        size_step = Decimal(1)
+        info = self.info.get(symbol) or {}
+        if info.get("type") == "crypto":  # finer prices and fractional sizes
+            spec = spec_from_info(symbol, info)
+            tick = max(spec.price_increment, round_to(q.last * Decimal("0.0002"), spec.price_increment))
+            size_step = spec.qty_increment
+        sz = (lambda v: v.quantize(Decimal(1))) if size_step == 1 else (lambda v: round_to(v, size_step))
         bids, asks = [], []
         for i in range(levels):
             scale = Decimal(1) + Decimal(i) * Decimal("0.6") + Decimal((hash((symbol, i, int(q.ts) // 5)) % 7)) / 10
-            bids.append({"price": q.bid - tick * i, "size": (q.bid_size * scale).quantize(Decimal(1))})
-            asks.append({"price": q.ask + tick * i, "size": (q.ask_size * scale).quantize(Decimal(1))})
+            bids.append({"price": q.bid - tick * i, "size": sz(q.bid_size * scale)})
+            asks.append({"price": q.ask + tick * i, "size": sz(q.ask_size * scale)})
         return {"simulated": True, "bids": [b for b in bids if b["price"] > 0], "asks": asks}
 
     def _record_print(self, q: Quote) -> None:
@@ -145,6 +161,21 @@ class MarketDataProvider:
     def option_chain(self, underlying: str, expiry, now: float) -> Optional[dict]:
         """Provider chain in the shape of options.chain.chain(), or None to use the model."""
         return None
+
+    lists_options = False  # True for a feed whose option_listing() fetches the provider's real contracts
+
+    def option_listing(self, underlying: str, fetch: bool = True) -> Optional[dict]:
+        """{expiry date: set of strike Decimals} the provider lists, or None to use the model calendar.
+        With fetch=False only what is already cached is returned (for code on the tick path)."""
+        return None
+
+    def quote_note(self, symbol: str) -> Optional[dict]:
+        """{"stale": bool, "note": text} when the price shown for symbol needs explaining, else None."""
+        return None
+
+    def no_price_reason(self, symbol: str) -> str:
+        """Plain sentence: why there is no quote for symbol."""
+        return f"no quote available for {symbol}"
 
     def event_variance(self, symbol: str, expiry_ts: float, now: float) -> float:
         """Extra variance (log return squared) the option model adds for scheduled events, such as an
@@ -218,7 +249,7 @@ class SimFeed(MarketDataProvider):
             adjust_for_split(self, action)
 
     def set_quote(self, symbol: str, bid, ask, last=None, bid_size=1000, ask_size=1000, last_size=100,
-                  trade: bool = True, ts: float = 0.0) -> Quote:
+                  trade: bool = True, ts: float = 0.0, provider_book: bool = False) -> Quote:
         bid, ask = D(bid), D(ask)
         last = D(last) if last is not None else ask
         prev = self.quotes.get(symbol)
@@ -226,7 +257,8 @@ class SimFeed(MarketDataProvider):
                   last_size=D(last_size) if trade else ZERO, ts=ts, trade=trade,
                   volume=(prev.volume if prev else ZERO) + (D(last_size) if trade else ZERO),
                   open=prev.open if prev else last, high=max(prev.high, last) if prev else last,
-                  low=min(prev.low, last) if prev else last, prev_close=prev.prev_close if prev else last)
+                  low=min(prev.low, last) if prev else last, prev_close=prev.prev_close if prev else last,
+                  provider_book=provider_book)
         self.info.setdefault(symbol, {"symbol": symbol, "name": symbol, "sector": "Test", "vol": 0.3})
         self.quotes[symbol] = q
         self._pending.append(q)

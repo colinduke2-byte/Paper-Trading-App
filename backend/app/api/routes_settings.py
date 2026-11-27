@@ -19,16 +19,14 @@ def register(app, ctx):
         ex = ctx.ex
         a = ex.account(aid)
         changes = body.get("settings", body) if isinstance(body, dict) else body
-        a.settings = cfg.update(a.settings, changes)
-        ex.dirty = True
+        ex.update_settings(aid, changes)  # validates; refuses a crypto fee rise open crypto buys cannot pay
         return _settings_view(a)
 
     @app.post("/api/accounts/{aid}/settings/reset")
     def reset_settings(aid: str):
         ex = ctx.ex
         a = ex.account(aid)
-        a.settings = cfg.defaults()
-        ex.dirty = True
+        ex.update_settings(aid, cfg.defaults())
         return _settings_view(a)
 
     @app.get("/api/accounts/{aid}/lifecycle")

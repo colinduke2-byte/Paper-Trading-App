@@ -72,7 +72,7 @@ class SimResearch:
         return float(self.clock() if now is None else now)
 
     def stocks(self) -> list:
-        return [s for s, i in self.feed.info.items() if i.get("type", "stock") != "etf"]
+        return [s for s, i in self.feed.info.items() if i.get("type", "stock") not in ("etf", "crypto")]
 
     def profile(self, symbol: str) -> Profile:
         i = self.feed.info[symbol]
@@ -190,7 +190,7 @@ class SimResearch:
 
     def upcoming_releases(self, symbol: str, after: float, until: float) -> list:
         """(ts, k) of earnings reports for `symbol` with after < ts <= until."""
-        if symbol not in self.feed.info or self.feed.info[symbol].get("type") == "etf":
+        if symbol not in self.feed.info or self.feed.info[symbol].get("type") in ("etf", "crypto"):
             return []
         p = self.profile(symbol)
         out = []
@@ -227,6 +227,8 @@ class SimResearch:
             return out
         for e in macro.releases(self.seed, start, end):
             for s in self.feed.info:
+                if self.feed.info[s].get("type") == "crypto":
+                    continue  # the (fictional) coins do not react to stock-market releases
                 out[s] = out.get(s, 0.0) + self.beta(s) * e["market_move"]
         for s in self.stocks():
             for _, k in self.upcoming_releases(s, start, end):
@@ -467,6 +469,7 @@ def for_replay(feed) -> Optional[SimResearch]:
     """Simulated research for a replay of synthetic data (fictional symbols only), else None."""
     from ..synthetic import UNIVERSE
     known = {u[0] for u in UNIVERSE}
-    if not feed.simulated or not feed.info or not set(feed.info) <= known:
+    stocks = {s for s, i in (feed.info or {}).items() if i.get("type") != "crypto"}
+    if not feed.simulated or not stocks or not stocks <= known:
         return None
     return SimResearch(feed, seed_from_source(getattr(feed, "source", ""), getattr(feed, "source", "") or "replay"))
