@@ -154,6 +154,9 @@ UNLOCKED_READS = {
     # backups (PR 19): file I/O must not run under the lock; they take ctx.locked() only to serialise
     "/api/data/status", "/api/data/backups", "/api/data/backups/{name}", "/api/data/export",
     "/api/data/accounts/{aid}/export", "/api/data/recovery",
+    # discovery (PR 20): may ask the provider, or reads its own file; exchange state under a short ctx.locked()
+    "/api/watchlist-sets/{name}/rows", "/api/search", "/api/search/recent", "/api/screener/fields", "/api/screens",
+    "/api/markets/overview", "/api/compare",
 }
 SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_every_changing_route_answers_busy...
     ("POST", "/api/replay/start"), ("POST", "/api/replay/step"), ("POST", "/api/replay/seek"), ("POST", "/api/replay/exit"),
@@ -166,6 +169,8 @@ SELF_LOCKING_WRITES = {  # take ctx.lock themselves, in pieces: proven by test_e
 }
 NO_EXCHANGE_STATE = {  # the session store and the chart-state file have their own locks
     ("POST", "/api/auth/login"), ("POST", "/api/auth/logout"),
+    ("POST", "/api/search/recent"), ("POST", "/api/screener/run"), ("POST", "/api/screens"),  # discovery's own store
+    ("PUT", "/api/screens/{sid}"), ("DELETE", "/api/screens/{sid}"),
     ("PUT", "/api/chartstate/settings"), ("PUT", "/api/chartstate/drawings/{sym:path}"), ("DELETE", "/api/chartstate"),
 }
 
@@ -199,7 +204,7 @@ def test_every_api_route_runs_under_the_lock_unless_listed_here():
 
 def fill_path(path: str, aid: str) -> str:
     for name, value in (("{aid}", aid), ("{symbol}", "MKTX"), ("{oid}", "O00000001"), ("{month}", "2026-11"),
-                        ("{kind}", "fills"), ("{jid}", "J1"), ("{alert_id}", "AL00001"), ("{name}", "Main"),
+                        ("{kind}", "fills"), ("{jid}", "J1"), ("{alert_id}", "AL00001"), ("{name}", "Main"), ("{sid}", "S1"),
                         ("{sym:path}", "MKTX"), ("{symbol:path}", "MKTX"), ("{sym}", "MKTX")):
         path = path.replace(name, value)
     assert "{" not in path, f"give fill_path a value for {path}"
@@ -222,7 +227,7 @@ def test_every_changing_route_answers_busy_while_the_lock_is_stuck(monkeypatch, 
                 continue
             url = fill_path(path, sandbox)
             body = {"session": SESSION.split(".")[0], "offset": 600, "seconds": 5}
-            r = c.request(method, url, json=[] if path.startswith("/api/watchlists") else body,
+            r = c.request(method, url, json=[] if path.startswith(("/api/watchlists", "/api/watchlist-order")) else body,
                           params={"account_id": sandbox})
             if path == "/api/replay/start":  # refused before it needs the lock; checked without a replay below
                 assert r.status_code == 409
@@ -359,6 +364,9 @@ def test_no_route_asks_the_data_provider_while_holding_the_lock():
     # The poller thread learns what to fetch through the lock, and gets the last list while the lock is busy.
     ctx = app.state.ctx
     assert feed.interest_source == ctx.live_interest and "AAPL" in feed.wanted()
+    # Discovery (PR 20) streams only lists shown recently while any is shown; the route sweep above showed
+    # "Main", so forget that here: this test is about the lock, not about which lists are streamed.
+    app.state.discovery["shown"].clear()
     with Holder(ctx.lock):
         ex.watchlists["Later"] = ["MSFT"]
         t0 = time.monotonic()

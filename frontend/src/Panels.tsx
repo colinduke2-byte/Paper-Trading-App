@@ -6,6 +6,7 @@ import { Reports } from "./Reports";
 import { Lots } from "./Lots";
 import { OrdersTable, PositionsTable } from "./OrdersView";
 import { api, compact, dateTime, money, numText, pct, price, qty, signed, tone } from "./util";
+import { Screener } from "./Screener";
 
 const TABS = ["Positions", "Lots", "Orders", "Fills", "Activity", "Reports", "Alerts", "Screener"];
 
@@ -33,7 +34,7 @@ export function BottomPanel(p: {
         {tab === "Activity" && <Activity {...p} />}
         {tab === "Reports" && <Reports accountId={p.accountId} refreshKey={p.refreshKey} notify={p.notify} orders={p.orders} />}
         {tab === "Alerts" && <AlertsTab {...p} />}
-        {tab === "Screener" && <Screener {...p} />}
+        {tab === "Screener" && <Screener onSelect={p.onSelect} notify={p.notify} />}
       </div>
     </section>
   );
@@ -81,41 +82,3 @@ function Activity({ accountId, refreshKey }: any) {
   );
 }
 
-function Screener({ onSelect }: any) {
-  const [f, setF] = useState({ asset_class: "", sector: "", min_price: "", max_price: "", min_change_pct: "", max_pe: "", min_dividend_yield: "" });
-  const qs = Object.entries(f).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${encodeURIComponent(k === "sector" || k === "asset_class" ? v : numText(v))}`).join("&");
-  const [rows, error] = usePoll<any[]>(`/screener?${qs}`, 5000);
-  const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
-  const num = (k: string, label: string) => <input key={k} value={(f as any)[k]} placeholder={label} aria-label={label} inputMode="decimal" onChange={set(k)} style={{ width: 110 }} />;
-  return (
-    <>
-      <div className="toolbar">
-        <select value={f.asset_class} aria-label="Asset class" onChange={set("asset_class")}>
-          <option value="">All asset classes</option><option value="stock">Stocks and funds</option><option value="crypto">Crypto</option>
-        </select>
-        <select value={f.sector} aria-label="Sector" onChange={set("sector")}>
-          <option value="">All sectors</option>
-          {["Technology", "Health Care", "Financials", "Energy", "Consumer", "Industrials", "Utilities", "Communication", "ETF"].map((s) => <option key={s}>{s}</option>)}
-        </select>
-        {num("min_price", "Min price")}{num("max_price", "Max price")}{num("min_change_pct", "Min change %")}{num("max_pe", "Max P/E")}{num("min_dividend_yield", "Min yield %")}
-      </div>
-      {error && <div className="notice bad">Screener filters are not valid: {error}</div>}
-      {rows && rows.length === 0 && <p className="muted pad">No symbols match these filters.</p>}
-      {rows && rows.length > 0 && (
-        <table>
-          <thead><tr><th>Symbol</th><th>Name</th><th>Sector</th><th className="num">Last</th><th className="num">Chg %</th><th className="num">Volume</th>
-            <th className="num">P/E</th><th className="num">Yield</th><th className="num">Mkt cap</th></tr></thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.symbol} className="click" onClick={() => onSelect(r.symbol)}>
-                <td><b>{r.symbol}</b></td><td>{r.name}</td><td className="muted">{r.sector}</td><td className="num">{price(r.last)}</td>
-                <td className={"num " + tone(r.change_pct)}>{pct(r.change_pct)}</td><td className="num">{compact(r.volume)}</td>
-                <td className="num">{r.pe == null ? "–" : r.pe.toFixed(1)}</td><td className="num">{r.dividend_yield_pct.toFixed(2)}%</td>
-                <td className="num">{r.asset_class === "crypto" ? "–" : compact(r.market_cap)}</td></tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </>
-  );
-}

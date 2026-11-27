@@ -120,13 +120,25 @@ def baselines(aid, oid, jid, calls):
         ("POST", "/api/data/recovery/restore"): {"backup": "paperdesk-manual-20261124T000000Z.zip"},
         ("POST", "/api/data/recovery/fresh"): None,
         ("POST", "/api/data/recovery/quit"): None,
+        # discovery (routes_discovery.py, PR 20)
+        ("POST", "/api/watchlist-sets"): {"name": "Fuzz", "symbols": ["NVLX"], "layout": {}},
+        ("PATCH", "/api/watchlist-sets/Fuzz"): {"name": "Fuzz", "symbols": ["NVLX"], "columns": ["last"]},
+        ("POST", "/api/watchlist-sets/Fuzz/duplicate"): {"name": "Fuzz copy"},
+        ("DELETE", "/api/watchlist-sets/Fuzz"): None,
+        ("PUT", "/api/watchlist-order"): ["Main"],
+        ("POST", "/api/watchlist-sets/Fuzz/symbols"): {"symbols": ["NVLX"], "at": "end"},
+        ("POST", "/api/search/recent"): {"symbol": "NVLX"},
+        ("POST", "/api/screener/run"): {"filters": [{"field": "last", "min": 1}], "sort": "symbol", "desc": False, "limit": 10},
+        ("POST", "/api/screens"): {"name": "S", "filters": [], "sort": None, "desc": True, "columns": []},
+        ("PUT", "/api/screens/SCID"): {"name": "S", "filters": [], "sort": None, "desc": True, "columns": []},
+        ("DELETE", "/api/screens/SCID"): None,
     }
 
 
 def _template(path, aid, oid, jid):
     return path.replace(aid, "{aid}").replace(oid, "{oid}").replace(jid, "{jid}").replace("/Fuzz", "/{name}") \
         .replace("/AL99999", "/{alert_id}").replace("/ALID", "/{alert_id}").replace("/drawings/NVLX", "/drawings/{sym:path}") \
-        .replace("/backups/BKNAME", "/backups/{name}")
+        .replace("/backups/BKNAME", "/backups/{name}").replace("/screens/SCID", "/screens/{sid}")
 
 
 def variants(body):

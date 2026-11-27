@@ -3,7 +3,10 @@ import { Dialog } from "./Dialog";
 import { FeedNotice } from "./FeedNotice";
 import { Chart, SHORTCUTS_EVENT } from "./Chart";
 import { Shortcuts } from "./chart/Shortcuts";
-import { Company, DepthTape, OptionChain, QuoteHeader, usePoll, Watchlist } from "./Market";
+import { Company, DepthTape, OptionChain, QuoteHeader, usePoll } from "./Market";
+import { Watchlists } from "./Watchlists";
+import { Markets } from "./Markets";
+import { Compare } from "./Compare";
 import { BottomPanel } from "./Panels";
 import { feedBanner, Research } from "./Research";
 import { Ticket, TicketSeed } from "./Ticket";
@@ -73,9 +76,8 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [list, wl] = await Promise.all([loadAccounts(), api("/watchlists")]);
+        const list = await loadAccounts(); // the Watchlists panel loads the lists and reports the visible one
         if (!list.find((a: any) => a.id === accountId)) setAccountId(list[0]?.id || "");
-        setWatch(wl.Main || Object.values(wl)[0] || []);
       } catch (e: any) {
         setFatal(`Cannot reach the PaperDesk server (${e.message}). Check that it is running, then reload.`);
       }
@@ -138,17 +140,11 @@ export default function App() {
   useEffect(() => { loadOrders(); }, [refreshKey]);
   useEffect(() => { const t = setInterval(loadOrders, 10000); return () => clearInterval(t); }, [loadOrders]);
 
-  const saveWatch = (list: string[]) => {
-    setWatch(list);
-    api("/watchlists/Main", { method: "PUT", body: list }).catch((e) => notify(`Could not save the watchlist: ${e.message}`, true));
-  };
-
   // Switching between live and replay changes the active exchange: reload what belongs to it.
   useModeSwitch(status, async () => {
     const [list, wl, syms] = await Promise.all([loadAccounts(), api("/watchlists"), api("/symbols")]).catch(() => [[], {}, []]);
     setAccountId((cur) => (list.find((a: any) => a.id === cur) ? cur : list[0]?.id || ""));
-    const main = wl.Main || Object.values(wl)[0] || [];
-    setWatch(main);
+    const main: string[] = (wl.Main || Object.values(wl)[0] || []) as string[];
     setSymbol((cur) => (syms.some((x: any) => x.symbol === cur) ? cur : main[0] || syms[0]?.symbol || cur));
     setRefreshKey((k) => k + 1);
   });
@@ -235,14 +231,16 @@ export default function App() {
     </>
   ) : null;
   const saveNotice = <SaveNotice storage={status?.storage} />;
-  const watchlist = <Watchlist symbols={watch} quotes={quotes} selected={symbol} onSelect={pickSymbol} onChange={saveWatch} />;
+  const watchlist = <Watchlists quotes={quotes} positions={positions} selected={symbol} accountId={accountId} onSelect={pickSymbol}
+    onVisible={setWatch} notify={notify} />;
+  const openSymbol = (s: string) => { setView("Chart"); pickSymbol(s); }; // from the Markets and Compare views
   const quoteHeader = <QuoteHeader symbol={symbol} quote={quotes[symbol]} info={info} />;
   // A crypto pair has no options, company data or research: it shows Chart and About.
   const crypto = isCrypto(symbol);
-  const shown = crypto ? (view === "About" ? "About" : "Chart") : view === "About" ? "Chart" : view;
+  const shown = crypto ? (view === "About" || view === "Markets" ? view : "Chart") : view === "About" ? "Chart" : view;
   const mainTabs = (
     <div className="tabs" role="tablist">
-      {(crypto ? ["Chart", "About"] : ["Chart", "Options", "Company", "Research"]).map((v) => (
+      {(crypto ? ["Chart", "About", "Markets"] : ["Chart", "Options", "Company", "Research", "Markets", "Compare"]).map((v) => (
         <button key={v} role="tab" aria-selected={v === shown} className={v === shown ? "on" : ""} onClick={() => setView(v)}>{v}</button>
       ))}
     </div>
@@ -257,6 +255,8 @@ export default function App() {
       {shown === "Options" && <OptionChain symbol={symbol} onTrade={tradeOption} onStrategy={(legs) => openBuilder({ symbol, legs })} />}
       {shown === "Company" && <Company info={info} />}
       {shown === "Research" && <Research symbol={underlyingOf(symbol)} held={positions.map((p) => underlyingOf(p.symbol))} onSelect={setSymbol} />}
+      {shown === "Markets" && <Markets onSelect={openSymbol} small={small} />}
+      {shown === "Compare" && <Compare symbol={underlyingOf(symbol)} onSelect={openSymbol} />}
     </div>
   );
   const bottom = accountId && (

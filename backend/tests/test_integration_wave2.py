@@ -219,3 +219,28 @@ def test_linked_orders_cannot_name_tax_lots_and_reserve_nothing():
     with pytest.raises(OrderRejected, match="one-triggers-other"):
         ex.submit(a, dict(sell, type="limit", limit_price="200", triggers=[{"side": "buy", "type": "limit", "limit_price": "90"}], **lot))
     assert ex.reserved_lots(a) == {} and not [o for o in ex.engine.orders.values() if o.active]
+
+
+# ---- discovery (PR 20) x crypto (PR 14) x thread safety (PR 29) -----------------------------------------
+
+def test_watchlist_rows_show_a_crypto_position_and_the_screener_filters_crypto(tmp_path):
+    c, app, ex = make_app(tmp_path)
+    aid = list(ex.accounts)[0]
+    coin = next(s for s in ex.feed.symbols() if "/" in s)
+    assert c.post(f"/api/accounts/{aid}/orders", json={"symbol": coin, "side": "buy", "qty": "0.01"}).status_code == 200
+    assert c.post("/api/watchlist-sets", json={"name": "Coins", "symbols": [coin, "MKTX"]}).status_code == 200
+    rows = c.get("/api/watchlist-sets/Coins/rows", params={"account": aid}).json()["rows"]
+    by = {r["symbol"]: r for r in rows}
+    assert D(str(by[coin]["position_qty"])) == D("0.01") and by["MKTX"]["position_qty"] is None
+    r = c.post("/api/screener/run", json={"filters": [{"field": "type", "in": ["crypto"]}], "limit": 50}).json()
+    assert r["rows"] and all("/" in x["symbol"] for x in r["rows"])
+    assert any(x["symbol"] == coin for x in c.get("/api/search", params={"q": coin.split("/")[0], "types": "crypto"}).json())
+
+
+def test_watchlist_rows_answer_busy_instead_of_waiting_while_the_lock_is_stuck(monkeypatch, tmp_path):
+    monkeypatch.setattr(api_locking, "ROUTE_WAIT", 0.05)
+    c, app, ex = make_app(tmp_path)
+    with Holder(app.state.ctx.lock):
+        r = c.get("/api/watchlist-sets/Main/rows")
+        assert r.status_code == 503 and r.json()["busy"] is True
+        assert c.get("/api/markets/overview").status_code == 200  # market data only: no exchange lock needed
