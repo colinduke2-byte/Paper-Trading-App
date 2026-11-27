@@ -379,3 +379,10 @@ crossbrowser, uxpolish. Then one Opus release review, docs update (Sonnet), owne
   only on this branch). Integrator session_01ByytwYf74TQnjtG3k5yzNc watches CI and fixes.
   PHASE 4 started: release review (Opus) session_01ByytwZeY6oV1ktaeyhh6XJ, posts on PR 32.
   When PR 32 merges, close PRs 11, 13, 14, 17, 18, 19, 20 as included (owner may need to).
+- 07:49 UTC: PR 32 (integration wave 2 + release-review fixes) MERGED, main 2f00c49; all 12 checks
+  green incl. Firefox, WebKit, Edge, Windows. PHASES 3 AND 4 DONE. Known: Firefox e2e flake (#33),
+  uxpolish wording edits not merged (deferred). PRs 11, 13, 14, 17, 18, 19, 20, 25, 26 are included
+  in main: owner to close. stream/hardening-b can be deleted.
+  PHASE 5 started: docs worker (Sonnet) session_01ByytwcTC4TtgMUZdZTJGfs on stream/docs-v1.
+  After docs: phase 6 is the owner's (real Windows PC, phone, Alpaca keys), then tag v1.0 on the
+  owner's go.
